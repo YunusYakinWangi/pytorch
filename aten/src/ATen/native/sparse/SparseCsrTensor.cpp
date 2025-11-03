@@ -363,6 +363,9 @@ static SparseCsrTensor new_compressed_tensor(const TensorOptions& options) {
   case kCUDA:
     dispatch_key = DispatchKey::SparseCsrCUDA;
     break;
+  case kMPS:
+    dispatch_key = DispatchKey::SparseCsrMPS;
+    break;
   case kXPU:
     dispatch_key = DispatchKey::SparseCsrXPU;
     break;
