@@ -856,6 +856,81 @@ class TestMPS(TestCaseMPS):
         self.assertEqual(csr_roundtrip.layout, torch.sparse_csr)
         self.assertEqual(csr_roundtrip.to_dense(), expected_dense)
 
+    def test_sparse_csr_unary_ops(self):
+        def to_sparse_pair(dense_cpu):
+            cpu_sparse = dense_cpu.to_sparse_csr()
+            mps_sparse = cpu_sparse.to("mps")
+            return cpu_sparse, mps_sparse
+
+        def check_sparse_unary_op(dense, op, *, check_inplace=True, check_out=True):
+            dense_cpu = dense.to("cpu")
+            cpu_sparse, mps_sparse = to_sparse_pair(dense_cpu)
+
+            cpu_result = getattr(torch, op)(cpu_sparse)
+            mps_result = getattr(torch, op)(mps_sparse)
+            self.assertEqual(cpu_result.to_dense(), mps_result.to_dense().to("cpu"))
+
+            inplace_name = f"{op}_"
+            if check_inplace and hasattr(cpu_sparse, inplace_name):
+                cpu_in, mps_in = to_sparse_pair(dense_cpu)
+                getattr(cpu_in, inplace_name)()
+                getattr(mps_in, inplace_name)()
+                self.assertEqual(cpu_in.to_dense(), mps_in.to_dense().to("cpu"))
+
+            if check_out:
+                cpu_sparse_out, mps_sparse_out = to_sparse_pair(dense_cpu)
+                getattr(torch, op)(cpu_sparse, out=cpu_sparse_out)
+                getattr(torch, op)(mps_sparse, out=mps_sparse_out)
+                self.assertEqual(cpu_sparse_out.to_dense(), mps_sparse_out.to_dense().to("cpu"))
+
+        bounded_dense = torch.tensor(
+            [[0.1, -0.2, 0.4], [-0.6, 0.0, 0.8]],
+            dtype=torch.float32,
+        )
+        positive_dense = torch.tensor(
+            [[0.0, 0.2, 0.4], [0.6, 0.9, 1.1]],
+            dtype=torch.float32,
+        )
+        small_dense = bounded_dense * 0.25
+        special_dense = torch.tensor(
+            [[float("nan"), float("inf"), float("-inf")], [-0.0, 1.0, -1.0]],
+            dtype=torch.float32,
+        )
+
+        ops_to_test = [
+            ("asin", bounded_dense, True, True),
+            ("asinh", bounded_dense, True, True),
+            ("atan", bounded_dense, True, True),
+            ("atanh", bounded_dense, True, True),
+            ("erf", bounded_dense, True, True),
+            ("erfinv", bounded_dense, True, True),
+            ("expm1", bounded_dense, True, True),
+            ("log1p", bounded_dense, True, True),
+            ("sin", bounded_dense, True, True),
+            ("sinh", bounded_dense, True, True),
+            ("tan", small_dense, True, True),
+            ("tanh", bounded_dense, True, True),
+            ("deg2rad", bounded_dense, True, True),
+            ("rad2deg", bounded_dense, True, True),
+            ("ceil", bounded_dense, True, True),
+            ("floor", bounded_dense, True, True),
+            ("frac", bounded_dense, True, True),
+            ("round", bounded_dense, True, True),
+            ("sgn", bounded_dense, True, True),
+            ("sign", bounded_dense, True, True),
+            ("relu", bounded_dense, True, False),
+            ("sqrt", positive_dense, True, True),
+            ("angle", bounded_dense, False, True),
+            ("isnan", special_dense, False, False),
+            ("isinf", special_dense, False, False),
+            ("isposinf", special_dense, False, False),
+            ("isneginf", special_dense, False, False),
+            ("signbit", special_dense, False, False),
+        ]
+
+        for op, dense, check_inplace, check_out in ops_to_test:
+            check_sparse_unary_op(dense, op, check_inplace=check_inplace, check_out=check_out)
+
     def _testLeakyRelu(self, np_features, negative_slope, device):
         cpu_x = torch.from_numpy(np_features).requires_grad_()
         mps_x = torch.from_numpy(np_features).to('mps').requires_grad_()
