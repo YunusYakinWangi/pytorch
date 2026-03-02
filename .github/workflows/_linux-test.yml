@@ -460,7 +460,7 @@ jobs:
           aws-region: us-east-1
 
       - name: Upload the benchmark results
-        uses: pytorch/test-infra/.github/actions/upload-benchmark-results@release/2.10
+        uses: pytorch/test-infra/.github/actions/upload-benchmark-results@main
         if: inputs.build-environment != 'linux-s390x-binary-manywheel'
         with:
           benchmark-results-dir: test/test-reports
