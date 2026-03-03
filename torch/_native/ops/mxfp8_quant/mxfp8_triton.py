@@ -1,17 +1,19 @@
 import torch
-from typing import Optional, Tuple
+
 
 def triton_to_mxfp8_dim0(
     x: torch.Tensor,
     inner_block_size: int = 32,
     scaling_mode: str = "rceil",
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     if not torch.backends.triton.enabled:
         raise RuntimeError(
             "Triton native ops are disabled (torch.backends.triton.enabled = False)"
         )
     import triton
+
     from .mxfp8_triton_kernel import to_mxfp8_dim0_kernel
+
     """
     Input:
     * `x` - input tensor, in row major memory layout
@@ -41,9 +43,7 @@ def triton_to_mxfp8_dim0(
     )
 
     # Create output tensors
-    output = torch.empty(
-        (n_rows, n_cols), dtype=torch.float8_e4m3fn, device=x.device
-    )
+    output = torch.empty((n_rows, n_cols), dtype=torch.float8_e4m3fn, device=x.device)
 
     # Create scale tensors for rowwise scaling
     scale = torch.empty(
@@ -78,25 +78,32 @@ def triton_to_mxfp8_dim0(
         scale.view(torch.float8_e8m0fnu),
     )
 
+
 # torch.library.register_autograd(
 #     "mxfp8_quant::triton_to_mxfp8_dim0",
 #     None,
 #     setup_context=None,
 # )
 
+
 # @torch.library.register_fake("mxfp8_quant::triton_to_mxfp8_dim0")
 def _mxfp8_quant_fake(x, inner_block_size, scaling_mode):
     out = torch.empty(x.shape, dtype=torch.float8_e4m3fn)
-    sf = torch.empty((x.shape // 128, x.shape // inner_block_size), dtype=torch.float8_e8m0fnu)
+    sf = torch.empty(
+        (x.shape // 128, x.shape // inner_block_size), dtype=torch.float8_e8m0fnu
+    )
 
     return out, sf
 
+
 def register_to_dispatcher():
     # torch.library.triton_op("mxfp8_quant::triton_to_mxfp8_dim0", mutates_args={})(triton_to_mxfp8_dim0)
-    torch.library.custom_op("mxfp8_quant::triton_to_mxfp8_dim0", mutates_args={})(triton_to_mxfp8_dim0)
+    torch.library.custom_op("mxfp8_quant::triton_to_mxfp8_dim0", mutates_args={})(
+        triton_to_mxfp8_dim0
+    )
 
-    torch.library.register_autograd("mxfp8_quant::triton_to_mxfp8_dim0", None, setup_context=None)
+    torch.library.register_autograd(
+        "mxfp8_quant::triton_to_mxfp8_dim0", None, setup_context=None
+    )
 
     torch.library.register_fake("mxfp8_quant::triton_to_mxfp8_dim0")(_mxfp8_quant_fake)
-
-

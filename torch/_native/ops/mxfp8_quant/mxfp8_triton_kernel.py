@@ -1,6 +1,7 @@
 import triton
 import triton.language as tl
 
+
 @triton.jit
 def _triton_calculate_scale(x, axis, SCALING_MODE: tl.constexpr):
     # There is no good support for accessing globals from a jit'ed triton
@@ -42,9 +43,7 @@ def _triton_calculate_scale(x, axis, SCALING_MODE: tl.constexpr):
         # Calculate the e8m0 scale by extracting the exponent (floor)
         max_abs = max_abs.to(tl.bfloat16)
         max_abs_int16 = max_abs.to(tl.int16, bitcast=True)
-        extracted_pow2 = (
-            (max_abs_int16 >> bf16_mbits) & 0b11111111
-        ) - bf16_exp_bias
+        extracted_pow2 = ((max_abs_int16 >> bf16_mbits) & 0b11111111) - bf16_exp_bias
         extracted_pow2 = extracted_pow2 - target_max_pow2
         scale_e8m0_unbiased = extracted_pow2.to(tl.bfloat16)
 
@@ -72,6 +71,7 @@ def _triton_calculate_scale(x, axis, SCALING_MODE: tl.constexpr):
 
     return scale_fp, scale_e8m0_biased
 
+
 def _get_mxfp8_quant_autotune_configs():
     # Values to sweep over here were determined by a manual
     # sweep over a small set of shapes, it's likely that this
@@ -94,6 +94,7 @@ def _get_mxfp8_quant_autotune_configs():
                     )
                     results.append(config)
     return results
+
 
 @triton.autotune(
     configs=_get_mxfp8_quant_autotune_configs(),
@@ -167,9 +168,7 @@ def to_mxfp8_dim0_kernel(
 
     # Calculate scale offsets to write to
     scales_per_row = n_cols // SCALE_BLOCK_SIZE
-    scale_row_indices = (
-        pid_row * ROW_TILE_SIZE + tl.arange(0, ROW_TILE_SIZE)[:, None]
-    )
+    scale_row_indices = pid_row * ROW_TILE_SIZE + tl.arange(0, ROW_TILE_SIZE)[:, None]
     scale_col_indices = (
         pid_col * SCALE_BLOCKS_PER_COL_TILE
         + tl.arange(0, SCALE_BLOCKS_PER_COL_TILE)[None, :]
@@ -180,4 +179,3 @@ def to_mxfp8_dim0_kernel(
     scale_mask = (scale_row_indices < n_rows) & (scale_col_indices < scales_per_row)
     scale_e8m0_2d = scale_e8m0_r.reshape(ROW_TILE_SIZE, SCALE_BLOCKS_PER_COL_TILE)
     tl.store(scale_ptr + scale_offsets, scale_e8m0_2d, mask=scale_mask)
-
