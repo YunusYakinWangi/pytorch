@@ -4917,26 +4917,23 @@ std::tuple<Tensor, Tensor, Tensor> layer_norm_double_backward(
   auto input = input_t.reshape({M, N});
   auto gO = gO_t.reshape({M, N});
 
-  Tensor save_mean, save_invstd;
-  if (input.requires_grad()) {
-    // Recompute mean and invstd from input so that autograd can
-    // differentiate through them for higher-order (3rd+) gradients.
-    // The saved tensors have no autograd history connecting them to
-    // input, so using them directly makes autograd treat them as
-    // constants w.r.t. input.  The double backward formula gives
-    // correct second-order values but is not itself correctly
-    // differentiable without this.
-    save_mean = input.mean(1, true);
-    auto input_sub_mean = input - save_mean;
-    auto var = (input_sub_mean * input_sub_mean).mean(1, true);
-    // Recover eps from the saved invstd: invstd = 1/sqrt(var + eps)
-    // => eps = 1/invstd^2 - var.  Detach so eps is a constant.
-    auto eps = (save_invstd_t.reshape({M, 1}).pow(-2) -
-                var.detach()).detach();
-    save_invstd = (var + eps).rsqrt();
-  } else {
-    save_mean = save_mean_t.reshape({M, 1});
-    save_invstd = save_invstd_t.reshape({M, 1});
+  auto save_mean = save_mean_t.reshape({M, 1});
+  auto save_invstd = save_invstd_t.reshape({M, 1});
+  if (at::GradMode::is_enabled() && input.requires_grad()) {
+    // save_mean and save_invstd have no autograd history connecting them
+    // to input.  The double backward formula analytically accounts for
+    // their dependency, so second-order gradients are correct.  But
+    // autograd cannot differentiate through that dependency for 3rd+
+    // order derivatives.  Pass input through the DelayedError so the
+    // error node's edges connect back to input, and autograd raises a
+    // clear error instead of silently giving wrong results.
+    auto err = std::make_shared<DelayedError>(
+        "layer_norm double backward does not support 3rd+ order "
+        "derivatives.",
+        /* num inputs */ 3);
+    auto result = err->apply({save_mean, save_invstd, input});
+    save_mean = result[0];
+    save_invstd = result[1];
   }
 
   bool affine = isDefined(gamma);
