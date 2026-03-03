@@ -1054,7 +1054,11 @@ class TestViewOps(DTensorContinuousTestBase):
                 )
             if local_tensor_dims[shard_dim] % mesh.size(idx) != 0:
                 # uneven shard on last flattened dim is supported
-                self.assertTrue(_is_last_shard_in_flatten_range(idx, placements))
+                self.assertTrue(
+                    _is_last_shard_in_flatten_range(
+                        idx, placements, flatten_start, flatten_end
+                    )
+                )
                 local_tensor_dims[shard_dim] = math.ceil(
                     local_tensor_dims[shard_dim] * 1.0 / mesh.size(idx)
                 )
