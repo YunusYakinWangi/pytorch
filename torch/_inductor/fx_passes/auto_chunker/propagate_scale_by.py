@@ -135,11 +135,23 @@ def propagate_where(where_node: Node) -> bool:
     [
         aten.mul.Tensor,
         prims.convert_element_type.default,
+        aten.exp.default,
+        aten.log.default,
+        aten.tanh.default,
+        aten.neg.default,
         aten.sum.dim_IntList,
         aten.sum.default,  # sum to scalar
+        aten.amax.default,
         aten.mm.default,
         aten.permute.default,
         aten.expand.default,
+        aten.squeeze.dim,
+        aten.unsqueeze.default,
+        aten.gather.default,
+        aten.scatter.value,
+        aten.scatter_add.default,
+        aten.eq.Tensor,
+        aten.view.default,
     ]
 )
 def propagate_general_copy(out_node: Node) -> bool:
