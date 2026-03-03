@@ -829,15 +829,12 @@ class TestViewOps(DTensorContinuousTestBase):
         with comm_mode:
             inps_viewed = inps.view(viewed_tensor_dims)
         expected_placements = tuple([Replicate()] * mesh_ndim)
-        expected_local_tensor = (
-            distribute_tensor(
-                global_inps.view(viewed_tensor_dims),
-                mesh,
-                tuple([Replicate()] * mesh_ndim),
-            )
-            .redistribute(mesh, expected_placements)
-            ._local_tensor
-        )
+        expected_local_tensor = distribute_tensor(
+            global_inps.view(viewed_tensor_dims),
+            mesh,
+            expected_placements,
+            src_data_rank=None,
+        )._local_tensor
         self.assertEqual(inps_viewed.placements, expected_placements)
         self.assertEqual(inps_viewed._local_tensor, expected_local_tensor)
         self.assertEqual(comm_mode.get_total_counts(), 0)
@@ -1963,7 +1960,7 @@ class TestViewOps(DTensorContinuousTestBase):
         """
         mesh = init_device_mesh(self.device_type, (3, self.world_size // 3))
 
-        # [4, 6, 3] with [Shard(1), Shard(0)] on mesh (3, 2):
+        # [4, 6, 3] chosen so each sharded dim divides its mesh dim evenly:
         #   mesh_dim 0: Shard(1), dim 1 (6) / 3 = 2
         #   mesh_dim 1: Shard(0), dim 0 (4) / 2 = 2
         global_tensor = torch.arange(4 * 6 * 3).view(4, 6, 3)
