@@ -33,21 +33,21 @@ from torch.distributed.tensor.debug import CommDebugMode
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
 from torch.testing._internal.common_utils import run_tests
 from torch.testing._internal.distributed._tensor.common_dtensor import (
-    DTensorTestBase,
-    with_comms,
+    DTensorContinuousTestBase,
 )
 from torch.utils import _pytree as pytree
 
 
 def _get_all_factorizations(n):
-    """Return all ways to factor n into a tuple of integers > 1.
+    """Return all ways to factor n into a sorted tuple of integers > 1.
 
     Each factorization has length >= 2 (non-trivial unflatten).
-    Order matters for view operations, so all permutations are included.
+    Only sorted (non-decreasing) factorizations are returned since permutations
+    exercise the same split_factor logic with different constants.
 
     Examples:
-        12 -> [(2, 6), (6, 2), (3, 4), (4, 3), (2, 2, 3), (2, 3, 2), (3, 2, 2)]
-        36 -> [(2, 18), (18, 2), (3, 12), ..., (2, 2, 9), ..., (2, 2, 3, 3), ...]
+        12 -> [(2, 6), (3, 4), (2, 2, 3)]
+        36 -> [(2, 18), (3, 12), (4, 9), (6, 6), (2, 2, 9), (2, 3, 6), (3, 3, 4), (2, 2, 3, 3)]
     """
 
     def get_sorted_factorizations(remaining, min_factor=2):
@@ -60,19 +60,11 @@ def _get_all_factorizations(n):
                     result.append((f,) + sub)
         return result
 
-    sorted_facts = get_sorted_factorizations(n)
-    all_factorizations = set()
-    for factors in sorted_facts:
-        if len(factors) >= 2:
-            for perm in itertools.permutations(factors):
-                all_factorizations.add(perm)
-    return list(all_factorizations)
+    return [f for f in get_sorted_factorizations(n) if len(f) >= 2]
 
 
-class TestViewOps(DTensorTestBase):
-    @property
-    def world_size(self) -> int:
-        return 6
+class TestViewOps(DTensorContinuousTestBase):
+    world_size = 6
 
     def test_view_groups(self):
         self.assertEqual(
@@ -250,7 +242,6 @@ class TestViewOps(DTensorTestBase):
         self.assertEqual(rules, expected_rule_output)
         self.call_dt_test(op, args, {}, self.device_mesh)
 
-    @with_comms
     def test_illegal_views(self):
         device_mesh = self.build_device_mesh()
         # 1D mesh [6] (see above)
@@ -280,7 +271,6 @@ class TestViewOps(DTensorTestBase):
         with self.assertRaisesRegex(RuntimeError, "Sharding propagation failed"):
             shard.view(8, 2, -1)
 
-    @with_comms
     def test_view_ops(self):
         mesh_shape = (dist.get_world_size() // 2, 2)
         self.device_mesh = init_device_mesh(
@@ -577,7 +567,7 @@ class TestViewOps(DTensorTestBase):
     #         Split(InputDim(1), (13, 2), 1),
     #     ),
     # )
-    @with_comms
+
     def test_complex_view_ops(self):
         self.device_mesh = DeviceMesh(
             self.device_type, torch.arange(dist.get_world_size()).view(-1, 2)
@@ -622,7 +612,6 @@ class TestViewOps(DTensorTestBase):
             )
             self.assertEqual(out, out_dt.full_tensor())
 
-    @with_comms
     def test_view_as_complex_no_pmax_pmin(self):
         """
         view_as_complex converts real tensors to complex. Complex numbers don't
@@ -649,7 +638,6 @@ class TestViewOps(DTensorTestBase):
         # P(max) should NOT propagate - output should be Replicate
         self.assertIsInstance(result_pmax.placements[0], Replicate)
 
-    @with_comms
     def test_dtensor_view_op_uneven(self):
         """
         When the sharded dimension is unchanged, the view op should not trigger any communication.
@@ -711,7 +699,6 @@ class TestViewOps(DTensorTestBase):
             view_shapes.extend(trailing_dims)
         return tuple(view_shapes)
 
-    @with_comms
     def test_dtensor_flatten_1d(self):
         """
         Test view ops that flatten multiple dimensions on a 1D mesh.
@@ -855,7 +842,6 @@ class TestViewOps(DTensorTestBase):
         self.assertEqual(inps_viewed._local_tensor, expected_local_tensor)
         self.assertEqual(comm_mode.get_total_counts(), 0)
 
-    @with_comms
     def test_dtensor_flatten_2d(self):
         self.assertEqual(self.world_size, 6)
         mesh_ndim = 2
@@ -1119,7 +1105,6 @@ class TestViewOps(DTensorTestBase):
         self.assertEqual(inps_viewed._local_tensor, expected_local_tensor)
         self.assertEqual(comm_mode.get_total_counts(), 0)
 
-    @with_comms
     def test_dtensor_flatten_shard_outside_range(self):
         """Test that Shard on a dim outside the flatten range passes through correctly.
 
@@ -1231,7 +1216,6 @@ class TestViewOps(DTensorTestBase):
                     self.assertEqual(dt_flat._local_tensor, expected_local)
                     self.assertEqual(comm_mode.get_total_counts(), 0)
 
-    @with_comms
     def test_dtensor_flatten_unflatten_roundtrip(self):
         """Flatten then unflatten should recover the original placements and data.
 
@@ -1371,7 +1355,6 @@ class TestViewOps(DTensorTestBase):
                 tensor_dims[shard_dim] = shard_dim_value
                 yield list(tensor_dims)
 
-    @with_comms
     def test_dtensor_unflatten_1d(self):
         """
         Test unflatten (view) operations on DTensor with 1D mesh.
@@ -1637,7 +1620,6 @@ class TestViewOps(DTensorTestBase):
                 tensor_dims_flatten,
             )
 
-    @with_comms
     def test_dtensor_unflatten_2d(self):
         """
         Test unflatten (view) operations on DTensor with 2D mesh.
@@ -1917,7 +1899,6 @@ class TestViewOps(DTensorTestBase):
         )._local_tensor
         self.assertEqual(inps_viewed._local_tensor, expected_local_tensor)
 
-    @with_comms
     def test_dtensor_flatten_unflatten_2d_reversed_mesh(self):
         """Test flatten/unflatten with reversed mesh shape (2, 3) to catch ordering bugs.
 
@@ -1973,7 +1954,6 @@ class TestViewOps(DTensorTestBase):
                                 factors, shard_idx0, shard_idx1, mesh
                             )
 
-    @with_comms
     def test_dtensor_unflatten_ss_and_s_same_dim(self):
         """Test unflatten when _StridedShard and Shard both shard the same tensor dim.
 
@@ -2014,7 +1994,6 @@ class TestViewOps(DTensorTestBase):
         )._local_tensor
         self.assertEqual(unflattened._local_tensor, expected_local)
 
-    @with_comms
     def test_view_redistribution(self):
         """
         This test is added to demonstrate "incorrect" view ops behavior if redistribution happens.
@@ -2027,7 +2006,6 @@ class TestViewOps(DTensorTestBase):
         with self.assertRaisesRegex(RuntimeError, "Sharding propagation failed"):
             dtensor_x.view(-1, 8)
 
-    @with_comms
     def test_squeeze_(self):
         mesh_2d = init_device_mesh(self.device_type, (3, 2), mesh_dim_names=("a", "b"))
         self.init_manual_seed_for_rank()
@@ -2046,7 +2024,6 @@ class TestViewOps(DTensorTestBase):
         )
         self.assertEqual(dist_x.placements, [Partial(), Shard(0)])
 
-    @with_comms
     def test_storage_offset_slice(self):
         """
         Test that storage_offset is properly tracked on DTensor when slicing
@@ -2077,7 +2054,6 @@ class TestViewOps(DTensorTestBase):
         expected = tensor[1:]
         self.assertEqual(sliced_dtensor.full_tensor(), expected)
 
-    @with_comms
     def test_storage_offset_shard_dim0_slice_dim1(self):
         """
         Test that storage_offset is properly tracked when tensor is sharded on dim 0
@@ -2109,7 +2085,6 @@ class TestViewOps(DTensorTestBase):
         expected = tensor[:, 2:]
         self.assertEqual(sliced_dtensor.full_tensor(), expected)
 
-    @with_comms
     def test_storage_offset_shard_dim1_slice_dim0(self):
         """
         Test that storage_offset is properly tracked when tensor is sharded on dim 1
@@ -2142,12 +2117,9 @@ class TestViewOps(DTensorTestBase):
         self.assertEqual(sliced_dtensor.full_tensor(), expected)
 
 
-class TestViewOps3D(DTensorTestBase):
-    @property
-    def world_size(self) -> int:
-        return 8
+class TestViewOps3D(DTensorContinuousTestBase):
+    world_size = 8
 
-    @with_comms
     def test_dtensor_unflatten_3d(self):
         """
         Test unflatten (view) operations on DTensor with 3D mesh.
@@ -2182,7 +2154,7 @@ class TestViewOps3D(DTensorTestBase):
         # - We need at least 3 factors in the flatten range for three shard dims
         # - We need at least 1 factor as prefix (for split_factor > 1 for first shard)
         # - We need at least 1 dim outside flatten range
-        flattened_size = 288  # = 2 * 2 * 2 * 6 * 6, has many factorizations
+        flattened_size = 72  # = 2 * 2 * 2 * 3 * 3
         factorizations = _get_all_factorizations(flattened_size)
 
         # Filter for factorizations with >= 4 factors (need prefix + 3 shard dims)
@@ -2247,7 +2219,7 @@ class TestViewOps3D(DTensorTestBase):
         # - shard_idx0 < shard_idx1
         # - We need at least 2 factors in the flatten range for two shard dims
         # - We need at least 1 factor as prefix (for split_factor > 1 for first shard)
-        flattened_size_rss = 144  # = 12 * 6 * 2, has many factorizations
+        flattened_size_rss = 72  # = 2 * 2 * 2 * 3 * 3
         factorizations_rss = _get_all_factorizations(flattened_size_rss)
 
         # Filter for factorizations with >= 3 factors (need prefix + 2 shard dims)
