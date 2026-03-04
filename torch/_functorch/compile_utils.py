@@ -64,23 +64,23 @@ def _can_cse_across_mutation_regions(
     is_mutation_op_fn: Any,
 ) -> bool:
     """
-    Check if ``node`` can be safely CSE'd with ``prev_node`` despite being in
+    Check if node can be safely CSE'd with prev_node despite being in
     different mutation regions.
 
-    Mutation regions are a coarse-grained mechanism: *any* mutable op anywhere
+    Mutation regions are a coarse-grained mechanism: any mutable op anywhere
     in the graph increments the region counter for all subsequent nodes, even
     when the mutation is completely unrelated to the op being considered for
     CSE.  This helper performs a finer-grained check:
 
-    1. The op must be a non-mutable aten ``OpOverload`` (deterministic, no side
-       effects – its result depends only on its explicit inputs).
-    2. No mutation op between ``prev_node`` and ``node`` may write to a tensor
-       whose storage is aliased with any tensor input of ``node``.
+    1. The op must be a non-mutable aten OpOverload (deterministic, no side
+       effects, its result depends only on its explicit inputs).
+    2. No mutation op between prev_node and node may write to a tensor
+       whose storage is aliased with any tensor input of node.
 
     If both conditions hold, the intervening mutations cannot affect the op's
     result, so deduplication is safe.
     """
-    # Restrict to non-mutable aten ops – custom / higher-order ops may carry
+    # Restrict to non-mutable aten ops. Custom / higher-order ops may carry
     # hidden state that we cannot reason about.
     if not isinstance(node.target, torch._ops.OpOverload):
         return False
@@ -96,12 +96,12 @@ def _can_cse_across_mutation_regions(
             input_storage_ids.add(a.meta["val"].untyped_storage()._weak_ref())
 
     if not input_storage_ids:
-        # No tensor inputs – the op is trivially safe to merge.
+        # No tensor inputs, the op is trivially safe to merge.
         return True
 
     # Walk from prev_node to node and check every mutation op in between.
-    # If *any* argument of a mutation op shares storage with one of our
-    # inputs, the mutation could affect our result – bail out.
+    # If any argument of a mutation op shares storage with one of our
+    # inputs, the mutation could affect our result, so bail out.
     cur = prev_node.next
     while cur is not node:
         if cur.op == "call_function" and is_mutation_op_fn(cur):
@@ -147,27 +147,15 @@ def fx_graph_cse(fx_g: torch.fx.graph.Graph) -> fx.Graph:
             f"expected output_node.op to be 'output', got '{output_node.op}'"
         )
 
-    def checkable_node(node: fx.Node) -> bool:
-        """We can evaluate only nodes that represent tensors with defined storage."""
-        if "val" not in node.meta or not isinstance(node.meta["val"], torch.Tensor):
-            return False
-
-        try:
-            node.meta["val"].untyped_storage()
-        except NotImplementedError:
-            return False
-
-        return True
-
     output_storages = {
         StorageWeakRef(n.meta["val"].untyped_storage())
         for n in output_node.all_input_nodes
-        if checkable_node(n)
+        if _node_has_tensor_storage(n)
     }
     nodes_that_alias_outputs = {
         n
         for n in fx_g.nodes
-        if checkable_node(n)
+        if _node_has_tensor_storage(n)
         and StorageWeakRef(n.meta["val"].untyped_storage()) in output_storages
     }
 
@@ -249,7 +237,7 @@ def fx_graph_cse(fx_g: torch.fx.graph.Graph) -> fx.Graph:
                     n, old_node_for_hash[hash_val], is_mutation_op
                 ):
                     # The op is a non-mutable aten op and none of its tensor
-                    # inputs have been mutated between the two calls – safe to
+                    # inputs have been mutated between the two calls, safe to
                     # deduplicate even though unrelated mutations bumped the
                     # mutation region counter.
                     env[n] = duplicate_n_prev
