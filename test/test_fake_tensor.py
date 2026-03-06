@@ -1097,7 +1097,7 @@ class FakeTensorTest(TestCase):
         tensors with degenerate dimensions (H=1, W=1) that have ambiguous strides.
         This is a regression test for a bug where the Python implementation checked
         strides[d] > 1 instead of shape[d] > 1, causing incorrect channels_last
-        classification. See c10/core/MemoryFormat.h is_channels_last_strides_2d_s4.
+        classification. See c10/core/MemoryFormat.h is_channels_last_strides_2d_s4_or_false.
         """
         # Create a tensor that mimics the problematic case:
         # shape (1, 512, 1, 1) with strides (512, 1, 512, 1)
