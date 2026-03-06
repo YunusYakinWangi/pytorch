@@ -630,13 +630,13 @@ class FxGraphCachePickler(pickle.Pickler):
             return self._stream.getvalue()
         except (TypeError, AttributeError, pickle.PicklingError, ValueError) as e:
             # Some configs options may not pickle.
-            log.warning("Failed to pickle cache key", exc_info=True)
+            torch._dynamo.utils.warn_once(f"Failed to pickle cache key: {e}")
             raise BypassFxGraphCache("Failed to pickle cache key") from e
         except RuntimeError as e:
             # pybind11 raises RuntimeError with message like:
             # "<pybind11_builtins... object at 0x...> is not pickleable."
             if "pybind11" in str(e) and "is not pickleable" in str(e):
-                log.warning("Failed to pickle cache key", exc_info=True)
+                torch._dynamo.utils.warn_once(f"Failed to pickle cache key: {e}")
                 raise BypassFxGraphCache("Failed to pickle cache key") from e
             raise
         finally:
@@ -798,7 +798,17 @@ class FxGraphHashDetails:
         inputs_to_check: Sequence[int],
     ) -> None:
         self.gm = gm
-        self.example_inputs = example_inputs
+
+        # Filter out example_inputs for unused graph inputs (placeholders with no users
+        # that aren't graph outputs). Dead inputs don't affect compiled code and may
+        # contain unpicklable objects (e.g., DeviceMesh with circular refs).
+        # Guards should already be present to prevent cache misuse.
+        used_input_indices = []
+        for idx, node in enumerate(n for n in gm.graph.find_nodes(op="placeholder")):
+            if len(node.users) > 0:
+                used_input_indices.append(idx)
+
+        self.example_inputs = [example_inputs[i] for i in used_input_indices]
         self.cache_key_tag = cconfig.cache_key_tag
 
         # Order kwargs so hashing is stable to changes in kwarg order. Although
