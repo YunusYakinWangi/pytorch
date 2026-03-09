@@ -196,6 +196,22 @@ PLATFORM_SUPPORTS_FP8: bool = LazyVal(lambda: evaluate_platform_supports_fp8())
 PLATFORM_SUPPORTS_FP8_GROUPED_GEMM: bool = LazyVal(lambda: evaluate_platform_supports_fp8_grouped_gemm())
 PLATFORM_SUPPORTS_MXFP8_GROUPED_GEMM: bool = LazyVal(lambda: evaluate_platform_supports_mxfp8_grouped_gemm())
 
+
+def evaluate_platform_supports_fa3():
+    if not torch.cuda.is_available() or torch.version.cuda is None:
+        return False
+    return torch.cuda.get_device_capability()[0] == 9
+
+
+def evaluate_platform_supports_fa4():
+    if not torch.cuda.is_available() or torch.version.cuda is None:
+        return False
+    return torch.cuda.get_device_capability()[0] in (9, 10)
+
+
+PLATFORM_SUPPORTS_FA3: bool = LazyVal(lambda: evaluate_platform_supports_fa3())
+PLATFORM_SUPPORTS_FA4: bool = LazyVal(lambda: evaluate_platform_supports_fa4())
+
 if TEST_NUMBA:
     try:
         import numba.cuda

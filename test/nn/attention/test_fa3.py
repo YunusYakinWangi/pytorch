@@ -14,15 +14,13 @@ from torch.nn.attention.experimental._scaled_dot_product_attention_quantized imp
     DescaleType,
 )
 from torch.nn.attention.varlen import varlen_attn
+from torch.testing._internal.common_cuda import PLATFORM_SUPPORTS_FA3
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 
 def _fa3_dependencies_available() -> bool:
-    if not torch.cuda.is_available():
-        return False
-    major, _ = torch.cuda.get_device_capability(torch.cuda.current_device())
-    if major != 9:  # FA3 requires Hopper (SM90)
+    if not PLATFORM_SUPPORTS_FA3:
         return False
     try:
         importlib.import_module("flash_attn_interface")

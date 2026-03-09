@@ -10,15 +10,13 @@ import torch
 import torch.nn.functional as F
 from torch.backends.cuda import SDPBackend
 from torch.nn.attention import activate_flash_attention_impl, sdpa_kernel
+from torch.testing._internal.common_cuda import PLATFORM_SUPPORTS_FA4
 from torch.testing._internal.common_device_type import instantiate_device_type_tests
 from torch.testing._internal.common_utils import parametrize, run_tests, TestCase
 
 
 def _fa4_dependencies_available() -> bool:
-    if not torch.cuda.is_available():
-        return False
-    major, _ = torch.cuda.get_device_capability(torch.cuda.current_device())
-    if major not in (9, 10):
+    if not PLATFORM_SUPPORTS_FA4:
         return False
     try:
         importlib.import_module("flash_attn.cute.interface")
