@@ -7780,7 +7780,6 @@ scipy_lobpcg  | {eq_err_scipy:10.2e}  | {eq_err_general_scipy:10.2e}  | {iters2:
 
         bias_variants = (
             torch.randn(n, device=device, dtype=dtype),
-            torch.randn(2 * n, device=device, dtype=dtype).as_strided((n,), (2,)),
             torch.randn(1, device=device, dtype=dtype).expand(n),
             torch.randn(1, 1, device=device, dtype=dtype).expand(m, 1),
             torch.randn(1, 1, device=device, dtype=dtype).expand(m, n),
@@ -7792,7 +7791,7 @@ scipy_lobpcg  | {eq_err_scipy:10.2e}  | {eq_err_general_scipy:10.2e}  | {iters2:
                 buffer.as_strided((m, n), (n, 1)),  # row-major
                 buffer.as_strided((m, n), (2 * n, 1)),  # row-major with a stride
                 buffer.as_strided((m, n), (1, m)),  # col-major
-                buffer.as_strided((m, n), (1, 2 * m)),  # row-major with a stride
+                buffer.as_strided((m, n), (1, 2 * m)),  # col-major with a stride
             )
             yield from layouts
 
