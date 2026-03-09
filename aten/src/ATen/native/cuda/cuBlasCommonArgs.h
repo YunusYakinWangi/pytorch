@@ -202,27 +202,41 @@ struct cublasCommonArgs {
 
     // Whether bias broadcasts over rows/cols as per `bias + m1 @ m2` in PyTorch.
     // NOTE: cuBLASLt assumes "transposed" broadcasting when `bias` is a vector.
-    // row broadcast: bias is viewed as a 1D memory.
+    // row broadcast: bias is viewed as a 1D contiguous memory.
     const bool bias_row_broadcasts = (
-        transpose_result
-        && self->is_contiguous()
-        // shapes [1, ..., 1, m] are fine.
+        self->is_contiguous()
         && (
-          self->dim() >= 1
-          && self->sizes().end()[-1] == m
-          && self->numel() == m
+          (
+            // result is row-major. This implies a transposition trick
+            // which forces bias.shape[-1] == m (post transposition).
+            // shapes [1, ..., 1, m] are fine.
+            transpose_result
+            &&self->dim() >= 1
+            && self->sizes().end()[-1] == m
+            && self->numel() == m
+          )
+          || (
+            // result is col-major. This implies no transposition trick
+            // which forces bias.shape[-2:] == (m, 1).
+            // shapes [1, ..., m, 1] are fine.
+            !transpose_result
+            &&self->dim() >= 2
+            && self->sizes().end()[-1] == 1
+            && self->sizes().end()[-2] == m
+            && self->numel() == m
+          )
         )
     );
-    // col broadcast: bias is viewed as a 2D memory with the leading dimension 0.
+    // col broadcast: bias can be viewed as a 2D memory with the leading dimension 0.
+    const auto non_ld_len = transpose_result ? n : m;
     const bool bias_col_broadcasts = (
-        transpose_result
-        && self->is_contiguous()
-        // shapes [1, ..., 1, n, 1] are fine
+        self->is_contiguous()
+        // shapes [1, ..., 1, non_ld_len, 1] are fine
         && (
           self->dim() >= 2
           && self->sizes().end()[-1] == 1
-          && self->sizes().end()[-2] == n
-          && self->numel() == n
+          && self->sizes().end()[-2] == non_ld_len
+          && self->numel() == non_ld_len
         )
     );
     const bool can_use_bias_in_epilogue = (
