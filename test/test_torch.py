@@ -6816,6 +6816,23 @@ class TestTorch(TestCase):
             self.assertFalse(torch.logspace(torch.tensor(start, requires_grad=True), end, step).requires_grad)
             self.assertFalse(torch.logspace(start, torch.tensor(end, requires_grad=True), step).requires_grad)
 
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
+    def test_linspace_fp16_decomp(self):
+        # The eager linspace decomposition should exactly match the native
+        # CUDA kernel for reduced-precision types.
+        from torch._refs import linspace as linspace_decomp
+
+        for dtype in [torch.float16, torch.bfloat16]:
+            for steps in [8, 13, 32, 64, 128, 256]:
+                for start, end in [(-1, 1), (0, 10), (0.3, 0.7)]:
+                    native = torch.linspace(
+                        start, end, steps=steps, device="cuda", dtype=dtype
+                    )
+                    decomp = linspace_decomp(
+                        start, end, steps=steps, device="cuda", dtype=dtype
+                    )
+                    self.assertEqual(native, decomp, atol=0, rtol=0)
+
     # FIXME: move to shape ops test suite
     def test_unflatten(self):
         # test args: tensor, int, sizes

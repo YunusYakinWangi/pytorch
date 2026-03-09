@@ -5501,20 +5501,25 @@ def linspace(
     # Perform in arange in int because some backends like ATen or Triton do not support all the dtypes
     rg = torch.arange(0, steps, **factory_kwargs)  # type: ignore[arg-type]
 
-    # Small types need to be computed in higher precision as this is, at heart, an associative scan
     dtype_red = (
         torch.int64
         if (utils.is_boolean_dtype(dtype) or utils.is_integer_dtype(dtype))
         else dtype
     )
-    computation_dtype, _ = utils.reduction_dtypes(
-        rg, REDUCTION_OUTPUT_TYPE_KIND.SAME, dtype_red
-    )
-    cast_rg = partial(_maybe_convert_to_dtype, dtype=computation_dtype)
+    cast_rg = partial(_maybe_convert_to_dtype, dtype=dtype_red)
 
-    # We implement torch.lerp without performing rg / (steps - 1) explicitly
-    # With this we get out[0] == start, out[-1] == end
+    # Native CUDA/CPU kernels compute step in scalar_t; match that by
+    # converting start/end to the target dtype before computing step.
+    if isinstance(start, TensorLikeType):
+        start = _maybe_convert_to_dtype(start, dtype_red)
+    else:
+        start = torch.full((), start, dtype=dtype_red, device=device)
+    if isinstance(end, TensorLikeType):
+        end = _maybe_convert_to_dtype(end, dtype_red)
+    else:
+        end = torch.full((), end, dtype=dtype_red, device=device)
     step = (end - start) / (steps - 1)
+
     # pyrefly: ignore [no-matching-overload]
     out = torch.where(
         rg < steps / 2,
