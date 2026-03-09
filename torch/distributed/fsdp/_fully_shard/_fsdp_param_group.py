@@ -34,7 +34,6 @@ from ._fsdp_common import (
     FSDPMeshInfo,
     HSDPMeshInfo,
     is_bw,
-    make_fx_tracing_enabled,
     TrainingState,
 )
 from ._fsdp_param import (
@@ -59,6 +58,17 @@ _ModuleToHandleDict = dict[nn.Module, RemovableHandle]  # for state dict
 # A module-level _param_group_ctx is set by the caller to pass the
 # FSDPParamGroup instance, so the ops can delegate to original methods.
 # =============================================
+
+
+def _is_tracing() -> bool:
+    """Detect if we are inside torch.compile or make_fx tracing."""
+    if torch.compiler.is_compiling():
+        return True
+    # make_fx uses proxy tensor tracing which doesn't set is_compiling().
+    # Detect it via the active proxy tensor mode.
+    from torch.fx.experimental.proxy_tensor import get_proxy_mode
+
+    return get_proxy_mode() is not None
 
 
 # Set by _unshard_via_custom_op / _reshard_via_custom_op before calling the op
@@ -116,10 +126,16 @@ def _reshard_all(
     unshardeds: list[torch.Tensor],
     group_size: int,
     sharded_numels: list[int],
+    shard_rank: int,
 ) -> list[torch.Tensor]:
-    """Standalone reshard fallback (used when replaying traced graph)."""
+    """Standalone reshard fallback (used when replaying traced graph).
+
+    Extracts the local rank's shard from each unsharded param. After all-gather,
+    the flat layout is [rank0_shard, rank1_shard, ...], so we slice at offset
+    shard_rank * sharded_numel.
+    """
     return [
-        u.contiguous().view(-1)[:n].clone()
+        u.contiguous().view(-1)[shard_rank * n : (shard_rank + 1) * n].clone()
         for u, n in zip(unshardeds, sharded_numels)
     ]
 
@@ -128,6 +144,7 @@ def _reshard_all_fake(
     unshardeds: list[torch.Tensor],
     group_size: int,
     sharded_numels: list[int],
+    shard_rank: int,
 ) -> list[torch.Tensor]:
     return [u.new_empty(n) for u, n in zip(unshardeds, sharded_numels)]
 
@@ -144,7 +161,7 @@ def _reduce_scatter_all(
         output = torch.empty(
             sharded_numel, dtype=flat_grad.dtype, device=flat_grad.device
         )
-        dist.reduce_scatter_tensor(output, flat_grad)
+        dist.reduce_scatter_tensor(output, flat_grad, op=dist.ReduceOp.AVG)
         results.append(output)
     return results
 
@@ -190,14 +207,19 @@ def _pre_forward_op_setup_context(ctx, inputs, output):
     sharded_datas, group_size, orig_sizes_flat, orig_strides_flat, ndims = inputs
     ctx.group_size = group_size
     ctx.sharded_numels = [s.numel() for s in sharded_datas]
+    # Capture the param group context so post_backward can delegate to original impl
+    ctx._param_group_ctx = _param_group_ctx
 
 
 def _pre_forward_op_backward(ctx, *grad_outputs):
+    global _param_group_ctx
     # For list[Tensor] output, grad_outputs is (list_of_grads,)
     grads = grad_outputs[0] if len(grad_outputs) == 1 and isinstance(grad_outputs[0], list) else list(grad_outputs)
+    _param_group_ctx = ctx._param_group_ctx
     grad_shardeds = torch.ops.fsdp.post_backward(
         grads, ctx.group_size, ctx.sharded_numels,
     )
+    _param_group_ctx = None
     return grad_shardeds, None, None, None, None
 
 
@@ -213,12 +235,13 @@ def _post_forward_op(
     unshardeds: list[torch.Tensor],
     group_size: int,
     sharded_numels: list[int],
+    shard_rank: int,
 ) -> list[torch.Tensor]:
     pg = _param_group_ctx
     if pg is not None:
         pg.reshard()
         return [fp._sharded_param_data for fp in pg.fsdp_params]
-    return _reshard_all(unshardeds, group_size, sharded_numels)
+    return _reshard_all(unshardeds, group_size, sharded_numels, shard_rank)
 
 
 @_post_forward_op.register_fake
@@ -226,8 +249,9 @@ def _post_forward_op_fake(
     unshardeds: list[torch.Tensor],
     group_size: int,
     sharded_numels: list[int],
+    shard_rank: int,
 ) -> list[torch.Tensor]:
-    return _reshard_all_fake(unshardeds, group_size, sharded_numels)
+    return _reshard_all_fake(unshardeds, group_size, sharded_numels, shard_rank)
 
 
 # -- fsdp::pre_backward: all-gather in backward --
@@ -688,7 +712,7 @@ class FSDPParamGroup:
             logger.debug("%s", self._with_fqn("FSDP::pre_forward"))
         with record_function(self._with_fqn("FSDP::pre_forward")):
             self._training_state = TrainingState.FORWARD
-            if make_fx_tracing_enabled():
+            if _is_tracing():
                 self._unshard_via_custom_op(is_forward=True)
             else:
                 self.unshard(self.unshard_async_op)
@@ -754,8 +778,10 @@ class FSDPParamGroup:
 
         if isinstance(self.mesh_info, FSDPMeshInfo):
             group_size = self._all_gather_process_group.size()
+            shard_rank = self.mesh_info.shard_mesh_rank
         else:
             group_size = 1
+            shard_rank = 0
 
         unshardeds = [
             getattr(fp._module_info.module, fp._module_info.param_name)
@@ -764,7 +790,9 @@ class FSDPParamGroup:
         sharded_numels = [fp._sharded_param_data.numel() for fp in self.fsdp_params]
 
         _param_group_ctx = self
-        sharded_list = torch.ops.fsdp.post_forward(unshardeds, group_size, sharded_numels)
+        sharded_list = torch.ops.fsdp.post_forward(
+            unshardeds, group_size, sharded_numels, shard_rank
+        )
         _param_group_ctx = None
 
         for fsdp_param, sharded in zip(self.fsdp_params, sharded_list):
@@ -775,7 +803,7 @@ class FSDPParamGroup:
         if not compiled_autograd_enabled():
             logger.debug("%s", self._with_fqn("FSDP::post_forward"))
         with record_function(self._with_fqn("FSDP::post_forward")):
-            if make_fx_tracing_enabled():
+            if _is_tracing():
                 self._reshard_via_custom_op()
             elif not compiled_autograd_enabled():
                 # for AC(fully_shard(model)), AC runs fsdp's _pre_forward
@@ -810,7 +838,7 @@ class FSDPParamGroup:
             logger.debug("%s", self._with_fqn("FSDP::pre_backward"))
         with record_function(self._with_fqn("FSDP::pre_backward")):
             self._training_state = TrainingState.PRE_BACKWARD
-            if make_fx_tracing_enabled():
+            if _is_tracing():
                 self._unshard_via_custom_op(is_forward=False)
             else:
                 self.unshard(self.unshard_async_op)  # no-op if prefetched

@@ -1,14 +1,13 @@
 """
 Minimal make_fx based tracer with:
 - FSDP internal parameter lifting (_sharded_param_data as graph inputs)
-- FSDP hooks use fsdp::unshard_ custom op (set via _make_fx_tracing flag)
+- FSDP hooks detect tracing via proxy tensor mode (no manual flag needed)
 - Tensor subclass input/output support (e.g., DTensor)
 - Fake mode tracing
 
 Cloned from sixlib/sixlib/minimal_tracer.py for FSDP2 tracing experiments.
 """
 
-import contextlib
 import itertools
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -19,7 +18,6 @@ import torch.nn as nn
 import torch.utils._pytree as pytree
 from torch._subclasses import FakeTensorMode
 from torch.distributed._composable_state import _get_module_state
-from torch.distributed.fsdp._fully_shard._fsdp_common import _make_fx_tracing
 from torch.distributed.fsdp._fully_shard._fsdp_param import FSDPParam
 from torch.distributed.fsdp._fully_shard._fsdp_state import FSDPState
 from torch.fx.experimental.proxy_tensor import make_fx
@@ -64,19 +62,6 @@ def _collect_fsdp_params_and_metas(
                     )
                 )
     return fsdp_params, param_metas
-
-
-@contextmanager
-def _enable_make_fx_tracing():
-    """Enable make_fx tracing mode for FSDP hooks."""
-    import torch.distributed.fsdp._fully_shard._fsdp_common as fsdp_common
-
-    original = fsdp_common._make_fx_tracing
-    fsdp_common._make_fx_tracing = True
-    try:
-        yield
-    finally:
-        fsdp_common._make_fx_tracing = original
 
 
 @contextmanager
@@ -223,12 +208,12 @@ def trace_module(
 
     Strategy:
     1. Lift FSDP's _sharded_param_data as graph inputs
-    2. Enable _make_fx_tracing flag so FSDP hooks use fsdp::unshard_ custom op
-    3. Swap lifted sharded data into FSDPParam objects so hooks use graph inputs
-    4. FSDP hooks fire naturally (model(x) pattern), but use the custom op path
-    5. Sharded data is passed as extra args to mod.forward so user code can
-       call autograd.grad w.r.t. them (gradient flows through fsdp::unshard
-       backward → fsdp::reduce_scatter_grad)
+    2. Swap lifted sharded data into FSDPParam objects so hooks use graph inputs
+    3. FSDP hooks auto-detect tracing (via proxy tensor mode) and use custom ops:
+       fsdp::pre_forward, fsdp::post_forward, fsdp::pre_backward, fsdp::post_backward
+    4. Sharded data is passed as extra args to mod.forward so user code can
+       call autograd.grad w.r.t. them (gradient flows through fsdp::pre_forward
+       backward → fsdp::post_backward)
 
     Args:
         mod: The nn.Module to trace (must be FSDP-wrapped with lazy init done)
@@ -259,14 +244,11 @@ def trace_module(
         fsdp_sharded = list(all_args[:n_fsdp_params])
         user_args = all_args[n_fsdp_params:]
 
-        # Swap sharded data into FSDP params so hooks use graph inputs,
-        # and enable tracing flag so hooks use the custom op path.
+        # Swap sharded data into FSDP params so hooks use graph inputs.
+        # FSDP hooks auto-detect tracing via proxy tensor mode (_is_tracing).
         # Pass fsdp_sharded as extra kwarg so the module can use them
         # as targets for autograd.grad.
-        with (
-            _swap_sharded_param_data(fsdp_params, fsdp_sharded),
-            _enable_make_fx_tracing(),
-        ):
+        with _swap_sharded_param_data(fsdp_params, fsdp_sharded):
             return mod.forward(*user_args, fsdp_sharded_params=fsdp_sharded)
 
     # Pytree-flatten user args
