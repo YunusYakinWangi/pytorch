@@ -901,6 +901,101 @@ def _fused_all_gather_matmul(
         )
 
 
+def _should_use_native_async_tp(
+    A_shard: torch.Tensor,
+    Bs: list[torch.Tensor],
+    group: c10d.ProcessGroup,
+) -> bool:
+    """
+    Use the AutoHeuristic decision tree to decide whether the native CUTLASS
+    persistent kernel (_async_input_mm) should be preferred over the
+    decomposition-based pipeline for this (M, K, N) shape.
+
+    Returns True for "native", False for "pipeline".
+
+    Falls back to the hardcoded ``2048 < global_M <= 4096`` rule if:
+    - ``async_tp_native`` is not in ``config.autoheuristic_use``, or
+    - no matching learned heuristic is found (unsupported GPU), or
+    - the heuristic returns None (unsure).
+    """
+    import logging
+
+    log = logging.getLogger(__name__)
+
+    local_M = math.prod(A_shard.shape[:-1])
+    global_M = local_M * group.size()
+    K = A_shard.shape[-1]
+    N = Bs[0].shape[-1]
+
+    try:
+        from torch._inductor import config as inductor_config
+
+        ah_name = "async_tp_native"
+        if ah_name not in inductor_config.autoheuristic_use:
+            return 2048 < global_M <= 4096
+    except ImportError:
+        return 2048 < global_M <= 4096
+
+    from torch._inductor.autoheuristic.autoheuristic_utils import (
+        AHContext,
+        AHMetadata,
+    )
+    from torch._inductor.autoheuristic.learned_heuristic_controller import (
+        LearnedHeuristicController,
+    )
+    from torch._inductor.utils import get_gpu_shared_memory
+
+    arith_intensity = (
+        local_M * N * K / (local_M * K + N * K + local_M * N)
+        if (local_M * K + N * K + local_M * N) > 0
+        else 0.0
+    )
+
+    context = AHContext()
+    context.add_feature("m", global_M)
+    context.add_feature("k", K)
+    context.add_feature("n", N)
+    context.add_feature("m_local", local_M)
+    context.add_feature("arith_intensity", arith_intensity)
+    context.add_feature("m_times_k", local_M * K)
+    context.add_feature("m_times_n", local_M * N)
+    context.add_feature("k_times_n", K * N)
+
+    device = torch.cuda.current_device()
+    device_capa = torch.cuda.get_device_capability(device)
+    shared_memory = get_gpu_shared_memory()
+
+    metadata = AHMetadata(
+        shared_memory=shared_memory,
+        device_capa=device_capa,
+        choices=["native", "pipeline"],
+        name=ah_name,
+    )
+
+    controller = LearnedHeuristicController(metadata=metadata, context=context)
+    decision = controller.get_decision()
+
+    if decision is None:
+        log.debug(
+            "AutoHeuristic async_tp_native: unsure for "
+            "(m=%d, k=%d, n=%d, m_local=%d), defaulting to pipeline",
+            global_M,
+            K,
+            N,
+            local_M,
+        )
+        return False
+    log.debug(
+        "AutoHeuristic async_tp_native: decision=%s for (m=%d, k=%d, n=%d, m_local=%d)",
+        decision,
+        global_M,
+        K,
+        N,
+        local_M,
+    )
+    return decision == "native"
+
+
 def _should_use_fused_all_gather_matmul_native(
     A_shard: torch.Tensor,
     Bs: list[torch.Tensor],
@@ -910,18 +1005,20 @@ def _should_use_fused_all_gather_matmul_native(
     group = c10d._resolve_process_group(group_name)
     local_M = math.prod(A_shard.shape[:-1])
 
-    return (
+    # Hard preconditions that cannot be overridden by AutoHeuristic
+    if not (
         "TORCH_SYMM_MEM_ENABLE_NATIVE_ASYNC_TP" in os.environ
         and A_shard.is_contiguous()
         and gather_dim == 0
         # _async_input_mm requires local_M to be divisible by world_size.
         and local_M % group.size() == 0
-        # _async_input_mm outperforms the decomposition-based approach when the
-        # global M is small.
-        and 2048 < local_M * group.size() <= 4096
         # _async_input_mm only supports a single B.
         and len(Bs) == 1
-    )
+    ):
+        return False
+
+    # Shape-dependent decision: AutoHeuristic or hardcoded M-range
+    return _should_use_native_async_tp(A_shard, Bs, group)
 
 
 def _fused_all_gather_matmul_native(
