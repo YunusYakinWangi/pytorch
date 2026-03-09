@@ -196,6 +196,20 @@ PLATFORM_SUPPORTS_FP8: bool = LazyVal(lambda: evaluate_platform_supports_fp8())
 PLATFORM_SUPPORTS_FP8_GROUPED_GEMM: bool = LazyVal(lambda: evaluate_platform_supports_fp8_grouped_gemm())
 PLATFORM_SUPPORTS_MXFP8_GROUPED_GEMM: bool = LazyVal(lambda: evaluate_platform_supports_mxfp8_grouped_gemm())
 
+
+def _is_nvidia_gpu(min_capability=None):
+    if not torch.cuda.is_available() or torch.version.cuda is None:
+        return False
+    if min_capability is not None:
+        return torch.cuda.get_device_capability() >= min_capability
+    return True
+
+
+PLATFORM_SUPPORTS_CUTLASS: bool = LazyVal(lambda: _is_nvidia_gpu((8, 0)))
+PLATFORM_SUPPORTS_CUTLASS_SM90: bool = LazyVal(lambda: _is_nvidia_gpu((9, 0)))
+PLATFORM_SUPPORTS_PDL: bool = LazyVal(lambda: _is_nvidia_gpu((9, 0)))
+PLATFORM_SUPPORTS_CUDNN_QUANTIZATION: bool = LazyVal(lambda: _is_nvidia_gpu((8, 0)))
+
 if TEST_NUMBA:
     try:
         import numba.cuda

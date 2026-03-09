@@ -30,9 +30,9 @@ from torch.fx.experimental.proxy_tensor import make_fx
 from torch.nn.attention import sdpa_kernel, SDPBackend
 from torch.testing import FileCheck
 from torch.testing._internal.common_cuda import (
+    PLATFORM_SUPPORTS_BF16_ATOMICS,
     PLATFORM_SUPPORTS_FLASH_ATTENTION,
     SM80OrLater,
-    SM90OrLater,
     TEST_MULTIGPU,
 )
 from torch.testing._internal.common_utils import (
@@ -2150,7 +2150,7 @@ def triton_poi_fused_add_reflection_pad2d_0(in_ptr0, in_ptr1, out_ptr0, xnumel, 
             torch.testing.assert_allclose(foo(inp), foo_c(inp))
 
     @skipCUDAIf(
-        not SM90OrLater, "uses bfloat16 atomic add instrs which requires SM >= 90"
+        not PLATFORM_SUPPORTS_BF16_ATOMICS, "requires bfloat16 atomic add support"
     )
     def test_float8_e8m0fnu(self):
         device = "cuda"
@@ -2193,7 +2193,7 @@ def triton_poi_fused_add_reflection_pad2d_0(in_ptr0, in_ptr1, out_ptr0, xnumel, 
         "bfloat16 atomic add is only supported in fbcode today #97016",
     )
     @skipCUDAIf(
-        not SM90OrLater, "uses bfloat16 atomic add instrs which requires SM >= 90"
+        not PLATFORM_SUPPORTS_BF16_ATOMICS, "requires bfloat16 atomic add support"
     )
     def test_atomic_add_bfloat16(self):
         def f(x, y):
@@ -2248,7 +2248,7 @@ def triton_poi_fused_add_reflection_pad2d_0(in_ptr0, in_ptr1, out_ptr0, xnumel, 
             self.assertEqual(torch.compile(f)(x, y), out)
 
     @skipCUDAIf(
-        not SM90OrLater, "uses bfloat16 atomic add instrs which requires SM >= 90"
+        not PLATFORM_SUPPORTS_BF16_ATOMICS, "requires bfloat16 atomic add support"
     )
     @unittest.skipIf(
         config.is_fbcode(),

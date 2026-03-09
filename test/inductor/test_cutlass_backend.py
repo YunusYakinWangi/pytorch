@@ -43,9 +43,9 @@ from torch._inductor.utils import fresh_cache
 from torch.sparse import SparseSemiStructuredTensor, to_sparse_semi_structured
 from torch.testing import FileCheck
 from torch.testing._internal.common_cuda import (
+    PLATFORM_SUPPORTS_CUTLASS,
+    PLATFORM_SUPPORTS_CUTLASS_SM90,
     PLATFORM_SUPPORTS_FP8,
-    SM80OrLater,
-    SM90OrLater,
 )
 from torch.testing._internal.common_utils import (
     IN_RE_WORKER,
@@ -214,7 +214,7 @@ class TestCutlassBackend(TestCase):
         self.assertTrue(os.path.exists(cutlass_mock_pydot_path))
         self.assertTrue(os.path.exists(cutlass_mock_scipy_path))
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_max_autotune_cutlass_threshold(self):
         """
@@ -265,7 +265,7 @@ class TestCutlassBackend(TestCase):
 
         self.assertIsNotNone(cutlass_key())
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_cutlass_backend_subproc_mm(self):
         """
@@ -293,7 +293,7 @@ class TestCutlassBackend(TestCase):
             Y = torch.mm(a, b)
             torch.testing.assert_close(Y_compiled, Y)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     @parametrize("dtype", (torch.float16, torch.bfloat16))
     def test_cutlass_backend_subproc_addmm(self, dtype):
@@ -335,7 +335,7 @@ class TestCutlassBackend(TestCase):
                 Y = torch.addmm(x, a, b, alpha=alpha, beta=beta)
                 torch.testing.assert_close(Y_compiled, Y)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_cutlass_backend_subproc_bmm(self):
         """
@@ -360,7 +360,7 @@ class TestCutlassBackend(TestCase):
             Y = torch.bmm(a, b)
             torch.testing.assert_close(Y_compiled, Y)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @parametrize("dynamic", (False, True))
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_diff_matmul_share_same_kernel(self, dynamic):
@@ -403,7 +403,7 @@ class TestCutlassBackend(TestCase):
                 2,
             ).run(codes[0])
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_number_mm_precompiles(self):
         torch._dynamo.utils.counters.clear()
@@ -454,7 +454,7 @@ class TestCutlassBackend(TestCase):
             )
 
     # NOTE: right now tuned_mm doesn't support cutlass 2x, which is used by A100
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @parametrize("dynamic", (False, True))
     @parametrize("use_aoti", (False, True))
     @parametrize("dtype", (torch.float16, torch.bfloat16))
@@ -520,7 +520,7 @@ class TestCutlassBackend(TestCase):
 
             torch.testing.assert_close(actual, expected)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @parametrize("dynamic", (False, True))
     @parametrize("use_aoti", (False, True))
     @parametrize("dtype", (torch.float8_e4m3fn,))
@@ -616,7 +616,7 @@ class TestCutlassBackend(TestCase):
         torch.cuda.is_available() and not PLATFORM_SUPPORTS_FP8,
         "FP8 is only supported on H100+",
     )
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(
         os.environ,
         # note: It seems necessary to set these here, instead of `config.patch`.
@@ -651,7 +651,7 @@ class TestCutlassBackend(TestCase):
         expected = scaled_mm_fn(a8, b8)
         torch.testing.assert_close(actual, expected, rtol=1e-2, atol=0.05)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @parametrize("dynamic", (False, True))
     @parametrize("use_aoti", (False, True))
     @parametrize("dtype", (torch.float16, torch.bfloat16))
@@ -731,7 +731,7 @@ class TestCutlassBackend(TestCase):
 
                 torch.testing.assert_close(actual, expected)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_max_autotune_cutlass_backend_addmm_input_reorder(self):
         """
@@ -792,7 +792,7 @@ class TestCutlassBackend(TestCase):
         finally:
             AlgorithmSelectorCache.benchmark_choices = original_benchmark_choices
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @parametrize("dynamic", (False, True))
     @parametrize("use_aoti", (False, True))
     @parametrize("dtype", (torch.float16, torch.bfloat16))
@@ -858,7 +858,7 @@ class TestCutlassBackend(TestCase):
                 actual = [compiled_model(*input) for input in inputs]
             torch.testing.assert_close(actual, expected)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_max_autotune_cutlass_backend_regular_mm_streamk(
         self, dynamic: bool = False, max_autotune_gemm_backends: str = "CUTLASS"
@@ -900,7 +900,7 @@ class TestCutlassBackend(TestCase):
                 # matmuls involved. Many small addition differences add up.
                 torch.testing.assert_close(Y_compiled, Y, atol=0.01, rtol=0.01)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     def test_streamk_with_dynamic(
         self,
     ):
@@ -924,7 +924,7 @@ class TestCutlassBackend(TestCase):
             with self.assertRaisesRegex(InductorError, r".*NoValidChoicesError.*"):
                 _ = torch.compile(torch.mm, dynamic=True)(a, b)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     def test_streamk_with_static(
         self,
     ):
@@ -999,7 +999,7 @@ class TestCutlassBackend(TestCase):
                 )
             torch.testing.assert_close(Y_compiled, Y, atol=1e-2, rtol=1e-2)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     def test_max_autotune_cutlass_backend_simple_fusion_fp16_fp32acc(self):
         def mm(a, b):
             return (a @ b) * 3.0
@@ -1008,7 +1008,7 @@ class TestCutlassBackend(TestCase):
             fp16=True, expected_fuse_count=0, mm=mm
         )
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     def test_max_autotune_cutlass_backend_chained_fusion_fp16_fp32acc(self):
         def mm(a, b):
             return (a @ b) * 3.3 - 1.234
@@ -1017,7 +1017,7 @@ class TestCutlassBackend(TestCase):
             fp16=True, expected_fuse_count=0, mm=mm
         )
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     def test_max_autotune_cutlass_backend_relu_fusion_fp16_fp32acc(self):
         def mm(a, b):
             return torch.nn.functional.relu((a @ b) * 3.3 - 1.234)
@@ -1027,7 +1027,7 @@ class TestCutlassBackend(TestCase):
             fp16=True, expected_fuse_count=0, mm=mm
         )
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     def test_max_autotune_cutlass_backend_relu6_fusion_fp16_fp32acc(self):
         def mm(a, b):
             return torch.clamp(torch.nn.functional.relu(a @ b), max=6.0)
@@ -1037,7 +1037,7 @@ class TestCutlassBackend(TestCase):
             fp16=True, expected_fuse_count=0, mm=mm
         )
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     def test_max_autotune_cutlass_backend_no_fusion_dtype_mismatch(self):
         def mm(a, b):
             # this should not be fused, since the output dtype is different from the matmul dtype
@@ -1047,7 +1047,7 @@ class TestCutlassBackend(TestCase):
             fp16=True, expected_fuse_count=0, mm=mm
         )
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     def test_max_autotune_cutlass_backend_shape_dependent_normalization_fusion(self):
         def mm(a, b):
             return (a @ b) / b.size(1)
@@ -1057,7 +1057,7 @@ class TestCutlassBackend(TestCase):
         )
 
     # TODO: Enable dynamic test cases when dynamic support is added.
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @parametrize("dynamic", (False,))
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_max_autotune_cutlass_backend_int_mm(
@@ -1092,7 +1092,7 @@ class TestCutlassBackend(TestCase):
             torch.testing.assert_close(Y_compiled, Y)
 
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     def test_force_cutlass_backend_aoti_dynamic(self):
         class MyModel(torch.nn.Module):
             def forward(self, x, w):
@@ -1125,7 +1125,7 @@ class TestCutlassBackend(TestCase):
             torch.testing.assert_close(expected, actual)
 
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     def test_force_cutlass_backend_aoti_cexpr_codegen(self):
         class MyModel(torch.nn.Module):
             def forward(self, x, w):
@@ -1163,7 +1163,7 @@ class TestCutlassBackend(TestCase):
             torch.testing.assert_close(expected, actual)
 
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     def test_aoti_workspace_ptr(self):
         class MyModel(torch.nn.Module):
             def forward(self, x, w):
@@ -1192,7 +1192,7 @@ class TestCutlassBackend(TestCase):
             torch.testing.assert_close(expected, actual, atol=0.01, rtol=0.01)
 
     # TODO: Enable dynamic test cases when dynamic support is added.
-    @unittest.skipIf(not SM80OrLater or SM90OrLater, "need sm_8x exactly")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS or PLATFORM_SUPPORTS_CUTLASS_SM90, "need CUTLASS sm_8x exactly")
     @parametrize("dynamic", (False,))
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_max_autotune_cutlass_backend_sparse_semi_structured_mm(
@@ -1245,7 +1245,7 @@ class TestCutlassBackend(TestCase):
                 f"Expected cutlass_kernels_count > 0, got {cutlass_kernels_count}"
             )
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_cutlass_backend_op_denylist(
         self,
@@ -1298,7 +1298,7 @@ class TestCutlassBackend(TestCase):
                     if cuda_template_count <= 0:
                         raise AssertionError("No CUTLASSTemplateCaller choices")
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_cutlass_backend_op_allowlist(
         self,
@@ -1351,7 +1351,7 @@ class TestCutlassBackend(TestCase):
                     if cuda_template_count <= 0:
                         raise AssertionError("No CUTLASSTemplateCaller choices")
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_cutlass_backend_fp8_scaled_mm_fast_accum_filtering(
         self,
@@ -1441,7 +1441,7 @@ class TestCutlassBackend(TestCase):
         run_test(True)
         run_test(False)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_cutlass_backend_shape_coverage_mm(
         self,
@@ -1519,7 +1519,7 @@ class TestCutlassBackend(TestCase):
                     f"M={M}, N={N}, K={K}",
                 )
 
-    @unittest.skipIf(not SM80OrLater, "need sm_80")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS, "need CUTLASS sm_80+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_get_max_alignment(self):
         l4 = FixedLayout(
@@ -1580,7 +1580,7 @@ class TestCutlassBackend(TestCase):
             m4, 4, "Wrong max alignment. Should have been 4 (due to float32 dtype )."
         )
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_standalone_runner(self):
         max_autotune_gemm_backends = "CUTLASS"
@@ -1659,7 +1659,7 @@ class TestCutlassBackend(TestCase):
             os.remove(cu_file.name)
             os.remove(exe_file.name)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_cutlass_backend_integration(self):
         """
@@ -1702,7 +1702,7 @@ class TestCutlassBackend(TestCase):
             num_ops = int(match.group(1))
             self.assertTrue(num_ops > 0, "The number of ops should be greater than 0")
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     def test_maybe_append_choice_caching(self):
         """
         Test if maybe_append_choice's caching leads to correct results and
@@ -1754,7 +1754,7 @@ class TestCutlassBackend(TestCase):
         # and for each finalized codegen.
         self.assertEqual(render_call_count, NUM_ITERATIONS + 2)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_multiple_mm(self):
         """
@@ -1812,7 +1812,7 @@ class TestCutlassBackend(TestCase):
         num_matmuls = 2
         self.assertEqual(render_call_count, num_matmuls + num_matmuls * 2)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_multiple_mm_with_dynamic_shape(self):
         """
@@ -1873,7 +1873,7 @@ class TestCutlassBackend(TestCase):
         num_matmuls = 2
         self.assertEqual(render_call_count, num_matmuls + num_matmuls * 2)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_cutlass_backend_matmul_same_tensor(self):
         max_autotune_gemm_backends = "CUTLASS"
@@ -1892,7 +1892,7 @@ class TestCutlassBackend(TestCase):
 
             torch.testing.assert_close(A @ A.t(), compiled(A, A.t()))
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_cutlass_backend_matmul_nonzero_offset(self):
         max_autotune_gemm_backends = "CUTLASS"
@@ -1912,7 +1912,7 @@ class TestCutlassBackend(TestCase):
                 A[1:, :] @ A[1:, :].t(), compiled(A[1:, :], A[1:, :].t())
             )
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_flexible_layout(self):
         class TestModel(torch.nn.Module):
@@ -1933,7 +1933,7 @@ class TestCutlassBackend(TestCase):
         ):
             _ = torch.compile(model)(B)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     @use_evt_config
     def test_evt_flexible_layout(self):
@@ -1960,7 +1960,7 @@ class TestCutlassBackend(TestCase):
             1,
         )
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_filtered_ops_cache(self):
         class TestModel(torch.nn.Module):
@@ -1985,7 +1985,7 @@ class TestCutlassBackend(TestCase):
             _ = torch.compile(model)(B)
         self.assertTrue(time.time() - start_time < 60)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     @parametrize("use_aoti", (False, True))
     def test_compilation_time(self, use_aoti):
@@ -2019,7 +2019,7 @@ class TestCutlassBackend(TestCase):
             torch.testing.assert_close(actual, expected)
         self.assertTrue(time.time() - start_time < 50)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @use_evt_config
     @evt_all_ops
     @evt_all_shapes
@@ -2031,7 +2031,7 @@ class TestCutlassBackend(TestCase):
 
         self.run_evt_test(TestModel(), op, shape)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @use_evt_config
     @evt_bin_ops
     def test_evt_broadcasting(self, op):
@@ -2056,7 +2056,7 @@ class TestCutlassBackend(TestCase):
         )
         torch.testing.assert_close(result, ref_result)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @use_evt_config
     @evt_un_ops
     def test_evt_activations(self, op):
@@ -2081,7 +2081,7 @@ class TestCutlassBackend(TestCase):
         )
         torch.testing.assert_close(result, ref_result)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @use_evt_config
     @evt_all_ops
     def test_evt_mixed_dtypes(self, op):
@@ -2122,7 +2122,7 @@ class TestCutlassBackend(TestCase):
 
         torch.testing.assert_close(result, ref_result)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @use_evt_config
     @evt_all_ops
     def test_evt_multi_op(self, op):
@@ -2133,7 +2133,7 @@ class TestCutlassBackend(TestCase):
 
         self.run_evt_test(TestModel(), op, (1024, 512))
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @use_evt_config
     @evt_all_ops
     def test_evt_reuse_matmul_input(self, op):
@@ -2144,7 +2144,7 @@ class TestCutlassBackend(TestCase):
 
         self.run_evt_test(TestModel(), op, (1024, 1024))  # shape needs to be square
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @use_evt_config
     @evt_all_ops
     @parametrize(
@@ -2180,7 +2180,7 @@ class TestCutlassBackend(TestCase):
             )
             torch.testing.assert_close(result, ref_result)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @use_evt_config
     def test_evt_return_accumulator(self):
         op = torch.add
@@ -2238,7 +2238,7 @@ class TestCutlassBackend(TestCase):
         torch.cuda.is_available() and not PLATFORM_SUPPORTS_FP8,
         "FP8 is only supported on H100+",
     )
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @fp8_config
     @parametrize("float8_dtype", (torch.float8_e4m3fn,))
     @parametrize(
@@ -2315,7 +2315,7 @@ class TestCutlassBackend(TestCase):
         torch.cuda.is_available() and not PLATFORM_SUPPORTS_FP8,
         "FP8 is only supported on H100+",
     )
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @fp8_config
     @parametrize("float8_dtype", (torch.float8_e4m3fn,))
     @parametrize(
@@ -2412,7 +2412,7 @@ class TestCutlassBackend(TestCase):
         torch.cuda.is_available() and not PLATFORM_SUPPORTS_FP8,
         "FP8 is only supported on H100+",
     )
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     @fp8_config
     @parametrize("float8_dtype", (torch.float8_e4m3fn,))
     @parametrize(
@@ -2489,7 +2489,7 @@ class TestCutlassBackend(TestCase):
         # setting a small absolute tolerance in these tests
         torch.testing.assert_close(y_eager, y_compiled, rtol=1e-2, atol=0.05)
 
-    @unittest.skipIf(not SM90OrLater, "need sm_90")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUTLASS_SM90, "requires CUTLASS sm_90+")
     def test_config_number_post_filtering(self) -> None:
         """
         Test if cutlass backend produces the same number of configs after filtering

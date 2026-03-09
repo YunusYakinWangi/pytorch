@@ -17,8 +17,8 @@ from torch.testing._internal.common_cuda import (
     IS_SM90,
     PLATFORM_SUPPORTS_FP8,
     PLATFORM_SUPPORTS_MX_GEMM,
+    PLATFORM_SUPPORTS_PDL,
     SM100OrLater,
-    SM90OrLater,
 )
 from torch.testing._internal.common_device_type import (
     instantiate_device_type_tests,
@@ -397,7 +397,7 @@ class TestFP8Types(TestCase):
         )
 
     @unittest.skipIf(
-        not SM90OrLater or torch.version.hip, "PDL requires NVIDIA SM 9.0+"
+        not PLATFORM_SUPPORTS_PDL, "PDL requires NVIDIA SM 9.0+"
     )
     @onlyOn(["cuda", "xpu"])
     def test_scaled_mm_pdl_handles_none_bias(self, device):

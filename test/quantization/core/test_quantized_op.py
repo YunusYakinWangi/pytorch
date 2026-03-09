@@ -29,7 +29,7 @@ hu.assert_deadline_disabled()
 import torch.backends.xnnpack
 from torch.ao.quantization import PerChannelMinMaxObserver
 from torch.testing._internal.common_cuda import (
-    SM80OrLater,
+    PLATFORM_SUPPORTS_CUDNN_QUANTIZATION,
     TEST_CUDA,
     TEST_CUDNN,
 )
@@ -961,8 +961,7 @@ class TestQuantizedOps(TestCase):
     """Tests the correctness of the cudnn add and add_relu op
     (Similar to test_qadd_relu_different_qparams, will probably merge in the future)"""
     @unittest.skipIf(not TEST_CUDNN, "cudnn is not enabled.")
-    @unittest.skipIf(not SM80OrLater, "requires sm80 or later.")
-    @unittest.skipIf(TEST_ROCM, "not supported on rocm.")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUDNN_QUANTIZATION, "requires cuDNN quantization support.")
     @unittest.skip("not currently working and feature isn't used")
     def test_qadd_relu_cudnn(self):
         dtype = torch.qint8
@@ -996,8 +995,7 @@ class TestQuantizedOps(TestCase):
 
     """Tests the correctness of the cudnn add and add_relu op for nhwc format"""
     @unittest.skipIf(not TEST_CUDNN, "cudnn is not enabled.")
-    @unittest.skipIf(not SM80OrLater, "requires sm80 or later.")
-    @unittest.skipIf(TEST_ROCM, "not supported on rocm.")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUDNN_QUANTIZATION, "requires cuDNN quantization support.")
     @unittest.skip("not currently working and feature isn't used")
     def test_qadd_relu_cudnn_nhwc(self):
         dtype = torch.qint8
@@ -4310,8 +4308,7 @@ class TestQuantizedLinear(TestCase):
     @skipIfNoFBGEMM
     @unittest.skipIf(not TEST_CUDNN, "cudnn is not enabled.")
     @unittest.skipIf(TEST_CUDNN and torch.backends.cudnn.version() == 90100, "expected failure on cuDNN 9.1.0")
-    @unittest.skipIf(not SM80OrLater, "requires sm80 or later.")
-    @unittest.skipIf(TEST_ROCM, "not supported on rocm.")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUDNN_QUANTIZATION, "requires cuDNN quantization support.")
     # TODO: check with yang regarding CUDNN flags
     @unittest.skip("not currently working and feature isn't used")
     def test_qlinear_cudnn(self, batch_size, input_channels, output_channels, use_bias,
@@ -5861,8 +5858,7 @@ class TestQuantizedConv(TestCase):
            use_channelwise=st.sampled_from([False]))
     @skipIfNoFBGEMM
     @unittest.skipIf(not TEST_CUDNN, "cudnn is not enabled.")
-    @unittest.skipIf(not SM80OrLater, "requires sm80 or later.")
-    @unittest.skipIf(TEST_ROCM, "not supported on rocm.")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUDNN_QUANTIZATION, "requires cuDNN quantization support.")
     @unittest.skip("not currently working and feature isn't used")
     def test_qconv2d_cudnn(
             self,
@@ -5944,8 +5940,7 @@ class TestQuantizedConv(TestCase):
            use_channelwise=st.sampled_from([False]))
     @skipIfNoFBGEMM
     @unittest.skipIf(not TEST_CUDNN, "cudnn is not enabled.")
-    @unittest.skipIf(not SM80OrLater, "requires sm80 or later.")
-    @unittest.skipIf(TEST_ROCM, "not supported on rocm.")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUDNN_QUANTIZATION, "requires cuDNN quantization support.")
     @unittest.skip("not currently working and feature isn't used")
     def test_qconv2d_relu_cudnn(
             self,
@@ -6679,8 +6674,7 @@ class TestQuantizedConv(TestCase):
            use_channelwise=st.sampled_from([False]))
     @skipIfNoFBGEMM
     @unittest.skipIf(not TEST_CUDNN, "cudnn is not enabled.")
-    @unittest.skipIf(not SM80OrLater, "requires sm80 or later.")
-    @unittest.skipIf(TEST_ROCM, "not supported on rocm.")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUDNN_QUANTIZATION, "requires cuDNN quantization support.")
     @unittest.skip("not currently working and feature isn't used")
     def test_qconv1d_cudnn(
         self,
@@ -6753,8 +6747,7 @@ class TestQuantizedConv(TestCase):
            use_channelwise=st.sampled_from([False]))
     @skipIfNoFBGEMM
     @unittest.skipIf(not TEST_CUDNN, "cudnn is not enabled.")
-    @unittest.skipIf(not SM80OrLater, "requires sm80 or later.")
-    @unittest.skipIf(TEST_ROCM, "not supported on rocm.")
+    @unittest.skipIf(not PLATFORM_SUPPORTS_CUDNN_QUANTIZATION, "requires cuDNN quantization support.")
     @unittest.skip("not currently working and feature isn't used")
     def test_qconv1d_relu_cudnn(
         self,
