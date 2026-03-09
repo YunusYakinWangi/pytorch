@@ -1,21 +1,31 @@
-# AutoHeuristic for Async TP Fuse Decision
+# AutoHeuristic for Async TP
 
-Learned heuristic for async TP fuse/no_fuse decision: whether to fuse
-`all_gather` with `matmul` in the micro-pipeline TP pass (`micro_pipeline_tp.py`).
+Two learned heuristics for async TP decisions:
 
-Replaces the hardcoded `K_shard < 1024` guard with a shape-aware decision tree
-trained on multi-model benchmark data (Llama, Mixtral).
+1. **fuse vs no_fuse** — whether to fuse all_gather with matmul at all (`micro_pipeline_tp.py`)
+2. **native vs pipeline** — whether to use CUTLASS/CuTe AsyncMM kernel or decomposed symm_mem pipeline (`symm_mem/__init__.py`)
 
-## Quick Start: Re-generate heuristic from existing data
+## Quick Start: Re-generate heuristics from existing data
+
+### ① fuse vs no_fuse
 
 ```bash
-# Train decision tree and generate artifact
 bash gen_async_tp_heuristic_h100.sh
 ```
 
 This will overwrite `torch/_inductor/autoheuristic/artifacts/_AsyncTPFuseH100.py`.
 
+### ② native vs pipeline
+
+```bash
+bash gen_async_tp_native_heuristic_h100.sh
+```
+
+This will overwrite `torch/_inductor/autoheuristic/artifacts/_AsyncTPNativeH100.py`.
+
 ## Collecting new benchmark data
+
+### fuse vs no_fuse data
 
 ```bash
 cd custom_op_autotuning/autoheuristic_poc
@@ -27,6 +37,17 @@ Then convert and retrain:
 ```bash
 python convert_benchmark_data.py --output async_tp_h100_data.txt
 bash gen_async_tp_heuristic_h100.sh
+```
+
+### native vs pipeline data
+
+```bash
+cd custom_op_autotuning/autoheuristic_poc
+TORCH_SYMM_MEM_ENABLE_NATIVE_ASYNC_TP=1 \
+torchrun --nproc_per_node=8 benchmark_native_vs_pipeline.py
+
+python convert_native_vs_pipeline_data.py
+bash gen_async_tp_native_heuristic_h100.sh
 ```
 
 ## For other GPUs (e.g., A100)
@@ -48,13 +69,20 @@ bash gen_async_tp_heuristic_h100.sh
 
 | File | Purpose |
 |---|---|
+| **fuse vs no_fuse** | |
 | `convert_benchmark_data.py` | Convert benchmark JSON → AutoHeuristic txt format |
 | `train_decision_async_tp.py` | Training script (inherits `AHTrainDecisionTree`) |
-| `async_tp_h100_data.txt` | H100 training data (40 configs × 2 choices = 80 rows) |
+| `async_tp_h100_data.txt` | H100 training data (40 configs × 2 choices) |
 | `gen_async_tp_heuristic_h100.sh` | One-liner to generate H100 artifact |
 | `gen_async_tp_heuristic_a100.sh` | One-liner to generate A100 artifact |
+| **native vs pipeline** | |
+| `train_decision_async_tp_native.py` | Training script for native vs pipeline |
+| `async_tp_native_h100_data.txt` | H100 training data (40 configs × 2 choices) |
+| `gen_async_tp_native_heuristic_h100.sh` | One-liner to generate H100 artifact |
 
-## Features used by the decision tree
+## Features used by the decision trees
+
+### fuse vs no_fuse features
 
 | Feature | Description |
 |---|---|
@@ -66,17 +94,24 @@ bash gen_async_tp_heuristic_h100.sh
 | `m_times_n` | M × N — output matrix size |
 | `k_times_n` | K × N |
 
-## How the trained heuristic is used at runtime
+### native vs pipeline features
 
-The generated artifact (`_AsyncTPFuseH100.py`) is a `LearnedHeuristicDecision`
-subclass that:
+Same as above, plus:
 
-1. Checks preconditions (device capability, shared memory) via `check_precondition()`
-2. Takes shape features via `AHContext`
-3. Returns ranked choices via `get_best_choices()`, or `None` if unsure (unsafe leaf)
-4. When `None`, the caller falls back to no_fuse (safe default)
+| Feature | Description |
+|---|---|
+| `m_local` | Local M per rank (M / world_size) |
 
-Integration point: `torch/_inductor/fx_passes/micro_pipeline_tp.py` →
-`_should_fuse_async_tp()` replaces the old `K_shard < 1024` guard.
+## How the trained heuristics are used at runtime
 
-Enabled via: `TORCHINDUCTOR_AUTOHEURISTIC_USE=async_tp_fuse`
+The generated artifacts are `LearnedHeuristicDecision` subclasses that:
+1. Check preconditions (device capability, shared memory) via `check_precondition()`
+2. Take shape features via `AHContext`
+3. Return ranked choices via `get_best_choices()`, or `None` if unsure (unsafe leaf)
+4. When `None`, the caller falls back to a safe default
+
+Integration points:
+- **fuse vs no_fuse**: `torch/_inductor/fx_passes/micro_pipeline_tp.py` — replaces `K_shard < 1024`
+  Enabled via: `TORCHINDUCTOR_AUTOHEURISTIC_USE=async_tp_fuse`
+- **native vs pipeline**: `torch/distributed/_symmetric_memory/__init__.py` — replaces `2048 < M*ws <= 4096`
+  Enabled via: `TORCHINDUCTOR_AUTOHEURISTIC_USE=async_tp_native`
