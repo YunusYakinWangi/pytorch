@@ -2450,7 +2450,6 @@ torch.cuda.synchronize()
         gc.collect()
         torch.cuda.empty_cache()
         baseline = torch.cuda.memory_stats()["active.all.current"]
-        print("baseline:", baseline)
 
         s = torch.cuda.Stream()
         g = torch.cuda.CUDAGraph()
