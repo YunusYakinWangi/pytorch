@@ -1,18 +1,7 @@
 # Owner(s): ["module: inductor"]
-"""
-Tests for pad-as-cat and cat multi-consumer optimizations.
-
-When cat/pad inputs have multiple consumers, pointwise_cat inlines the input
-computation causing duplicate work. These tests verify that ConcatKernel's
-realize-into-slice zero-copy mechanism is used instead.
-
-References:
-  - pytorch#125075: cat + to_fp16 fusion
-  - vllm#24917 / vllm#25477: mul + pad + addmm fusion
-"""
+"""Tests for pad-as-cat and cat multi-consumer optimizations (pytorch#125075, vllm#24917)."""
 
 import re
-import unittest
 
 import torch
 from torch._dynamo.utils import counters
@@ -27,13 +16,12 @@ def _count_triton_kernels(code: str) -> int:
 
 
 class TestPadAsCat(TestCase):
-    """Tests for pad→ConcatKernel and cat multi-consumer optimizations."""
 
     # ─── Pattern 1: mul + pad + addmm (vllm#24917) ────────────────────
 
     @requires_gpu()
     def test_mul_pad_addmm(self):
-        """F.pad with multi-consumer input should use ConcatKernel zero-copy."""
+        """Multi-consumer F.pad uses ConcatKernel zero-copy."""
         counters.clear()
 
         def fn(x, scale, bias, weight):
@@ -54,16 +42,14 @@ class TestPadAsCat(TestCase):
         # Correctness
         self.assertTrue(torch.allclose(result[0], ref[0]))
         self.assertTrue(torch.allclose(result[1], ref[1], atol=1e-2, rtol=1e-2))
-        # ConcatKernel uses reinterpret_tensor for the slice — sign of zero-copy
         self.assertIn("reinterpret_tensor", code)
-        # pad_as_cat counter should fire
         self.assertGreater(counters["inductor"]["pad_as_cat"], 0)
 
     # ─── Pattern 2: cat + to_fp16 (pytorch#125075) ────────────────────
 
     @requires_gpu()
     def test_cat_to_fp16(self):
-        """cat with multi-consumer input should fuse, not duplicate computation."""
+        """Multi-consumer cat avoids duplicate computation."""
 
         def fn(x):
             z = torch.cat([x, torch.zeros([6, 768], device=GPU_TYPE)], dim=0)
@@ -78,8 +64,6 @@ class TestPadAsCat(TestCase):
         # Correctness
         self.assertTrue(torch.allclose(result[0], ref[0]))
         self.assertTrue(torch.allclose(result[1], ref[1]))
-        # With ConcatKernel, x's copy and to_fp16 should fuse into 1 kernel
-        # plus a tiny fill kernel for the 6*768 zeros
         kernel_count = _count_triton_kernels(code)
         self.assertLessEqual(
             kernel_count,
@@ -91,7 +75,7 @@ class TestPadAsCat(TestCase):
 
     @requires_gpu()
     def test_single_consumer_pad_unchanged(self):
-        """Single-consumer F.pad should NOT use _pad_as_cat (default is optimal)."""
+        """Single-consumer F.pad skips _pad_as_cat."""
         counters.clear()
 
         def fn(x, scale):
@@ -109,7 +93,7 @@ class TestPadAsCat(TestCase):
 
     @requires_gpu()
     def test_single_consumer_cat_unchanged(self):
-        """Single-consumer cat should use pointwise_cat (no behavior change)."""
+        """Single-consumer cat unchanged."""
 
         def fn(x):
             return torch.cat([x, torch.zeros([6, 768], device=GPU_TYPE)], dim=0)
@@ -123,4 +107,6 @@ class TestPadAsCat(TestCase):
 
 
 if __name__ == "__main__":
-    unittest.main()
+    from torch._inductor.test_case import run_tests
+
+    run_tests()
