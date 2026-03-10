@@ -2504,7 +2504,6 @@ torch.cuda.synchronize()
             baseline,
             "RNG state tensors should be freed after sync + empty_cache",
         )
-        print("after cleanup:", after_cleanup)
 
     @unittest.skipIf(
         not TEST_CUDA_GRAPH, "CUDA >= 11.0 or ROCM >= 5.3 required for graphs"
