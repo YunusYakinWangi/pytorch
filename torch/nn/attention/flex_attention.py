@@ -1559,21 +1559,6 @@ def flex_attention(
         Read more about feature classification at: https://pytorch.org/blog/pytorch-feature-classification-changes/#prototype
 
     """
-    if has_torch_function((query, key, value)):
-        return handle_torch_function(
-            flex_attention,
-            (query, key, value),
-            query,
-            key,
-            value,
-            score_mod=score_mod,
-            block_mask=block_mask,
-            scale=scale,
-            enable_gqa=enable_gqa,
-            return_lse=return_lse,
-            kernel_options=kernel_options,
-            return_aux=return_aux,
-        )
     # Some basic input validation
     _validate_sdpa_input(query, key, value, allow_lowp_kv=True)
     _validate_embed_dim(query, key, value)

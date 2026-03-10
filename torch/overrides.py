@@ -998,7 +998,6 @@ def get_testing_overrides() -> dict[Callable, Callable]:
         torch.nn.functional.silu: lambda input, inplace=False: -1,
         torch.nn.functional.mish: lambda input, inplace=False: -1,
         torch.nn.functional.scaled_dot_product_attention: lambda query, key, value, attn_mask=None, dropout_p=0.0: -1,
-        flex_attention_mod.flex_attention: lambda query, key, value, score_mod=None, block_mask=None, scale=None, enable_gqa=False, return_lse=False, kernel_options=None, return_aux=None: -1,  # noqa: B950
         flex_attention_mod.create_block_mask: lambda mask_mod, B, H, Q_LEN, KV_LEN, device=None, BLOCK_SIZE=128, _compile=False: -1,
         torch.nn.functional.smooth_l1_loss: lambda input, target, size_average=None, reduce=None, reduction="mean", beta=1.0: -1,  # noqa: B950
         torch.nn.functional.huber_loss: lambda input, target, reduction="mean", delta=1.0, weight=None: -1,
