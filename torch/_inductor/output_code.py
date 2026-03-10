@@ -64,6 +64,7 @@ if TYPE_CHECKING:
 
     from torch._inductor import metrics
     from torch._inductor.graph import GraphLowering
+    from torch._logging._internal import RecordedStructuredLog
     from torch._library.fake_class_registry import FakeScriptObject
     from torch.export.pt2_archive._package_weights import Weights
 
@@ -487,6 +488,7 @@ class CompiledFxGraph(OutputCode):
         compiled_fn_runner: Optional[Any] = None,
         inductor_provenance_mapping_str: Optional[str] = None,
         inductor_provenance_stack_traces_str: Optional[str] = None,
+        recorded_structured_logs: Optional[list[RecordedStructuredLog]] = None,
     ) -> None:
         self.current_callable = current_callable
         self.compiled_fn_runner = compiled_fn_runner
@@ -503,6 +505,7 @@ class CompiledFxGraph(OutputCode):
         self.inductor_post_grad_graph_str = inductor_post_grad_graph_str
         self.inductor_provenance_mapping_str = inductor_provenance_mapping_str
         self.inductor_provenance_stack_traces_str = inductor_provenance_stack_traces_str
+        self.recorded_structured_logs = recorded_structured_logs
         self.cache_linemap = graph.cache_linemap
         # TODO - ordered set
         self.device_types = OrderedSet(graph.device_types)
