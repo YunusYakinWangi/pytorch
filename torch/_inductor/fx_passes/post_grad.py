@@ -1512,11 +1512,6 @@ def should_prefer_unfused_addmm(match):
     if not is_gpu(inp.meta["val"].device.type):
         return False
 
-    # Unfusing addmm introduces an extra bf16/fp16 truncation at the mm output
-    # that compounds through deep models and causes accuracy failures.
-    if inp.meta["val"].dtype in (torch.bfloat16, torch.float16):
-        return False
-
     output = match.output_node()
     return all(is_pointwise_use(use) for use in output.users)
 
@@ -1535,6 +1530,11 @@ def should_prefer_unfused_addmm(match):
     extra_check=should_prefer_unfused_addmm,
 )
 def unfuse_bias_add_to_pointwise(match: Match, mat1, mat2, *, inp, alpha, beta):
+    # Unfusing addmm introduces an extra bf16/fp16 truncation at the mm output
+    # that compounds through deep models and causes accuracy failures.
+    if inp.meta["val"].dtype in (torch.bfloat16, torch.float16):
+        return
+
     def repl(inp, x1, x2, alpha, beta):
         mm_result = x1 @ x2
         if alpha != 1:
