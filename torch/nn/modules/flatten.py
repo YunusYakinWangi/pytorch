@@ -98,46 +98,17 @@ class Unflatten(Module):
         >>> output = m(input)
         >>> output.size()
         torch.Size([2, 2, 5, 5])
-        >>> # With namedshape (tuple of tuples)
-        >>> input = torch.randn(2, 50, names=("N", "features"))
-        >>> unflatten = nn.Unflatten("features", (("C", 2), ("H", 5), ("W", 5)))
-        >>> output = unflatten(input)
-        >>> output.size()
-        torch.Size([2, 2, 5, 5])
     """
 
-    NamedShape = tuple[tuple[str, int]]
-
     __constants__ = ["dim", "unflattened_size"]
-    dim: int | str
-    unflattened_size: _size | NamedShape
+    dim: int
+    unflattened_size: _size
 
-    def __init__(self, dim: int | str, unflattened_size: _size | NamedShape) -> None:
+    def __init__(self, dim: int, unflattened_size: _size) -> None:
         super().__init__()
-
-        if isinstance(dim, int):
-            self._require_tuple_int(unflattened_size)
-        elif isinstance(dim, str):
-            self._require_tuple_tuple(unflattened_size)
-        else:
-            raise TypeError("invalid argument type for dim parameter")
-
+        self._require_tuple_int(unflattened_size)
         self.dim = dim
         self.unflattened_size = unflattened_size
-
-    def _require_tuple_tuple(self, input) -> None:
-        if isinstance(input, tuple):
-            for idx, elem in enumerate(input):
-                if not isinstance(elem, tuple):
-                    raise TypeError(
-                        "unflattened_size must be tuple of tuples, "
-                        + f"but found element of type {type(elem).__name__} at pos {idx}"
-                    )
-            return
-        raise TypeError(
-            "unflattened_size must be a tuple of tuples, "
-            + f"but found type {type(input).__name__}"
-        )
 
     def _require_tuple_int(self, input) -> None:
         if isinstance(input, (tuple, list)):

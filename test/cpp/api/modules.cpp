@@ -599,7 +599,6 @@ TEST_F(ModulesTest, Flatten) {
 }
 
 TEST_F(ModulesTest, Unflatten) {
-  // Non-named tensor
   Unflatten unflatten(UnflattenOptions(0, {2, 2}));
   auto output = unflatten->forward(torch::tensor({1, 2, 3, 4}));
   auto expected = torch::tensor({{1, 2}, {3, 4}});
