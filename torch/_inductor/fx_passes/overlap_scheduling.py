@@ -18,6 +18,9 @@ from torch._inductor.fx_passes.bucketing import (
     bucket_key,
     BucketMode,
     get_full_bucket_key,
+    is_all_gather_into_tensor,
+    is_all_reduce_tensor,
+    is_reduce_scatter_tensor,
     is_wait_tensor,
 )
 from torch._inductor.fx_passes.memory_estimator import MemoryTracker
@@ -994,6 +997,8 @@ class OverlapScheduler:
             bucket_only_internode_comms=self.bucket_only_internode_comms,
         )
 
+        self._assign_stream_pool()
+
         if self.log_final_collectives_estimations:
             from torch._inductor.fx_passes.node_runtime_estimation import (
                 _log_graph_collective_benchmarks,
@@ -1004,6 +1009,70 @@ class OverlapScheduler:
             )
 
         return self.gm
+
+    def _assign_stream_pool(self) -> None:
+        """Assign round-robin comm streams to collectives for auto bucketing.
+
+        When comm_stream_pool_exceed_budget_gb > 0, limits concurrent memory
+        across pool streams.  If placing a collective on a new stream would
+        push total in-flight memory over the budget, we serialize it onto the
+        busiest stream instead.
+        """
+        pool_size = config.aten_distributed_optimizations.comm_stream_pool_size
+        if pool_size <= 0:
+            return
+
+        budget_gb = (
+            config.aten_distributed_optimizations.comm_stream_pool_exceed_budget_gb
+        )
+        has_budget = budget_gb is not None
+        budget_bytes = int(budget_gb * 1024**3) if has_budget else 0
+
+        def _is_collective_start(node: fx.Node) -> bool:
+            return (
+                is_all_gather_into_tensor(node)
+                or is_reduce_scatter_tensor(node)
+                or is_all_reduce_tensor(node)
+            )
+
+        # Per-stream in-flight memory: stream_name -> bytes
+        in_flight: dict[str, int] = defaultdict(int)
+        # Map start node -> (stream_name, size_bytes)
+        start_info: dict[fx.Node, tuple[str, int]] = {}
+
+        pool_counter = 0
+        for node in self.gm.graph.nodes:
+            if _is_collective_start(node):
+                coll_bytes = (
+                    estimate_fx_collective_memory_footprint(node) if has_budget else 0
+                )
+                stream_name = f"pool_{pool_counter % pool_size}"
+
+                if has_budget:
+                    total_in_flight = sum(in_flight.values())
+                    if total_in_flight + coll_bytes > budget_bytes and in_flight:
+                        # Over budget: serialize onto the busiest stream
+                        stream_name = max(in_flight, key=lambda s: in_flight[s])
+                    else:
+                        pool_counter += 1
+
+                    in_flight[stream_name] += coll_bytes
+                    start_info[node] = (stream_name, coll_bytes)
+                else:
+                    pool_counter += 1
+
+                node.meta["use_comm_stream"] = stream_name
+
+            elif _schedulable_wait_node(node):
+                start = node.args[0]
+                if isinstance(start, fx.Node) and "use_comm_stream" in start.meta:
+                    node.meta["use_comm_stream"] = start.meta["use_comm_stream"]
+                    # Free in-flight memory for this collective
+                    if start in start_info:
+                        sname, sbytes = start_info.pop(start)
+                        in_flight[sname] -= sbytes
+                        if in_flight[sname] <= 0:
+                            del in_flight[sname]
 
     def get_non_collective_runtime_estimate(self, node: fx.Node) -> float | None:
         """Get runtime estimation for a node in ms. Returns None if no estimation is available."""
