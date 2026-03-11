@@ -355,7 +355,7 @@ class UserDefinedClassVariable(UserDefinedVariable):
         if ConstantVariable.is_literal(obj):
             return VariableTracker.build(tx, obj)
         elif isinstance(obj, enum.Enum):
-            return VariableTracker.build(tx, obj, source)
+            return VariableTracker.build(tx, obj)
         elif self.value is collections.OrderedDict:
             return variables.GetAttrVariable(self, name)
         elif name in getattr(self.value, "__dict__", {}) or (
@@ -1065,8 +1065,8 @@ class UserDefinedEnumClassVariable(UserDefinedClassVariable):
                     # Check if the enum value is a member of this enum class
                     return VariableTracker.build(tx, arg.value in self.value)
                 elif arg.is_python_constant():
-                    return variables.ConstantVariable.create(
-                        arg.as_python_constant() in self.value
+                    return VariableTracker.build(
+                        tx, arg.as_python_constant() in self.value
                     )
         elif isinstance(method, types.FunctionType):
             if name == "__contains__" and len(args) == 1 and not kwargs:
