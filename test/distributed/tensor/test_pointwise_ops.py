@@ -919,7 +919,6 @@ class DistElementwiseOpsTest(DTensorOpTestBase):
         )
         self.assertEqual(d_self.full_tensor(), expected)
 
-
     @with_comms
     def test_foreach_add_list_partial(self):
         """Test that _foreach_add.List preserves Partial("sum") placement
