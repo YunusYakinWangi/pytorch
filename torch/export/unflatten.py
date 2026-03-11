@@ -134,7 +134,8 @@ def _assign_attr(
                 ),
             ) and not is_opaque_reference_type(type(from_obj)):
                 raise AssertionError(
-                    f"expected torch.Tensor, torch.ScriptObject, or opaque reference type for CONSTANT attr_kind, got {type(from_obj)}"
+                    "expected torch.Tensor, torch.ScriptObject, or opaque "
+                    f"reference type for CONSTANT attr_kind, got {type(from_obj)}"
                 )
             setattr(to_module, field, from_obj)
         elif attr_kind == _AttrKind.MODULE:

@@ -264,7 +264,18 @@ def _maybe_register_enum_as_opaque(cls: type) -> None:
                 {type(self).__name__: type(self)},
             )
 
-        cls.__fx_repr__ = _enum_fx_repr
+        try:
+            cls.__fx_repr__ = _enum_fx_repr
+        except TypeError:
+            # C extension enum types (e.g. optree.PyTreeKind) are immutable.
+            # Without __fx_repr__ they cannot be used as inputs to custom ops.
+            log.warning(
+                "Cannot register %s as opaque type: immutable C extension "
+                "enum type. Instances of this type cannot be used as inputs "
+                "to custom operators.",
+                cls,
+            )
+            return
 
     register_opaque_type(
         cls,
