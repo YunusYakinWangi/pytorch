@@ -1222,7 +1222,8 @@ def repro_run(options: Any, mod: nn.Module, load_args: Any) -> None:
 
     from torch.cuda import synchronize
 
-    compiled = compile_fx_inner(mod, args)
+    #  we need to copy mod in order to avoid in place modifications
+    compiled = compile_fx_inner(copy.deepcopy(mod), args)
     assert not isinstance(compiled, str)
 
     if options.accuracy != "":
