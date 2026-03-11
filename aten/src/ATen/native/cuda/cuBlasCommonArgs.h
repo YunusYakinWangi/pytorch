@@ -242,8 +242,7 @@ struct cublasCommonArgs {
         // Bias can be viewed as 2D with the leading dimension 0.
         bias = c10::MaybeOwned<Tensor>::borrowed(*self);
         bias_ld = static_cast<int64_t>(0);
-      }
-      else if (bias_row_broadcasts) {
+      } else if (bias_row_broadcasts) {
         // Not yet supporeted in Lt, because:
         // 1. Cannot set C desc layout != D desc layout.
         // 2. Can match layout with op(C) = Z or T,
