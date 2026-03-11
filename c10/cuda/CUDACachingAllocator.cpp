@@ -763,7 +763,10 @@ struct ExpandableSegment {
     desc.flags = CU_MEM_ACCESS_FLAGS_PROT_READWRITE;
 #ifdef USE_ROCM
     C10_CUDA_CHECK(hipMemSetAccess(
-        ptr() + begin * segment_size_, (end - begin) * segment_size_, &desc, 1));
+        ptr() + begin * segment_size_,
+        (end - begin) * segment_size_,
+        &desc,
+        1));
 #else
     C10_CUDA_DRIVER_CHECK(DriverAPI::get()->cuMemSetAccess_(
         ptr_ + begin * segment_size_, (end - begin) * segment_size_, &desc, 1));
