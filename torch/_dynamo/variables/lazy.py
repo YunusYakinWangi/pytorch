@@ -46,7 +46,6 @@ class LazyCache:
             )(self.value)
 
         if self.name_hint is not None:
-            # pyrefly: ignore [missing-attribute]
             self.vt.set_name_hint(self.name_hint)
 
         del self.value
@@ -551,7 +550,7 @@ class ComputedLazyConstantVariable(LazyVariableTracker):
     _cache: ComputedLazyCache  # pyrefly: ignore[bad-override]
 
     @staticmethod
-    def create(
+    def create(  # pyrefly: ignore[bad-param-name-override]
         op: Callable[..., Any],
         args: list[VariableTracker],
         reconstruct_fn: Callable[[Any, list[VariableTracker]], None],
