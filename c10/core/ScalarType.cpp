@@ -232,6 +232,61 @@ std::pair<std::string, std::string> getDtypeNames(c10::ScalarType scalarType) {
   }
 }
 
+std::string getScalarTypeAbbr(ScalarType scalarType) {
+  switch (scalarType) {
+    case ScalarType::Double:
+      return "f64";
+    case ScalarType::Float:
+      return "f32";
+    case ScalarType::Half:
+      return "f16";
+    case ScalarType::BFloat16:
+      return "bf16";
+    case ScalarType::Float8_e4m3fn:
+      return "f8e4m3fn";
+    case ScalarType::Float8_e5m2:
+      return "f8e5m2";
+    case ScalarType::Float8_e4m3fnuz:
+      return "f8e4m3fnuz";
+    case ScalarType::Float8_e5m2fnuz:
+      return "f8e5m2fnuz";
+    case ScalarType::Float8_e8m0fnu:
+      return "f8e8m0fnu";
+    case ScalarType::Float4_e2m1fn_x2:
+      return "f4e2m1fnx2";
+    case ScalarType::ComplexHalf:
+      return "c32";
+    case ScalarType::ComplexFloat:
+      return "c64";
+    case ScalarType::ComplexDouble:
+      return "c128";
+    case ScalarType::Char:
+      return "i8";
+    case ScalarType::Short:
+      return "i16";
+    case ScalarType::Int:
+      return "i32";
+    case ScalarType::Long:
+      return "i64";
+    case ScalarType::Bool:
+      return "b8";
+    case ScalarType::Byte:
+      return "u8";
+    case ScalarType::UInt16:
+      return "u16";
+    case ScalarType::UInt32:
+      return "u32";
+    case ScalarType::UInt64:
+      return "u64";
+    case ScalarType::Bits16:
+      return "b16";
+    case ScalarType::Bits1x8:
+      return "b1x8";
+    default:
+      return std::get<0>(getDtypeNames(scalarType));
+  }
+}
+
 const std::unordered_map<std::string, ScalarType>& getStringToDtypeMap() {
   static std::unordered_map<std::string, ScalarType> result;
   if (!result.empty()) {
