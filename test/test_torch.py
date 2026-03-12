@@ -125,6 +125,7 @@ class TestBasicVitalSigns(TestCase):
 
 # FIXME: document or deprecate whatever this is
 class TestVitalSignsCuda(TestCase):
+    @skipIfXpu(msg="AssertionError, torch-xpu-ops: #2490")
     @onlyAccelerator
     def test_cuda_vitals_gpu_only(self, device):
         device_type = torch.device(device).type.upper()
