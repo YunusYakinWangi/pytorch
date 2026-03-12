@@ -185,6 +185,24 @@ class TestFilePath(TestTD):
         self.assertTrue(helper("test/test_amp.py", "torch/mixed_precision/t.py"))
         self.assertTrue(helper("test/idk/other/random.py", "torch/idk/t.py"))
 
+    def test_mkldnn_synonyms(self) -> None:
+        # mkldnn/onednn/ideep all share "module: mkldnn" in the autolabeler.
+        # The synonym works via sanitize_name: source files under onednn/ or
+        # ideep/ get their keywords normalized to "mkldnn", which then matches
+        # test_mkldnn.
+        self.assertEqual(
+            get_keywords("torch/csrc/jit/codegen/onednn/foo.py"),
+            ["csrc", "jit", "codegen", "mkldnn", "foo"],
+        )
+        self.assertEqual(
+            get_keywords("caffe2/ideep/bar.py"),
+            ["caffe2", "mkldnn", "bar"],
+        )
+        self.assertTrue(
+            file_matches_keyword("test/test_mkldnn.py", "mkldnn")
+        )
+
+
 
 if __name__ == "__main__":
     unittest.main()

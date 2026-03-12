@@ -33,6 +33,7 @@ keyword_synonyms: dict[str, list[str]] = {
     "hop": ["higher_order_op"],
     "aot": ["flex_attention", "autograd"],
     "inductor": ["dynamo", "export"],  # not actually synonyms but they interact a lot
+    "mkldnn": ["onednn", "ideep"],
 }
 
 
