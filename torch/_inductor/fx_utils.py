@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import Any, Optional
+from typing import Any
 
 import sympy
 
@@ -492,7 +492,7 @@ def get_node_storage(node: torch.fx.Node) -> int | None:
     return get_storage(node.meta["val"])
 
 
-def get_fake(x: Any, gm: Optional[torch.fx.GraphModule]) -> Any:
+def get_fake(x: Any, gm: torch.fx.GraphModule | None) -> Any:
     """Return a fake tensor from the meta values of an input FX node.  If the input node
     is a get_attr node, we attempt to resolve it as a member of gm."""
     if isinstance(x, torch.fx.Node):
@@ -507,7 +507,7 @@ def get_fake(x: Any, gm: Optional[torch.fx.GraphModule]) -> Any:
 
 
 def get_fake_args_kwargs(
-    x: torch.fx.Node, gm: Optional[torch.fx.GraphModule] = None
+    x: torch.fx.Node, gm: torch.fx.GraphModule | None = None
 ) -> tuple[bool, tuple[Any, ...], dict[str, Any]]:
     """
     First value returns a boolean if any of the input nodes don't have a faketensor and
