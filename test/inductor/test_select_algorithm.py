@@ -1008,9 +1008,7 @@ class TestTemplateRender(TestCase):
                 call_args.append(str(numel))
 
                 # Build the inner kernel signature
-                extra_sig = (
-                    ", " + ", ".join(extra_params) if extra_params else ""
-                )
+                extra_sig = ", " + ", ".join(extra_params) if extra_params else ""
 
                 kn = str(Placeholder.KERNEL_NAME)
                 source = (

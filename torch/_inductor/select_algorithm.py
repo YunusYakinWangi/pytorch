@@ -20,7 +20,7 @@ from concurrent.futures import as_completed, ThreadPoolExecutor
 from io import StringIO
 from pathlib import Path
 from types import ModuleType
-from typing import Any, cast, NamedTuple, Optional, TYPE_CHECKING
+from typing import Any, cast, NamedTuple, Optional, Set, TYPE_CHECKING
 from typing_extensions import Self
 from unittest.mock import patch
 
@@ -1899,13 +1899,16 @@ class ExternalTritonTemplateKernel(TritonTemplateKernel):
         # Simplified epilogue interface: {output_param: epilogue_idx}
         self._epilogue_idx_by_param: dict[str, int] = {}
         # Output params that must keep their original tl.store
-        self._epilogue_keep_store: set[str] = set()
+        self._epilogue_keep_store: Set[str] = set()
         # Store target buffers: {buf_name: param_name}
         self._extra_store_targets: dict[str, str] = {}
         # Prologue variable names per input param
         self._prologue_vars: dict[str, dict[str, str]] = {}
         # Import lines for emit_kernel_override, populated by external render
         self._kernel_imports: list[str] = []
+        # Call emission state, populated by _setup_fusion_hooks / external render
+        self._call_preamble: list[str] = []
+        self._call_args: list[str] = []
 
     def get_unfused_epilogues(self) -> list[Any]:
         return self._unfused_epilogues
@@ -1941,9 +1944,7 @@ class ExternalTritonTemplateKernel(TritonTemplateKernel):
         ]
         self._prologue_sources = {
             buf_name: frozenset(
-                d.name
-                for d in pro_node.read_writes.reads
-                if isinstance(d, MemoryDep)
+                d.name for d in pro_node.read_writes.reads if isinstance(d, MemoryDep)
             )
             for buf_name, pro_nodes in buf_name_to_prologue_group.items()
             for pro_node in pro_nodes
