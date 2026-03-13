@@ -16,7 +16,6 @@ from typing import NamedTuple
 
 from torch.testing._internal.inductor_utils import GPU_TYPE, HAS_GPU
 from torch.testing._internal.triton_utils import requires_gpu
-from torch.utils._triton import has_triton
 
 
 if HAS_GPU:
