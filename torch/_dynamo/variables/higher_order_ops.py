@@ -5757,6 +5757,18 @@ def save_reuse_entry(
     freevar_mapping = build_freevar_mapping(tx, p_args, fingerprint.flat_vts)
     single_tensor_output = isinstance(body_r, TensorVariable)
 
+    # Count user-visible outputs from body_r. The graph may have additional
+    # outputs from side-effect intermediates that stamp_out_subgraph must
+    # not include when reconstructing the user-visible return value.
+    user_output_vts: list[VariableTracker] = []
+    VariableTracker.visit(
+        lambda vt: user_output_vts.append(vt)
+        if vt.is_tensor() or isinstance(vt, SymNodeVariable)
+        else None,
+        body_r,
+    )
+    num_user_outputs = len(user_output_vts)
+
     # Cache output tensor metadata so we can construct fresh FakeTensors on
     # cache hit without re-running the subgraph. This is safe because
     # invoke_subgraph does not support aliasing between inputs and outputs
@@ -5780,6 +5792,7 @@ def save_reuse_entry(
         # source replacement mapping (old sources → new sources) to
         # rewrite captured variable sources for the current invocation.
         arg_sources=fingerprint.arg_sources,
+        num_user_outputs=num_user_outputs,
     )
 
     if user_hash_key is not None:
@@ -5893,13 +5906,22 @@ def stamp_out_subgraph(
         cached.config,
     )
 
-    # Validate output structure matches what was cached
+    # Return only the user-visible outputs. The graph may have extra
+    # intermediate outputs from side effects (allow_side_effects=True)
+    # that should not be part of the user-facing return value.
     if cached.single_tensor_output:
         items = flat_variable.items  # pyrefly: ignore[missing-attribute]
         assert isinstance(items[0], TensorVariable), (
             f"Expected tensor output but got {type(items[0]).__name__}"
         )
         return items[0]
+
+    items = flat_variable.items  # pyrefly: ignore[missing-attribute]
+    n = cached.num_user_outputs
+    if n > 0 and n < len(items):
+        from .builder import SourcelessBuilder
+
+        return SourcelessBuilder.create(tx, tuple(items[:n]))
     return flat_variable
 
 
