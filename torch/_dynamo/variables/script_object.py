@@ -209,6 +209,8 @@ class OpaqueObjectClassVariable(UserDefinedVariable):
 class TorchScriptObjectVariable(UserDefinedObjectVariable):
     _fake_script_object_cache: dict[int, "TorchScriptObjectVariable"] = {}
 
+    value: FakeScriptObject
+
     @classmethod
     def is_matching_cls(cls, user_cls: type) -> bool:
         return (
@@ -220,7 +222,7 @@ class TorchScriptObjectVariable(UserDefinedObjectVariable):
     @staticmethod
     def create(
         proxy: Proxy,
-        value: Any,
+        value: FakeScriptObject,
         ctor_args_kwargs: Any = None,
         ctor_arg_sources: tuple[Source | None, ...] | None = None,
         **options: Any,
@@ -232,7 +234,7 @@ class TorchScriptObjectVariable(UserDefinedObjectVariable):
     def __init__(
         self,
         proxy: Proxy,
-        value: Any,
+        value: FakeScriptObject,
         ctor_args_kwargs: Any = None,
         source: Source | None = None,
         ctor_arg_sources: tuple[Source | None, ...] | None = None,
@@ -276,12 +278,7 @@ class TorchScriptObjectVariable(UserDefinedObjectVariable):
         return self.proxy
 
     def __str__(self) -> str:
-        value = (
-            self.value.real_obj
-            if isinstance(self.value, FakeScriptObject)
-            else self.value
-        )
-        return f"{self.__class__.__name__}({value})"
+        return f"{self.__class__.__name__}({self.value.real_obj})"
 
     __repr__ = __str__
 
@@ -296,7 +293,7 @@ class TorchScriptObjectVariable(UserDefinedObjectVariable):
         if hasattr(self.value, "script_class_name") and is_opaque_type(
             self.value.script_class_name
         ):
-            real_obj = self.value.real_obj  # pyrefly: ignore[missing-attribute]
+            real_obj = self.value.real_obj
 
             member_type = get_member_type(
                 type(real_obj),
@@ -392,7 +389,7 @@ class TorchScriptObjectVariable(UserDefinedObjectVariable):
         if hasattr(self.value, "script_class_name") and is_opaque_type(
             self.value.script_class_name
         ):
-            real_obj = self.value.real_obj  # pyrefly: ignore[missing-attribute]
+            real_obj = self.value.real_obj
             value_type = type(real_obj)
 
             member_type = get_member_type(
@@ -489,43 +486,22 @@ class TorchScriptObjectVariable(UserDefinedObjectVariable):
         )
 
     def as_python_constant(self) -> Any:
-        if is_opaque_value_type(
-            type(self.value.real_obj)  # pyrefly: ignore[missing-attribute]
-        ):
-            return self.value.real_obj  # pyrefly: ignore[missing-attribute]
-        return super().as_python_constant()
+        return self.value.real_obj
 
     def is_python_hashable(self) -> bool:
         try:
-            hash(self.value.real_obj)  # pyrefly: ignore[missing-attribute]
+            hash(self.value.real_obj)
             return True
         except TypeError:
             return False
 
     def get_python_hash(self) -> int:
-        real_obj = (
-            self.value.real_obj
-            if isinstance(self.value, FakeScriptObject)
-            else self.value
-        )
-        return hash(real_obj)
+        return hash(self.value.real_obj)
 
     def is_python_equal(self, other: object) -> bool:
         if not isinstance(other, TorchScriptObjectVariable):
             return False
-        real_self = (
-            self.value.real_obj
-            if isinstance(self.value, FakeScriptObject)
-            else self.value
-        )
-        real_other = (
-            other.value.real_obj
-            if isinstance(other.value, FakeScriptObject)
-            else other.value
-        )
-        return real_self == real_other
+        return self.value.real_obj == other.value.real_obj
 
     def get_real_value(self) -> Any:
-        if isinstance(self.value, FakeScriptObject):
-            return self.value.real_obj
-        return self.as_python_constant()
+        return self.value.real_obj
