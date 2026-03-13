@@ -176,22 +176,18 @@ void addmm_dense_result(
       "Calling addmm on a sparse CPU tensor requires Linux platform. ",
       "Please use PyTorch built with MKL on Linux.");
 #else
-  c10::MaybeOwned<Tensor> C_ = prepare_dense_matrix_for_mkl(C);
-  IntArrayRef C_strides = C_->strides();
-  auto ndim = C_->dim();
-  bool is_C_row_major = (C_strides[ndim - 1] == 1);
+  const auto is_C_row_major = at::native::isRowMajorLike(C);
+  c10::MaybeOwned<Tensor> C_ = at::native::maybePrepareBatchedMatrices(C, /*make_col_major_like=*/!is_C_row_major);
 
   // MKL requires same storage layout of matrices
-  c10::MaybeOwned<Tensor> B_ = prepare_dense_matrix_for_mkl(B, is_C_row_major);
-  IntArrayRef B_strides = B_->strides();
-  bool is_B_row_major = (B_strides[ndim - 1] == 1);
+  c10::MaybeOwned<Tensor> B_ = at::native::maybePrepareBatchedMatrices(B, /*make_col_major_like=*/!is_C_row_major);
 
-  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(!(is_C_row_major ^ is_B_row_major));
+  TORCH_INTERNAL_ASSERT_DEBUG_ONLY(is_C_row_major == at::native::isRowMajorLike(*B_));
 
   auto order =
       is_C_row_major ? SPARSE_LAYOUT_ROW_MAJOR : SPARSE_LAYOUT_COLUMN_MAJOR;
-  auto ldc = is_C_row_major ? C_strides[ndim - 2] : C_strides[ndim - 1];
-  auto ldb = is_B_row_major ? B_strides[ndim - 2] : B_strides[ndim - 1];
+  auto ldc = is_C_row_major ? C_->stride(-2) : C_->stride(-1);
+  auto ldb = is_C_row_major ? B_->stride(-2) : B_->stride(-1)
   auto columns_C = mkl_int_cast(C.size(-1), "columns_C");
 
   matrix_descr descrA{};
