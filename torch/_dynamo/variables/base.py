@@ -306,9 +306,9 @@ class VariableTracker(metaclass=VariableTrackerMeta):
         """
         Walk value and call fn on all the VariableTracker instances.
 
-        When side_effects is provided, also walks tensor/symint attributes
-        stored in store_attr_mutations (e.g. dataclass fields set during
-        tracing that aren't in the VT's __dict__).
+        When side_effects is provided, also walks attributes stored in
+        store_attr_mutations (e.g. dataclass fields set during tracing
+        that aren't in the VT's __dict__).
         """
         if cache is None:
             cache = {}
