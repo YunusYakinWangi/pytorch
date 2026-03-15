@@ -1236,11 +1236,11 @@ class SetVariable(ConstDictVariable):
         self,
         tx: "InstructionTranslator",
         arg: VariableTracker,
-    ) -> VariableTracker:
+    ) -> VariableTracker:  # pyrefly: ignore[bad-return]
         # CPython's set.__contains__ only special-cases set/frozenset keys
         # (computing hash via frozenset_hash_impl). For all other unhashable
         # types, it raises TypeError.
-        # https://github.com/python/cpython/blob/main/Objects/setobject.c
+        # https://github.com/python/cpython/blob/main/Objects/setobject.c#L2512-L2514
         if arg.is_python_constant():
             search = arg.as_python_constant()
             if isinstance(search, (set, frozenset)):
