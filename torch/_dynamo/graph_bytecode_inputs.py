@@ -1,5 +1,6 @@
 import weakref
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 from torch._dynamo.source import Source
 
@@ -22,6 +23,11 @@ keep_alive: list[Any] = []
 
 def has_user_objects() -> bool:
     return bool(index_to_bytecode_constructor)
+
+
+def stash_graph_created_object(obj: Any) -> Any:
+    keep_alive.append(obj)
+    return obj
 
 
 def get_external_object_by_index(index: int) -> Any:
@@ -58,9 +64,9 @@ def register_graph_created_object(
     try:
         index_to_external_object_weakref[index] = weakref.ref(example_value)
     except TypeError as e:
-        from .exc import unimplemented_v2
+        from .exc import unimplemented
 
-        unimplemented_v2(
+        unimplemented(
             gb_type="Failed to make weakref to graph-created external object",
             context=f"user_object: {example_value}",
             explanation="Object does not allow us to make a weakref to it",
@@ -78,9 +84,9 @@ def register_user_object(value: Any, source: Source) -> int:
     try:
         index_to_external_object_weakref[index] = weakref.ref(value)
     except TypeError as e:
-        from .exc import unimplemented_v2
+        from .exc import unimplemented
 
-        unimplemented_v2(
+        unimplemented(
             gb_type="Failed to make weakref to User Object",
             context=f"user_object: {value}",
             explanation="Object does not allow us to make a weakref to it",
@@ -88,3 +94,14 @@ def register_user_object(value: Any, source: Source) -> int:
             from_exc=e,
         )
     return index
+
+
+# Register a callback so invoke_leaf_function can retrieve nn.Module instances at runtime.
+# We use a callback pattern instead of having invoke_leaf_function import get_external_object_by_index
+# directly, because higher-order ops should not depend on dynamo (dynamo depends on them, not vice versa).
+from torch._higher_order_ops.invoke_leaf_function import (
+    set_leaf_function_module_retriever,
+)
+
+
+set_leaf_function_module_retriever(get_external_object_by_index)

@@ -34,7 +34,7 @@ class C10_CUDA_API CUDAAllocatorConfig {
   static bool expandable_segments() {
     bool enabled = c10::CachingAllocator::AcceleratorAllocatorConfig::
         use_expandable_segments();
-#ifndef PYTORCH_C10_DRIVER_API_SUPPORTED
+#if !defined(PYTORCH_C10_DRIVER_API_SUPPORTED) && !defined(USE_ROCM)
     if (enabled) {
       TORCH_WARN_ONCE("expandable_segments not supported on this platform")
     }
@@ -59,6 +59,10 @@ class C10_CUDA_API CUDAAllocatorConfig {
 
   static bool graph_capture_record_stream_reuse() {
     return instance().m_graph_capture_record_stream_reuse;
+  }
+
+  static double per_process_memory_fraction() {
+    return instance().m_per_process_memory_fraction;
   }
 
   /** Pinned memory allocator settings */
@@ -152,7 +156,8 @@ class C10_CUDA_API CUDAAllocatorConfig {
         "pinned_use_hip_host_register",
         "graph_capture_record_stream_reuse",
         "pinned_reserve_segment_size_mb",
-        "pinned_num_register_threads"};
+        "pinned_num_register_threads",
+        "per_process_memory_fraction"};
     return keys;
   }
 
@@ -177,6 +182,9 @@ class C10_CUDA_API CUDAAllocatorConfig {
   size_t parseGraphCaptureRecordStreamReuse(
       const c10::CachingAllocator::ConfigTokenizer& tokenizer,
       size_t i);
+  double parsePerProcessMemoryFraction(
+      const c10::CachingAllocator::ConfigTokenizer& tokenizer,
+      size_t i);
 
   std::atomic<size_t> m_pinned_num_register_threads{1};
   std::atomic<size_t> m_pinned_reserve_segment_size_mb{0};
@@ -189,6 +197,7 @@ class C10_CUDA_API CUDAAllocatorConfig {
   std::atomic<bool> m_release_lock_on_cudamalloc{false};
   std::atomic<bool> m_pinned_use_cuda_host_register{false};
   std::atomic<bool> m_graph_capture_record_stream_reuse{false};
+  std::atomic<double> m_per_process_memory_fraction{1.0};
 };
 
 // Keep this for backwards compatibility

@@ -217,9 +217,8 @@ def update(op, device_name, version, key, value):
 def dump():
     """Store the current runtime db state to the module file."""
     current_file = inspect.getfile(dump)
-    f = open(current_file)
-    current_content = f.read()
-    f.close()
+    with open(current_file) as f:
+        current_content = f.read()
     begin_data_str = "# BEGIN GENERATED DATA\n"
     begin_data_index = current_content.find(begin_data_str)
     end_data_index = current_content.find("    # END GENERATED DATA\n")
@@ -242,17 +241,14 @@ def dump():
     part2 = current_content[end_data_index:]
     data_part = []
     for op_key in sorted(_operation_device_version_data, key=sort_key):
-        # pyrefly: ignore [bad-argument-type]
         data_part.append("    " + repr(op_key).replace("'", '"') + ": {")
         op_data = _operation_device_version_data[op_key]
-        # pyrefly: ignore [bad-argument-type]
         data_part.extend(f"        {key}: {op_data[key]}," for key in sorted(op_data))
         data_part.append("    },")
     new_content = part1 + "\n".join(data_part) + "\n" + part2
     if current_content != new_content:
-        f = open(current_file, "w")
-        f.write(new_content)
-        f.close()
+        with open(current_file, "w") as f:
+            f.write(new_content)
 
 
 def minimize(
@@ -446,11 +442,16 @@ def minimize(
 
 
 def create_blocked_tensor(B, M, N, blocksize, sparsity, dtype, device):
-    assert sparsity <= 1.0 and sparsity >= 0.0, (
-        "sparsity should be a value between 0 and 1"
-    )
-    assert M % blocksize[0] == 0
-    assert N % blocksize[1] == 0
+    if sparsity < 0.0 or sparsity > 1.0:
+        raise AssertionError(f"sparsity should be between 0 and 1, got {sparsity}")
+    if M % blocksize[0] != 0:
+        raise AssertionError(
+            f"M ({M}) must be divisible by blocksize[0] ({blocksize[0]})"
+        )
+    if N % blocksize[1] != 0:
+        raise AssertionError(
+            f"N ({N}) must be divisible by blocksize[1] ({blocksize[1]})"
+        )
     shape = (B, M // blocksize[0], N // blocksize[1])[int(B == 0) :]
     A = torch.bernoulli(
         torch.full(shape, 1 - sparsity, dtype=torch.float32, device=device)

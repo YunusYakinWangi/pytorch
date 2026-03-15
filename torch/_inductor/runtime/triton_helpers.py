@@ -2,7 +2,8 @@
 # mypy: allow-untyped-defs
 import math as pymath
 import warnings
-from typing import Any, Callable, TypeVar
+from collections.abc import Callable
+from typing import Any, TypeVar
 
 from .triton_compat import (  # noqa: F401
     _log2,
@@ -341,6 +342,9 @@ def bucketize_binary_search(
         else:
             is_above = values > bucket_upper_bound
 
+        if is_floating(values):
+            is_above = is_above | (values != values)
+
         low = tl.where(is_above & mask, mid + 1, low)
         high = tl.where(is_above, high, mid)
 
@@ -492,7 +496,7 @@ def exclusive_scan_decoupled_lookback_64(scratch_base, block_value, index, combi
             prefix_valid = True
 
         if flag == 2:
-            test_target = -1
+            test_target = tl.full([], -1, index.dtype)  # Match the original type
         else:
             test_target = test_target - 1
 
@@ -678,7 +682,7 @@ def select_one(x, mask, dim, keep_dims=False):
     idtype = tl.core.get_int_dtype(x.dtype.primitive_bitwidth, signed=False)
     ix = x.to(idtype, bitcast=True)
     iy = tl.sum(ix * mask, dim, keep_dims=keep_dims)
-    return iy.to(x.dtype, bitcast=True)
+    return iy.to(idtype).to(x.dtype, bitcast=True)
 
 
 @triton.jit

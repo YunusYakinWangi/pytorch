@@ -14,7 +14,6 @@ from dataclasses import dataclass
 from datetime import timedelta
 from itertools import product
 from sys import platform
-from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -107,14 +106,13 @@ class AbstractTimeoutTest:
             c2p.append(e)
 
     def _init_methods(self):
-        f = tempfile.NamedTemporaryFile(delete=False)
-        if sys.platform == "win32":
-            yield "file:///{}".format(f.name.replace("\\", "/"))
+        with tempfile.NamedTemporaryFile(delete=False) as f:
             f.close()
-        else:
-            yield f"file://{f.name}"
-            f.close()
-            yield f"tcp://127.0.0.1:{common.find_free_port():d}"
+            if sys.platform == "win32":
+                yield "file:///{}".format(f.name.replace("\\", "/"))
+            else:
+                yield f"file://{f.name}"
+                yield f"tcp://127.0.0.1:{common.find_free_port():d}"
 
     def _test_default_store_timeout(self, backend):
         for init_method in self._init_methods():
@@ -140,7 +138,8 @@ class AbstractTimeoutTest:
 class TimeoutTest(TestCase):
     @retry_on_connect_failures
     def test_store_based_barrier(self):
-        f = tempfile.NamedTemporaryFile(delete=False)
+        f = tempfile.NamedTemporaryFile(delete=False)  # noqa: SIM115
+        f.close()
         port = common.find_free_port()
 
         def thread_work(timeout, init_type, world_size, rank, error_list):
@@ -994,9 +993,32 @@ class CommonDistributedDataParallelTest:
 
         self._test_not_nan(model, x)
 
+    @skip_if_lt_x_gpu(2)
+    def test_ddp_buffer_sync_multi_forward_with_batchnorm(self):
+        pg = self._get_process_group()
+
+        model = nn.Sequential(
+            nn.Linear(10, 10),
+            nn.BatchNorm1d(10),
+        ).to(device=self.rank)
+
+        model = DistributedDataParallel(
+            model,
+            device_ids=[self.rank],
+            process_group=pg,
+            broadcast_buffers=True,
+        )
+
+        x = torch.randn(4, 10, device=self.rank)
+
+        model.zero_grad()
+        out1 = model(x)
+        out2 = model(x)
+        (out1.mean() + out2.mean()).backward()
+
     @dataclass
     class CustomOutput:
-        o1: Optional[torch.Tensor]
+        o1: torch.Tensor | None
         o2: dict[str, torch.Tensor]
 
     class DataclassOutputModule(nn.Module):
@@ -1154,7 +1176,11 @@ class AbstractCommTest:
             ranks=ranks,
             backend="gloo",
         )
-        assert dist.get_world_size(process_group) == dist.get_world_size(verify_pg)
+        if dist.get_world_size(process_group) != dist.get_world_size(verify_pg):
+            raise AssertionError(
+                f"World sizes mismatch: {dist.get_world_size(process_group)} "
+                f"vs {dist.get_world_size(verify_pg)}"
+            )
 
         initial_num = (
             self._verify_sequence_number_across_pg(
@@ -1189,9 +1215,7 @@ class AbstractCommTest:
                 self.assertEqual(len(set(rank_to_seq_num.values())), 2)
                 self.assertEqual(rank_to_seq_num[0], rank_to_seq_num[2])
                 expected_same = {
-                    rank_to_seq_num[i]
-                    for i in rank_to_seq_num.keys()
-                    if i not in [0, 2]
+                    rank_to_seq_num[i] for i in rank_to_seq_num if i not in [0, 2]
                 }
                 self.assertEqual(len(expected_same), 1)
                 self.assertEqual(rank_to_seq_num[0] + 1, rank_to_seq_num[1])
@@ -1522,6 +1546,42 @@ class AbstractLargeCommTest:
             ]
             self.assertEqual(output_tensor_list, expected)
 
+    def _test_new_group_ordered(self, backend):
+        store = dist.FileStore(self.file_name, self.world_size)
+        dist.init_process_group(
+            backend,
+            world_size=self.world_size,
+            rank=self.rank,
+            store=store,
+        )
+        rank = dist.get_rank()
+
+        # Reverse-order ranks: group rank 0 = highest global rank
+        reversed_ranks = list(range(self.world_size - 1, -1, -1))
+        new_pg = dist.new_group(ranks=reversed_ranks, sort_ranks=False)
+
+        # Verify that the group rank assignment follows the user-provided order
+        expected_group_rank = reversed_ranks.index(rank)
+        self.assertEqual(dist.get_group_rank(new_pg, rank), expected_group_rank)
+        self.assertEqual(
+            dist.get_process_group_ranks(new_pg),
+            reversed_ranks,
+        )
+
+        # Verify that all_gather results follow the custom rank order
+        input_tensor = torch.tensor([rank], device=self.device)
+        output_tensor_list = [
+            torch.tensor([-1], device=self.device) for _ in range(self.world_size)
+        ]
+        dist.all_gather(output_tensor_list, input_tensor, group=new_pg)
+
+        # Group rank i holds global rank reversed_ranks[i]
+        expected = [
+            torch.tensor([reversed_ranks[i]], device=self.device)
+            for i in range(self.world_size)
+        ]
+        self.assertEqual(output_tensor_list, expected)
+
 
 class CommTest(AbstractCommTest, MultiProcessTestCase):
     def setUp(self):
@@ -1558,7 +1618,7 @@ class CommTest(AbstractCommTest, MultiProcessTestCase):
         }
         invalid_debug_modes = ["foo", 0, 1, -1]
 
-        for mode in mapping.keys():
+        for mode in mapping:
             os.environ["TORCH_DISTRIBUTED_DEBUG"] = str(mode)
             dist.set_debug_level_from_env()
             set_debug_mode = dist.get_debug_level()
@@ -2075,16 +2135,16 @@ dist.init_process_group(rank=0, world_size=1, store=dist.HashStore())
         # ensure supported devices (cpu, cuda) succeeds during dispatch call
         tensor = torch.zeros(2, 2, device=torch.device(device))
         # multi tensor collectives
-        if collective == dist.barrier:
+        if collective is dist.barrier:
             collective()
         elif collective in (dist.all_gather, dist.gather):
             collective([tensor], tensor, *args)
-        elif collective == dist.scatter:
+        elif collective is dist.scatter:
             collective(tensor, [tensor], *args)
         elif collective in (dist.reduce_scatter, dist.all_to_all):
             # gloo does not support reduce_scatter or all_to_all
             if backend != "gloo":
-                if collective == dist.reduce_scatter:
+                if collective is dist.reduce_scatter:
                     collective(tensor, [tensor], *args)
                 else:
                     collective([tensor], [tensor], *args)
@@ -2270,8 +2330,9 @@ class LocalRankTest(MultiProcessTestCase):
 
 if __name__ == "__main__":
     if device_type != "cpu":
-        assert not torch.get_device_module()._initialized, (
-            f"test_distributed must not have initialized {device_type} context on main process"
-        )
+        if torch.get_device_module()._initialized:
+            raise AssertionError(
+                f"test_distributed must not have initialized {device_type} context on main process"
+            )
 
     run_tests()

@@ -2,7 +2,8 @@ set(PYTORCH_FOUND_HIP FALSE)
 
 # If ROCM_PATH is set, assume intention is to compile with
 # ROCm support and error out if the ROCM_PATH does not exist.
-# Else ROCM_PATH does not exist, assume a default of /opt/rocm
+# Else ROCM_PATH does not exist, try to get it from rocm-sdk,
+# or assume a default of /opt/rocm
 # In the latter case, if /opt/rocm does not exist emit status
 # message and return.
 if(DEFINED ENV{ROCM_PATH})
@@ -13,11 +14,31 @@ if(DEFINED ENV{ROCM_PATH})
       "Set a valid ROCM_PATH or unset ROCM_PATH environment variable to fix.")
   endif()
 else()
-  if(UNIX)
-    set(ROCM_PATH /opt/rocm)
-  else() # Win32
-    set(ROCM_PATH C:/opt/rocm)
+  # Try to get ROCM_PATH from rocm-sdk if available
+  find_program(ROCM_SDK_EXECUTABLE rocm-sdk)
+  if(ROCM_SDK_EXECUTABLE)
+    execute_process(
+      COMMAND ${ROCM_SDK_EXECUTABLE} path --root
+      OUTPUT_VARIABLE ROCM_SDK_PATH
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE ROCM_SDK_RESULT
+      ERROR_QUIET
+    )
+    if(ROCM_SDK_RESULT EQUAL 0 AND EXISTS "${ROCM_SDK_PATH}")
+      set(ROCM_PATH "${ROCM_SDK_PATH}")
+      message(STATUS "Found ROCm installation via rocm-sdk at: ${ROCM_PATH}")
+    endif()
   endif()
+
+  # Fall back to default paths if rocm-sdk did not work
+  if(NOT DEFINED ROCM_PATH OR NOT EXISTS ${ROCM_PATH})
+    if(UNIX)
+      set(ROCM_PATH /opt/rocm)
+    else() # Win32
+      set(ROCM_PATH C:/opt/rocm)
+    endif()
+  endif()
+
   if(NOT EXISTS ${ROCM_PATH})
     message(STATUS
         "ROCM_PATH environment variable is not set and ${ROCM_PATH} does not exist.\n"
@@ -83,8 +104,22 @@ find_package_and_print_version(HIP 1.0 MODULE)
 if(HIP_FOUND)
   set(PYTORCH_FOUND_HIP TRUE)
   find_package_and_print_version(hip REQUIRED CONFIG)
+  if(HIP_VERSION)
+    # Check if HIP_VERSION contains a dash (e.g., "7.1.25421-32f9fa6ca5")
+    # and strip everything after it to get clean numeric version
+    string(FIND "${HIP_VERSION}" "-" DASH_POS)
+    if(NOT DASH_POS EQUAL -1)
+      string(SUBSTRING "${HIP_VERSION}" 0 ${DASH_POS} HIP_VERSION_CLEAN)
+      set(HIP_VERSION "${HIP_VERSION_CLEAN}")
+    else()
+      set(HIP_VERSION_CLEAN "${HIP_VERSION}")
+    endif()
+    message("HIP version: ${HIP_VERSION}")
+  else()
+    set(HIP_VERSION_CLEAN "")
+  endif()
 
-  # The rocm-core package was only introduced in ROCm 6.4, so we make it optional.
+# The rocm-core package was only introduced in ROCm 6.4, so we make it optional.
   find_package(rocm-core CONFIG)
 
   # Some old consumer HIP SDKs do not distribute rocm_version.h, so we allow

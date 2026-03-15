@@ -4,13 +4,14 @@ import itertools
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import auto, Enum
-from typing import Any, cast, Optional
+from typing import Any, cast
 
 import torch
 import torch.nn as nn
 from torch._prims_common import make_contiguous_strides_for
 from torch.distributed._functional_collectives import AsyncCollectiveTensor
 from torch.distributed.device_mesh import DeviceMesh
+from torch.distributed.fsdp._fully_shard._fsdp_common import DDPMeshInfo
 from torch.distributed.tensor import DTensor, Replicate, Shard
 from torch.distributed.tensor._dtensor_spec import DTensorSpec, TensorMeta
 from torch.distributed.tensor.placement_types import _StridedShard, Placement
@@ -22,9 +23,11 @@ from ._fsdp_common import (
     _get_dim_chunked_size,
     _raise_assert_with_print,
     _to_dtype_if_needed,
-    compiled_autograd_enabled,
+    DataParallelMeshInfo,
     FSDPMeshInfo,
     HSDPMeshInfo,
+    resolve_shard_placement,
+    ShardPlacementFnResult,
 )
 
 
@@ -80,54 +83,6 @@ def copy_(tensor, data):
     tensor.copy_(data)
 
 
-"""
-[Note: Avoiding functionalization for fsdp.copy_ and inductor.resize_storage_bytes_]
-
-Currently we don't functionalize `fsdp.copy_` op or `inductor.resize_storage_bytes_` op
-(i.e. they show up as a mutation op in the middle of the AOT joint graph).
-
-Reason:
-Traceable FSDP2 compiled autograd BWD graph have the following traits:
-(1) Two inputs of the graph were aliased to each other (one from hook closed-over tensors, one from FWD saved tensors).
-(2) One of them is mutated (copy_ and resize_ to handle the all-gathered param).
-(3) They are both subclasses.
-The combination of these traits is not supported by AOTAutograd (it's difficult to reason about subclass aliasing).
-So this doesn't work at all for Traceable FSDP2.
-
-The compromise we use is to avoid functionalization for the FSDP2 copy_ and resize_ ops.
-This avoids the problem above, because from AOTAutograd point-of-view there are no mutations
-that functionalization needs to handle. (Although we need to be careful not to DCE those mutable ops.)
-
-We can avoid this functionalization because:
-(1) The nn.Parameter is never used before its .copy_() is called in eager code (i.e. no alias of it is created),
-so it's safe to call .copy_() in the middle of the graph to update its content and start using the nn.Parameter downstream.
-(2) We always re-allocate the buffer for nn.Parameter to store the AllGather output and to be used in downstream user ops.
-So calling resize-to-0 in the middle of the graph to free nn.Parameter memory after use should always be okay
-(since we always allocate anew next time we need it, we strictly don't need to keep the old tensor storage around anymore).
-
-Q: Wouldn't the extra resize_ and copy_ ops hurt both memory usage and performance?
-A: Yes it would. As an optimization, we have an Inductor post-grad FX pass to remove those resize_ and copy_ ops
-for unsharded params that have this pattern: resize_(full) -> copy_ -> resize_(0).
-
-TODO:
-Now that we are maintaining the invariant of "no aliased + mutated graph inputs" in both the forward and backward,
-it is now more feasible to functionalize all of the mutable FSDP ops. Some of the pros and cons are:
-
-Cons (of functionalizing those ops):
-(1) By not functionalizing them as we are today, we are making it more likely that they will run at the "correct" time
-in the generated code. If we start to functionalize them, we will need to make sure that Inductor reinplaces them
-in a way where it properly moves the mutations back to exactly where they should have run, or we risk suffering worse
-peak memory than eager. (We probably already need to do something similar in Inductor's reinplacing for copy_:
-https://github.com/pytorch/pytorch/issues/135305#issuecomment-2334888089)
-
-Pros (of functionalizing):
-(1) Better safety, we don't need to worry about the graph passes in inductor/partitioning handling input mutations
-mid-graph quite as much (to be fair we've already done some amount of auditing, but we might have to do some more).
-(2) Better perf: each mutation midway through the graph prevents Inductor from pattern matching across it.
-But maybe there are few enough mutations induced by FSDP for this to matter.
-"""
-
-
 @torch.library.impl(lib, "copy_", "Functionalize")
 def copy__functionalize(tensor, data):
     torch._sync(tensor)
@@ -180,7 +135,7 @@ class ParamModuleInfo:
 @dataclass
 class ExtensionsData:
     # User-defined metadata passed from pre to post-all-gather
-    all_gather_metadata: Optional[Any] = None
+    all_gather_metadata: Any | None = None
     # Save the all-gather input sizes to unflatten the all-gather outputs to ND
     all_gather_input_sizes: Sequence[torch.Size] = ()  # ND
 
@@ -196,8 +151,8 @@ class FSDPParam:
     """
 
     orig_dtype: torch.dtype
-    param_dtype: Optional[torch.dtype]
-    reduce_dtype: Optional[torch.dtype]
+    param_dtype: torch.dtype | None
+    reduce_dtype: torch.dtype | None
     _orig_size: torch.Size  # ND
     sharded_size: torch.Size  # ND
     contiguous_sharded_stride: tuple[int, ...]
@@ -206,10 +161,10 @@ class FSDPParam:
     contiguous_sharded_post_forward_stride: tuple[int, ...]
     _sharded_param_data: torch.Tensor  # 1D
     sharded_param: nn.Parameter  # ND
-    _sharded_post_forward_param_data: Optional[torch.Tensor]  # 1D
-    _sharded_post_forward_param: Optional[nn.Parameter]  # ND
+    _sharded_post_forward_param_data: torch.Tensor | None  # 1D
+    _sharded_post_forward_param: nn.Parameter | None  # ND
     _unsharded_param: nn.Parameter  # ND
-    unsharded_accumulated_grad: Optional[torch.Tensor]  # ND
+    unsharded_accumulated_grad: torch.Tensor | None  # ND
     _sharding_spec: DTensorSpec
     # DTensor attributes (only defined for DTensor `param`):
     _tp_spec: DTensorSpec
@@ -222,31 +177,29 @@ class FSDPParam:
         self,
         param: nn.Parameter,
         module_info: ParamModuleInfo,
-        mesh_info: FSDPMeshInfo,
-        post_forward_mesh_info: Optional[FSDPMeshInfo],
+        mesh_info: DataParallelMeshInfo,
+        post_forward_mesh_info: FSDPMeshInfo | None,
         device: torch.device,
-        shard_placement_fn: Optional[Callable[[nn.Parameter], Optional[Shard]]],
+        shard_placement_fn: Callable[[nn.Parameter], ShardPlacementFnResult] | None,
         mp_policy: MixedPrecisionPolicy,
         offload_policy: OffloadPolicy,
     ):
         self._module_info: ParamModuleInfo = module_info
-        self.mesh_info = mesh_info
         self.post_forward_mesh_info = post_forward_mesh_info
-        # pyrefly: ignore [read-only]
         self.device = device
         self.mp_policy = mp_policy
         self.offload_to_cpu: bool = isinstance(offload_policy, CPUOffloadPolicy)
         self.pin_memory = (
             self.offload_to_cpu and cast(CPUOffloadPolicy, offload_policy).pin_memory
         )
-        self.grad_offload_event: Optional[torch.Event] = None
-        self._init_sharded_param(param, device, shard_placement_fn)
+        self.grad_offload_event: torch.Event | None = None
+        self._init_sharded_param(param, device, shard_placement_fn, mesh_info)
         if self.post_forward_mesh_info:
             self._init_sharded_post_forward_param_metadata(param)
         self._init_extensions()
         self.all_gather_outputs: list[torch.Tensor] = []
         self.unsharded_accumulated_grad = None
-        self._param_fqn: Optional[str] = None  # prefixed from root module
+        self._param_fqn: str | None = None  # prefixed from root module
         # TODO: Remove this padding logic once DTensor pads the local tensor:
         # https://github.com/pytorch/pytorch/issues/113045
         self._post_load_hook_handle = (
@@ -260,8 +213,19 @@ class FSDPParam:
         self,
         param: nn.Parameter,
         device: torch.device,
-        shard_placement_fn: Optional[Callable],
+        shard_placement_fn: Callable[[nn.Parameter], ShardPlacementFnResult] | None,
+        mesh_info: DataParallelMeshInfo,
     ):
+        if callable(shard_placement_fn):
+            shard_result = resolve_shard_placement(
+                shard_placement_fn(param),
+                cast(FSDPMeshInfo, mesh_info),
+            )
+            self.mesh_info = shard_result.mesh_info
+            fsdp_placement = shard_result.placement
+        else:
+            self.mesh_info = mesh_info  # pyrefly: ignore[bad-assignment]
+            fsdp_placement = None
         if param.device != device and param.device.type != "meta":
             raise AssertionError(
                 f"Expects the parameter to already be moved to device {device} but got {param.device}"
@@ -270,7 +234,6 @@ class FSDPParam:
             raise NotImplementedError(
                 f"FSDP does not support non-contiguous parameters yet: {param.shape=} {param.stride()=}"
             )
-        fsdp_placement = shard_placement_fn(param) if shard_placement_fn else None
         if fsdp_placement is None:
             fsdp_placement = Shard(0)
         elif fsdp_placement.dim < 0:
@@ -306,22 +269,29 @@ class FSDPParam:
                     f"or 4 (HSDP+EP+TP) but got {self._spmd_mesh.ndim}."
                 )
             self._spmd_placements: tuple[Placement, ...]
-            dp_shard_tp_placement = (
-                (
-                    _StridedShard(shard_dim, split_factor=split_factor)
-                    if split_factor > 1
-                    else fsdp_placement
-                ),
-                *self._tp_spec.placements,
-            )
-            if dp_mesh.ndim == 1:  # FSDP
-                self._spmd_placements = dp_shard_tp_placement
-            else:  # HSDP
+            if isinstance(self.mesh_info, FSDPMeshInfo):  # FSDP or HSDP
+                dp_shard_tp_placement = (
+                    (
+                        _StridedShard(shard_dim, split_factor=split_factor)
+                        if split_factor > 1
+                        else fsdp_placement
+                    ),
+                    *self._tp_spec.placements,
+                )
+            else:  # DDP
+                dp_shard_tp_placement = (
+                    (Replicate()),
+                    *self._tp_spec.placements,
+                )
+            if isinstance(self.mesh_info, HSDPMeshInfo):  # HSDP
                 if self.mesh_info.replicate_mesh_dim != 0:
                     raise AssertionError(
                         f"Expected replicate_mesh_dim to be 0, got {self.mesh_info.replicate_mesh_dim}"
                     )
                 self._spmd_placements = (Replicate(),) + dp_shard_tp_placement
+            else:  # FSDP or DDP
+                self._spmd_placements = dp_shard_tp_placement
+
             self._sharding_spec = DTensorSpec(
                 self._spmd_mesh,
                 self._spmd_placements,
@@ -330,10 +300,12 @@ class FSDPParam:
             param_data = cast(DTensor, param)._local_tensor
         else:
             self._spmd_mesh = self.mesh_info.mesh
-            if isinstance(self.mesh_info, HSDPMeshInfo):
+            if isinstance(self.mesh_info, HSDPMeshInfo):  # HSDP
                 self._spmd_placements = (Replicate(), fsdp_placement)
-            else:
+            elif isinstance(self.mesh_info, FSDPMeshInfo):  # FSDP
                 self._spmd_placements = (fsdp_placement,)
+            elif isinstance(self.mesh_info, DDPMeshInfo):  # DDP
+                self._spmd_placements = (Replicate(),)
             self._sharding_spec = DTensorSpec(
                 self._spmd_mesh,
                 self._spmd_placements,
@@ -351,8 +323,13 @@ class FSDPParam:
             )
         self._orig_size = param_data.size()
         self._contiguous_orig_stride = make_contiguous_strides_for(self._orig_size)
-        shard_rank = self.mesh_info.shard_mesh_rank
-        shard_world_size = self.mesh_info.shard_mesh_size
+        if isinstance(self.mesh_info, FSDPMeshInfo):  # FSDP or HSDP
+            shard_rank = self.mesh_info.shard_mesh_rank
+            shard_world_size = self.mesh_info.shard_mesh_size
+        else:  # DDP
+            shard_rank = 0
+            shard_world_size = 1
+
         if shard_dim > 0 and param_data.size(shard_dim) % shard_world_size != 0:
             # If sharding on nonzero dim, require even sharding for now because
             # the uneven sharding (1) requires extra copies before/after FSDP
@@ -401,12 +378,20 @@ class FSDPParam:
         if mesh_info is None:
             raise AssertionError("Expected post_forward_mesh_info to not be None")
         param_data = param._local_tensor if isinstance(param, DTensor) else param
-        chunks = _chunk_with_empty(param_data, mesh_info.shard_mesh_size, dim=0)
-        self.sharded_post_forward_size = _get_dim_chunked_size(
-            chunks[mesh_info.shard_mesh_rank],
-            param_data.size(),
-            dim=self.fsdp_placement.dim,
-        )
+        if isinstance(mesh_info, FSDPMeshInfo):
+            chunks = _chunk_with_empty(param_data, mesh_info.shard_mesh_size, dim=0)
+            self.sharded_post_forward_size = _get_dim_chunked_size(
+                chunks[mesh_info.shard_mesh_rank],
+                param_data.size(),
+                dim=self.fsdp_placement.dim,
+            )
+        else:  # DDP
+            chunks = _chunk_with_empty(param_data, 1, dim=0)
+            self.sharded_post_forward_size = _get_dim_chunked_size(
+                chunks[0],
+                param_data.size(),
+                dim=self.fsdp_placement.dim,
+            )
         self.contiguous_sharded_post_forward_stride = make_contiguous_strides_for(
             self.sharded_post_forward_size
         )
@@ -455,24 +440,7 @@ class FSDPParam:
         ]
 
     def init_unsharded_param(self):
-        """
-        [Note: Invariants for torch.compile Traceable FSDP2]
-        1. Under compile, we always re-populate the content of `self._unsharded_param`
-           per AllGather using the slow path.
-        2. Under compile, we always recreate `self.all_gather_outputs` per AllGather.
-           This is to ensure the buffer creation is internal to the graph and
-           avoid `self.all_gather_outputs` being captured as a graph input.
-        3. Under compile, at the end of `free_unsharded_param()`, we always clean up
-           `self.all_gather_outputs` and `self._unsharded_inner_tensors`,
-           to avoid them being captured as graph output.
-
-        With these invariants, only these tensors will be inputs to the graph:
-        - Sharded parameters
-        - Placeholders for the `self._unsharded_param` nn.Parameter
-        """
-        if not compiled_autograd_enabled() and hasattr(
-            self, "_unsharded_param"
-        ):  # after the 1st all-gather
+        if hasattr(self, "_unsharded_param"):  # after the 1st all-gather
             inner_tensor = self._sharded_local_tensor
             if not hasattr(inner_tensor, "fsdp_post_all_gather"):
                 return  # already initialized
@@ -488,9 +456,7 @@ class FSDPParam:
             self._extensions_data.clear()
             return
         inner_tensor = self._sharded_local_tensor
-        if not compiled_autograd_enabled() and hasattr(
-            inner_tensor, "fsdp_post_all_gather"
-        ):
+        if hasattr(inner_tensor, "fsdp_post_all_gather"):
             all_gather_outputs = self._unflatten_all_gather_outputs()
             (
                 unsharded_tensor,
@@ -517,25 +483,9 @@ class FSDPParam:
         )
         if self.is_dtensor:
             unsharded_param = _from_local_no_grad(unsharded_param, self._tp_spec)
-        if hasattr(self, "_unsharded_param"):
-            if not compiled_autograd_enabled():
-                raise AssertionError("Expected compiled_autograd to be enabled")
-            with (
-                torch.no_grad(),
-                torch.autograd._unsafe_preserve_version_counter(self._unsharded_param),
-            ):
-                # NOTE: Under compile, if an unsharded param goes through
-                # resize_(full) -> copy_ -> resize_(0) pattern, we will remove those
-                # resize_ and copy_ ops in a compiler graph pass
-                # `remove_fsdp2_unsharded_param_graph_input_usage` to recover performance.
-                self._unsharded_param.untyped_storage().resize_(
-                    self._unsharded_param.numel() * self._unsharded_param.itemsize
-                )
-                torch.ops.fsdp.copy_(self._unsharded_param, unsharded_param)
-        else:
-            self._unsharded_param = nn.Parameter(
-                unsharded_param, requires_grad=self.sharded_param.requires_grad
-            )
+        self._unsharded_param = nn.Parameter(
+            unsharded_param, requires_grad=self.sharded_param.requires_grad
+        )
 
     def _unflatten_all_gather_outputs(self) -> tuple[torch.Tensor, ...]:
         return tuple(
@@ -569,7 +519,6 @@ class FSDPParam:
                 f"world size ({shard_world_size})"
             )
         shard_rank = self.post_forward_mesh_info.shard_mesh_rank
-        # pyrefly: ignore [unbound-name]
         sharded_numel = numel // shard_world_size
         self._sharded_post_forward_param_data = (
             self.all_gather_outputs[0].narrow(
@@ -669,34 +618,16 @@ class FSDPParam:
             alloc_storage(tensor)
 
     def free_unsharded_param(self) -> None:
-        if compiled_autograd_enabled():
-            """
-            Assumptions under compile:
-            - `self._unsharded_param` is NOT an alias of `self.all_gather_outputs`.
-            Instead, we resize `self._unsharded_param` storage size to full and then
-            explicitly *copy* the data from `self.all_gather_outputs` to `self._unsharded_param`
-            in `init_unsharded_param()`. (For full-graph FSDP2 case, we will then remove
-            the resize_ and copy_ ops in a compiler graph pass to recover performance.)
-            - `self.all_gather_outputs` and `self._unsharded_inner_tensors` are NOT
-            graph inputs. They are created within the graph and is guaranteed to be freed
-            by the end of the graph. They don't leak outside of the graph.
-            """
-            self._unsharded_param.untyped_storage().resize_(0)
-            self.all_gather_outputs = []
-            self._unsharded_inner_tensors = []
-        else:
-            for tensor in itertools.chain(
-                self.all_gather_outputs, self._unsharded_inner_tensors
-            ):
-                free_storage(tensor)
+        for tensor in itertools.chain(
+            self.all_gather_outputs, self._unsharded_inner_tensors
+        ):
+            free_storage(tensor)
 
     @property
     def all_gather_inputs(self) -> list[torch.Tensor]:  # 1D
         self._assert_in_states(ShardedState.SHARDED, ShardedState.SHARDED_POST_FORWARD)
         if self.sharded_state == ShardedState.SHARDED:
-            if not compiled_autograd_enabled() and hasattr(
-                self._sharded_local_tensor, "fsdp_pre_all_gather"
-            ):
+            if hasattr(self._sharded_local_tensor, "fsdp_pre_all_gather"):
                 sharded_local_tensor = self._sharded_local_tensor
                 if self.offload_to_cpu:
                     sharded_local_tensor = sharded_local_tensor.to(
@@ -762,9 +693,7 @@ class FSDPParam:
                 )
             return [_to_dtype_if_needed(sharded_param_data, self.param_dtype)]
         elif self.sharded_state == ShardedState.SHARDED_POST_FORWARD:
-            if not compiled_autograd_enabled() and hasattr(
-                self._sharded_local_tensor, "fsdp_pre_all_gather"
-            ):
+            if hasattr(self._sharded_local_tensor, "fsdp_pre_all_gather"):
                 raise NotImplementedError
             all_gather_input = _to_dtype_if_needed(
                 cast(torch.Tensor, self._sharded_post_forward_param_data),
@@ -816,23 +745,13 @@ class FSDPParam:
         mesh = self.mesh_info.mesh
         if mesh.ndim == 1:
             return mesh
-        elif mesh.ndim == 2:
-            if mesh.mesh_dim_names is None:
-                raise AssertionError("Expected mesh_dim_names to not be None")
-            return mesh[mesh.mesh_dim_names[-1]]
-        raise ValueError(f"Invalid mesh: {mesh}")
+        if mesh.mesh_dim_names is None:
+            raise AssertionError("Expected mesh_dim_names to not be None")
+        return mesh[mesh.mesh_dim_names[-1]]
 
     @property
     def shard_mesh_from_root(self):
-        mesh = self.mesh_info.mesh
-
-        if mesh.ndim == 1:
-            return mesh
-        else:
-            if mesh.mesh_dim_names is None:
-                raise AssertionError("Expected mesh_dim_names to not be None")
-            shard_dim_name = mesh.mesh_dim_names[-1]
-            return mesh[shard_dim_name]
+        return self.shard_mesh
 
     def _assert_in_states(self, *states: ShardedState) -> None:
         if self.sharded_state not in states:
@@ -853,7 +772,7 @@ class FSDPParam:
                     f"instead of {self.sharded_param}"
                 )
             self.sharded_param = new_param
-        # pyrefly: ignore [missing-attribute]
+
         local_tensor = new_param._local_tensor
         if local_tensor.is_meta:
             return
