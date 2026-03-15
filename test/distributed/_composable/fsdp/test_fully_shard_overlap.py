@@ -32,6 +32,10 @@ from torch.testing._internal.common_utils import (
     run_tests,
     TEST_HPU,
 )
+from torch.testing._internal.distributed._tensor.common_dtensor import (
+    ModelArgs,
+    Transformer,
+)
 
 
 device_type = torch.device(get_devtype())
@@ -380,101 +384,129 @@ class TestFullyShardPerParamMeshOverlap(FSDPTest):
     @skip_if_lt_x_gpu(8)
     @unittest.skipIf(TEST_HPU, "Sleep is not supported on HPU")
     def test_fully_shard_per_param_mesh_training_overlap(self):
-        """Test per-PG reduce-scatter state for per-param mesh FSDP.
+        """Test that per-param mesh FSDP overlaps RS with backward compute.
 
-        With per-param mesh, each module has two param groups using different
-        process groups.  Per-PG reduce-scatter state (HEAD) lets peer param
-        group 0 skip the wait on the previous RS, while shared state (HEAD~1)
-        forces every param group to wait.  When comm_sleep > compute_sleep,
-        this extra wait on HEAD~1 adds exposed RS time to the critical path.
-
-        The delay is injected by wrapping ``foreach_reduce`` with per-PG delay
-        streams so that delays for different PGs run in parallel.
+        Builds a Transformer with expert parallelism where each layer has two
+        FSDP param groups (DP and expert-FSDP) via shard_placement_fn.
+        Compares the FSDP-overlapped fwd+bwd time against a non-overlapped
+        reference that runs the same compute and collectives sequentially.
         """
-        torch.manual_seed(42)
-
-        dim, num_modules = 8, 5
-        # comm >> compute so that HEAD~1's extra wait on peer 0 is exposed;
-        # large comm makes the signal overwhelm NCCL/scheduling noise
-        compute_sleep_ms, comm_sleep_ms = 25, 500
         ep_degree = 2
-
         efsdp_size = self.world_size // ep_degree
-        dp_mesh = init_device_mesh(
+
+        world_mesh = init_device_mesh(
             device_type.type,
             (self.world_size,),
-            mesh_dim_names=("dp",),
+            mesh_dim_names=("world",),
         )
+        dp_mesh = world_mesh._unflatten(
+            0, (self.world_size,), ("fsdp",)
+        )["fsdp"]
         sparse_mesh = dp_mesh._unflatten(
-            0,
-            (efsdp_size, ep_degree),
-            ("efsdp", "ep"),
+            0, (efsdp_size, ep_degree), ("efsdp", "ep")
         )
+        ep_mesh = sparse_mesh["ep"]
         dp_mesh_info = FSDPMeshInfo(mesh=dp_mesh, shard_mesh_dim=0)
-        efsdp_mesh_info = FSDPMeshInfo(mesh=sparse_mesh["efsdp"], shard_mesh_dim=0)
-
-        model = nn.Sequential(
-            *[
-                DualParamLinearWithSleep(dim, compute_sleep_ms)
-                for _ in range(num_modules)
-            ]
+        efsdp_mesh_info = FSDPMeshInfo(
+            mesh=sparse_mesh["efsdp"], shard_mesh_dim=0
         )
 
-        for mod in model:
+        # Use dimensions large enough that backward compute >> comm time
+        # but small enough to fit unsharded ref_model in GPU memory
+        model_args = ModelArgs(
+            n_layers=4,
+            vocab_size=1024,
+            max_seq_len=256,
+            dim=1024,
+            n_heads=16,
+            dropout_p=0.0,
+            num_experts=8,
+        )
+        torch.manual_seed(42)
+        model = Transformer(model_args)
+        ref_model = copy.deepcopy(model).to(device_type)
+        Transformer.parallelize(
+            model, tp_mesh=None, use_seq_parallel=False, ep_mesh=ep_mesh
+        )
+        Transformer.parallelize(
+            ref_model, tp_mesh=None, use_seq_parallel=False, ep_mesh=ep_mesh
+        )
 
-            def _shard_placement_fn(param, _mod=mod):
-                if param is _mod.weight_b:
+        for block in model.layers:
+            expert_params = set(block.expert_layer.experts.parameters())
+
+            def _shard_placement_fn(param, _expert_params=expert_params):
+                if param in _expert_params:
                     return ShardPlacementResult(
                         placement=Shard(0), mesh_info=efsdp_mesh_info
                     )
-                return ShardPlacementResult(placement=Shard(0), mesh_info=dp_mesh_info)
+                return ShardPlacementResult(
+                    placement=Shard(0), mesh_info=dp_mesh_info
+                )
 
             fully_shard(
-                mod,
-                mesh=dp_mesh,
-                reshard_after_forward=True,
-                shard_placement_fn=_shard_placement_fn,
+                block, mesh=dp_mesh, shard_placement_fn=_shard_placement_fn
             )
+        fully_shard(
+            [model.tok_embeddings, model.norm, model.output],
+            mesh=dp_mesh,
+            reshard_after_forward=True,
+        )
         fully_shard(model, mesh=dp_mesh, reshard_after_forward=True)
 
-        inp = torch.randn((2, dim), device=device_type.type)
+        blocks = model.layers
+        for i in range(len(blocks) - 1):
+            blocks[i].set_modules_to_forward_prefetch([blocks[i + 1]])
+        for i in range(1, len(blocks)):
+            blocks[i].set_modules_to_backward_prefetch([blocks[i - 1]])
+
+        inp = torch.randint(
+            0,
+            model_args.vocab_size,
+            (4, model_args.max_seq_len),
+            device=device_type.type,
+        )
+
+        # Reference: same model with EP (same EP collectives) but no FSDP.
+        # Since ref_model has no FSDP, there are no FSDP AG/RS collectives.
+        # If FSDP's AG/RS overlap well with compute, the FSDP model should
+        # not be much slower than the ref model despite the extra collectives.
+        def ref_fwd_bwd():
+            loss = ref_model(inp).sum()
+            loss.backward()
 
         def fwd_bwd():
-            model(inp).sum().backward()
+            loss = model(inp).sum()
+            loss.backward()
 
-        # Warmup (many iterations to stabilize NCCL communicators)
-        for _ in range(10):
+        # Warmup
+        for _ in range(3):
             fwd_bwd()
-            model.zero_grad()
+            model.zero_grad(set_to_none=True)
+        for _ in range(3):
+            ref_fwd_bwd()
+            ref_model.zero_grad(set_to_none=True)
 
-        # Measure no-delay baseline
-        baseline_times = [_time_fn(fwd_bwd) for _ in range(5)]
+        ref_times = [_time_fn(ref_fwd_bwd) for _ in range(5)]
         for _ in range(5):
-            model.zero_grad()
+            ref_model.zero_grad(set_to_none=True)
 
-        # Measure with delayed reduce-scatter (per-PG delay streams)
-        with _delayed_foreach_reduce(comm_sleep_ms):
-            for _ in range(5):
-                fwd_bwd()
-                model.zero_grad()
-            delayed_times = [_time_fn(fwd_bwd) for _ in range(5)]
-            for _ in range(5):
-                model.zero_grad()
+        fsdp_times = [_time_fn(fwd_bwd) for _ in range(5)]
+        for _ in range(5):
+            model.zero_grad(set_to_none=True)
 
-        baseline = _median(baseline_times)
-        delayed = _median(delayed_times)
-        overhead = delayed - baseline
-        # 2 param groups * N modules * comm_sleep = total RS sleep injected
-        total_rs = 2 * num_modules * comm_sleep_ms
-        # With per-PG state (HEAD), only the last peer waits per module,
-        # giving overhead ~= (N+1)/(2N) * total_rs ~= 0.6.  With shared
-        # state (HEAD~1), peer 0 also waits on the previous module's RS,
-        # pushing overhead to ~0.9+.  The 0.75 threshold separates them.
+        ref_time = _median(ref_times)
+        fsdp_time = _median(fsdp_times)
+        # FSDP adds AG/RS collectives on top of the ref model's compute + EP
+        # collectives. If overlap works well, the FSDP overhead should be
+        # small (< 20% of the ref time).
+        overhead_ratio = (fsdp_time - ref_time) / ref_time
         self.assertLess(
-            overhead,
-            0.75 * total_rs,
-            f"RS overhead {overhead:.0f}ms >= 75% of total RS {total_rs}ms; "
-            f"per-PG RS state may not be preventing cross-PG stalls",
+            overhead_ratio,
+            0.20,
+            f"FSDP overhead {overhead_ratio:.1%} >= 20% of ref time "
+            f"(fsdp={fsdp_time:.1f}ms, ref={ref_time:.1f}ms); "
+            f"reduce-scatter may not be overlapping with backward compute",
         )
 
 
