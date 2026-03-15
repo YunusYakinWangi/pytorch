@@ -20,7 +20,7 @@ from concurrent.futures import as_completed, ThreadPoolExecutor
 from io import StringIO
 from pathlib import Path
 from types import ModuleType
-from typing import Any, cast, NamedTuple, Optional, Set, TYPE_CHECKING
+from typing import Any, cast, NamedTuple, Optional, TYPE_CHECKING
 from typing_extensions import Self
 from unittest.mock import patch
 
@@ -1899,7 +1899,7 @@ class ExternalTritonTemplateKernel(TritonTemplateKernel):
         # Simplified epilogue interface: {output_param: epilogue_idx}
         self._epilogue_idx_by_param: dict[str, int] = {}
         # Output params that must keep their original tl.store
-        self._epilogue_keep_store: Set[str] = set()
+        self._epilogue_keep_store: OrderedSet[str] = OrderedSet()
         # Store target buffers: {buf_name: param_name}
         self._extra_store_targets: dict[str, str] = {}
         # Prologue variable names per input param
