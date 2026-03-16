@@ -6839,16 +6839,21 @@ class ExternKernel(InputsKernel):
         return op_name
 
     def codegen_size_asserts(self, wrapper: PythonWrapperCodegen) -> None:
-        if config.size_asserts and not V.graph.cpp_wrapper:
+        if config.size_asserts and not V.graph.aot_mode:
             # comparing strides for 0 size tensor is tricky. Ignore them for now.
             if sympy_product(self.get_size()) == 0:
                 return
             size = V.graph.wrapper_code.codegen_shape_tuple(self.get_size())
             stride = V.graph.wrapper_code.codegen_shape_tuple(self.get_stride())
             op_name = self.get_op_name()
-            wrapper.writeline(
-                f"assert_size_stride({self.get_name()}, {size}, {stride}, {op_name!r})"
-            )
+            if V.graph.cpp_wrapper:
+                wrapper.writeline(
+                    f'assert_size_stride({self.get_name()}, {size}, {stride}, "{op_name}");'
+                )
+            else:
+                wrapper.writeline(
+                    f"assert_size_stride({self.get_name()}, {size}, {stride}, {op_name!r})"
+                )
 
     def codegen_alignment_asserts(self, wrapper: PythonWrapperCodegen) -> None:
         if config.alignment_asserts and not V.graph.cpp_wrapper:
