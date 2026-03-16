@@ -719,6 +719,9 @@ def opaque_function(fn=None, *, level="frontend", mutates_args=None):
       runs eagerly at runtime. Requires a ``register_fake`` implementation.
       Equivalent to :func:`leaf_function`.
 
+    See :func:`nonstrict_trace` and :func:`leaf_function` for detailed usage
+    instructions, examples, and caveats for each level.
+
     Args:
         fn: The function to decorate. When used without parentheses
             (``@opaque_function``), this is the decorated function.
@@ -728,7 +731,12 @@ def opaque_function(fn=None, *, level="frontend", mutates_args=None):
     """
     import torch._dynamo
 
-    return torch._dynamo.opaque_function(fn, level=level, mutates_args=mutates_args)
+    if fn is not None:
+        decorator = torch._dynamo.opaque_function(
+            level=level, mutates_args=mutates_args
+        )
+        return decorator(fn)
+    return torch._dynamo.opaque_function(level=level, mutates_args=mutates_args)
 
 
 def load_compiled_function(

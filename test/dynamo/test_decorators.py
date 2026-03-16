@@ -14,6 +14,7 @@ from torch._dynamo.decorators import leaf_function
 from torch._dynamo.exc import Unsupported
 from torch._dynamo.testing import normalize_gm
 from torch._dynamo.utils import counters
+from torch.compiler import opaque_function
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
@@ -24,6 +25,22 @@ from torch.testing._internal.dynamo_pytree_test_utils import PytreeRegisteringTe
 
 def my_custom_function(x):
     return x + 1
+
+
+def _get_nonstrict_trace(decorator_api):
+    if decorator_api == "direct":
+        return torch._dynamo.nonstrict_trace
+    return opaque_function
+
+
+def _get_leaf_function(decorator_api):
+    if decorator_api == "direct":
+        return leaf_function
+
+    def _opaque_leaf(fn=None, *, mutates_args=None):
+        return opaque_function(fn, level="all", mutates_args=mutates_args)
+
+    return _opaque_leaf
 
 
 class DecoratorTests(PytreeRegisteringTestCase):
@@ -221,6 +238,11 @@ class DecoratorTests(PytreeRegisteringTestCase):
         self.assertEqual(cnts.frame_count, 1)
         self.assertEqual(cnts.op_count, 5)
 
+    def test_allow_in_graph_deprecation_warning(self):
+        with self.assertWarnsRegex(FutureWarning, "nonstrict_trace"):
+            torch._dynamo.allow_in_graph(my_custom_function)
+        torch._dynamo.disallow_in_graph(my_custom_function)
+
     def test_allow_in_graph_no_id_reuse(self):
         cnts = torch._dynamo.testing.CompileCounter()
 
@@ -258,8 +280,11 @@ class DecoratorTests(PytreeRegisteringTestCase):
             def fn1(x):
                 return x.cos()
 
-    def test_nonstrict_trace_tensor_args(self):
-        @torch._dynamo.nonstrict_trace
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_tensor_args(self, decorator_api):
+        nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+        @nonstrict_trace
         def trace_me(x, y, z):
             torch._dynamo.graph_break()
             return x * y + z
@@ -277,8 +302,11 @@ class DecoratorTests(PytreeRegisteringTestCase):
         res = opt_fn(x, y)
         self.assertEqual(ref, res)
 
-    def test_nonstrict_trace_pre_existing_dict(self):
-        @torch._dynamo.nonstrict_trace
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_pre_existing_dict(self, decorator_api):
+        nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+        @nonstrict_trace
         def trace_me(x, d):
             torch._dynamo.graph_break()
             return x * d["a"]
@@ -295,8 +323,13 @@ class DecoratorTests(PytreeRegisteringTestCase):
         res = opt_fn(x, d)
         self.assertEqual(ref, res)
 
-    def test_nonstrict_trace_newly_constructed_dict_with_side_effects(self):
-        @torch._dynamo.nonstrict_trace
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_newly_constructed_dict_with_side_effects(
+        self, decorator_api
+    ):
+        nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+        @nonstrict_trace
         def trace_me(x, d):
             torch._dynamo.graph_break()
             return x * d["a"]
@@ -314,8 +347,11 @@ class DecoratorTests(PytreeRegisteringTestCase):
         res = opt_fn(x)
         self.assertEqual(ref, res)
 
-    def test_nonstrict_trace_pre_existing_dict_with_side_effects(self):
-        @torch._dynamo.nonstrict_trace
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_pre_existing_dict_with_side_effects(self, decorator_api):
+        nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+        @nonstrict_trace
         def trace_me(x, d):
             torch._dynamo.graph_break()
             return x * d["a"]
@@ -335,7 +371,8 @@ class DecoratorTests(PytreeRegisteringTestCase):
         self.assertEqual(ref, res)
         self.assertEqual(d0, d1)
 
-    def test_nonstrict_trace_pre_existing_custom_class(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_pre_existing_custom_class(self, decorator_api):
         class Point:
             x: torch.Tensor
             y: torch.Tensor
@@ -351,7 +388,9 @@ class DecoratorTests(PytreeRegisteringTestCase):
             serialized_type_name=f"{Point.__module__}.{Point.__qualname__}",
         )
 
-        @torch._dynamo.nonstrict_trace
+        nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+        @nonstrict_trace
         def trace_me(p):
             torch._dynamo.graph_break()
             return p.x * p.y
@@ -367,7 +406,10 @@ class DecoratorTests(PytreeRegisteringTestCase):
         res = opt_fn(p)
         self.assertEqual(ref, res)
 
-    def test_nonstrict_trace_pre_existing_custom_class_with_side_effects(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_pre_existing_custom_class_with_side_effects(
+        self, decorator_api
+    ):
         class Point:
             x: torch.Tensor
             y: torch.Tensor
@@ -383,7 +425,9 @@ class DecoratorTests(PytreeRegisteringTestCase):
             serialized_type_name=f"{Point.__module__}.{Point.__qualname__}",
         )
 
-        @torch._dynamo.nonstrict_trace
+        nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+        @nonstrict_trace
         def trace_me(p):
             torch._dynamo.graph_break()
             return p.x * p.y
@@ -404,7 +448,10 @@ class DecoratorTests(PytreeRegisteringTestCase):
         self.assertEqual(p1.x, p2.x)
         self.assertEqual(p1.y, p2.y)
 
-    def test_nonstrict_trace_newly_constructed_custom_class_with_side_effects(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_newly_constructed_custom_class_with_side_effects(
+        self, decorator_api
+    ):
         class Point:
             x: torch.Tensor
             y: torch.Tensor
@@ -420,7 +467,9 @@ class DecoratorTests(PytreeRegisteringTestCase):
             serialized_type_name=f"{Point.__module__}.{Point.__qualname__}",
         )
 
-        @torch._dynamo.nonstrict_trace
+        nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+        @nonstrict_trace
         def trace_me(p):
             torch._dynamo.graph_break()
             return p.x * p.y
@@ -439,7 +488,8 @@ class DecoratorTests(PytreeRegisteringTestCase):
         res = opt_fn(x, y)
         self.assertEqual(ref, res)
 
-    def test_nonstrict_trace_nested_custom_class(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_nested_custom_class(self, decorator_api):
         class Point:
             x: torch.Tensor
             y: torch.Tensor
@@ -474,7 +524,9 @@ class DecoratorTests(PytreeRegisteringTestCase):
             torch._dynamo.graph_break()
             return p.x * p.y
 
-        @torch._dynamo.nonstrict_trace
+        nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+        @nonstrict_trace
         def trace_point_tensor(pt):
             torch._dynamo.graph_break()
             return pt.t + trace_point(pt.p)
@@ -493,7 +545,10 @@ class DecoratorTests(PytreeRegisteringTestCase):
         res = opt_fn(x, y)
         self.assertEqual(ref, res)
 
-    def test_nonstrict_trace_pre_existing_register_constant_type_guard(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_pre_existing_register_constant_type_guard(
+        self, decorator_api
+    ):
         class State(torch._opaque_base.OpaqueBase):
             def __init__(self, n):
                 self.n = n
@@ -517,33 +572,43 @@ class DecoratorTests(PytreeRegisteringTestCase):
         # Assume `State` is implemented in C, and the author didn't bother to
         # provide a pytree decomposition for it, and its instances are safe to
         # treat as a constant by `torch.compile`.
+        name = f"{State.__module__}.{State.__qualname__}"
         torch._library.opaque_object.register_opaque_type(State, typ="value")
+        try:
+            nonstrict_trace = _get_nonstrict_trace(decorator_api)
 
-        @torch._dynamo.nonstrict_trace
-        def trace_me(x, s):
-            return x * s.get_num()
+            @nonstrict_trace
+            def trace_me(x, s):
+                return x * s.get_num()
 
-        cnts = torch._dynamo.testing.CompileCounterWithBackend("aot_eager")
+            cnts = torch._dynamo.testing.CompileCounterWithBackend("aot_eager")
 
-        @torch.compile(fullgraph=True, backend=cnts)
-        def fn(x, s):
-            res = trace_me(x, s)
-            return res
+            @torch.compile(fullgraph=True, backend=cnts)
+            def fn(x, s):
+                res = trace_me(x, s)
+                return res
 
-        x = torch.ones(10)
-        # Make sure recompilation didn't happen.
-        self.assertEqual(cnts.frame_count, 0)
-        fn(x, State(42))
-        self.assertEqual(cnts.frame_count, 1)
-        fn(x, State(42))
-        self.assertEqual(cnts.frame_count, 1)
+            x = torch.ones(10)
+            # Make sure recompilation didn't happen.
+            self.assertEqual(cnts.frame_count, 0)
+            fn(x, State(42))
+            self.assertEqual(cnts.frame_count, 1)
+            fn(x, State(42))
+            self.assertEqual(cnts.frame_count, 1)
 
-        # Make sure recompilation did happen.
-        fn(x, State(41))
-        self.assertEqual(cnts.frame_count, 2)
+            # Make sure recompilation did happen.
+            fn(x, State(41))
+            self.assertEqual(cnts.frame_count, 2)
+        finally:
+            torch._library.opaque_object._OPAQUE_TYPES.pop(State, None)
+            torch._library.opaque_object._OPAQUE_TYPES_BY_NAME.pop(name, None)
+            torch._C._unregister_opaque_type(name)
 
-    def test_nonstrict_trace_int_and_float_output(self):
-        @torch._dynamo.nonstrict_trace
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_int_and_float_output(self, decorator_api):
+        nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+        @nonstrict_trace
         def trace_me(x):
             torch._dynamo.graph_break()
             return len(x.shape), 0.42
@@ -559,8 +624,11 @@ class DecoratorTests(PytreeRegisteringTestCase):
         res = opt_fn(x)
         self.assertEqual(ref, res)
 
-    def test_nonstrict_trace_tuple_and_sym_int_output(self):
-        @torch._dynamo.nonstrict_trace
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_tuple_and_sym_int_output(self, decorator_api):
+        nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+        @nonstrict_trace
         def trace_me(x):
             torch._dynamo.graph_break()
             return x + 1, x.size(0)
@@ -576,13 +644,17 @@ class DecoratorTests(PytreeRegisteringTestCase):
         res = opt_fn(x)
         self.assertEqual(ref, res)
 
-    def test_nonstrict_trace_inside_compiled_function(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_inside_compiled_function(self, decorator_api):
+        if decorator_api == "opaque":
+            self.skipTest("opaque_function is on Dynamo skiplist")
+
         def trace_me(x):
             torch._dynamo.graph_break()
             return x + 42
 
         def fn(x):
-            res = torch._dynamo.nonstrict_trace(trace_me)(x)
+            res = _get_nonstrict_trace(decorator_api)(trace_me)(x)
             return res + 1
 
         x = torch.randn(10)
@@ -592,13 +664,17 @@ class DecoratorTests(PytreeRegisteringTestCase):
         res = opt_fn(x)
         self.assertEqual(ref, res)
 
-    def test_nonstrict_trace_inside_compiled_function_kwarg(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_inside_compiled_function_kwarg(self, decorator_api):
+        if decorator_api == "opaque":
+            self.skipTest("direct API specific")
+
         def trace_me(x):
             torch._dynamo.graph_break()
             return x + 42
 
         def fn(x):
-            res = torch._dynamo.nonstrict_trace(traceable_fn=trace_me)(x)
+            res = _get_nonstrict_trace(decorator_api)(traceable_fn=trace_me)(x)
             return res + 1
 
         x = torch.randn(10)
@@ -608,12 +684,15 @@ class DecoratorTests(PytreeRegisteringTestCase):
         res = opt_fn(x)
         self.assertEqual(ref, res)
 
-    def test_nonstrict_trace_on_method(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_on_method(self, decorator_api):
         class Num:
             def __init__(self, n):
                 self.n = n
 
-            @torch._dynamo.nonstrict_trace
+            nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+            @nonstrict_trace
             def trace_me(self, t):
                 torch._dynamo.graph_break()
                 return t + self.n
@@ -636,10 +715,13 @@ class DecoratorTests(PytreeRegisteringTestCase):
         res = opt_fn(x, n)
         self.assertEqual(ref, res)
 
-    def test_nonstrict_trace_captured_external_tensor(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_captured_external_tensor(self, decorator_api):
         cst = torch.ones(1)
 
-        @torch._dynamo.nonstrict_trace
+        nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+        @nonstrict_trace
         def trace_me(x, y):
             torch._dynamo.graph_break()
             return x * y + cst
@@ -654,13 +736,17 @@ class DecoratorTests(PytreeRegisteringTestCase):
         res = opt_fn(x, y)
         self.assertEqual(ref, res)
 
-    def test_nonstrict_trace_no_action_at_a_distance(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_no_action_at_a_distance(self, decorator_api):
+        if decorator_api == "opaque":
+            self.skipTest("direct API specific")
+
         def trace_me(x):
             torch._dynamo.graph_break()
             return x + 42
 
         # No effect on traceability of `trace_me`
-        torch._dynamo.nonstrict_trace(trace_me)
+        _get_nonstrict_trace(decorator_api)(trace_me)
 
         def fn(x):
             res = trace_me(x)
@@ -676,14 +762,18 @@ class DecoratorTests(PytreeRegisteringTestCase):
         # There should be 1 graph break
         self.assertEqual(cnts.frame_count, 2)
 
-    def test_nonstrict_trace_inside_compiled_function_error(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_inside_compiled_function_error(self, decorator_api):
+        if decorator_api == "opaque":
+            self.skipTest("direct API specific")
+
         @torch.compile(fullgraph=True, backend="aot_eager")
         def fn(x, y):
             def trace_me(x, y):
                 torch._dynamo.graph_break()
                 return x * y
 
-            res = torch._dynamo.nonstrict_trace(trace_me)(x, y)
+            res = _get_nonstrict_trace(decorator_api)(trace_me)(x, y)
             return res + 1
 
         try:
@@ -693,7 +783,11 @@ class DecoratorTests(PytreeRegisteringTestCase):
             msg = "Applying `nonstrict_trace` to function <trace_me>; however, `nonstrict_trace` currently requires the function to be defined outside `torch.compile` region."  # NOQA: B950
             self.assertIn(msg, str(e))
 
-    def test_nonstrict_trace_custom_class_error(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_custom_class_error(self, decorator_api):
+        if decorator_api == "opaque":
+            self.skipTest("direct API specific")
+
         class Point:
             x: torch.Tensor
             y: torch.Tensor
@@ -702,7 +796,9 @@ class DecoratorTests(PytreeRegisteringTestCase):
                 self.x = x
                 self.y = y
 
-        @torch._dynamo.nonstrict_trace
+        nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+        @nonstrict_trace
         def trace_me(p):
             torch._dynamo.graph_break()
             return p.x * p.y
@@ -719,7 +815,11 @@ class DecoratorTests(PytreeRegisteringTestCase):
         except torch._dynamo.exc.Unsupported as e:
             self.assertIn("Invalid input type for nonstrict_trace-ed function", str(e))
 
-    def test_nonstrict_trace_nested_custom_class_error(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_nested_custom_class_error(self, decorator_api):
+        if decorator_api == "opaque":
+            self.skipTest("direct API specific")
+
         class Point:
             x: torch.Tensor
             y: torch.Tensor
@@ -747,7 +847,9 @@ class DecoratorTests(PytreeRegisteringTestCase):
             torch._dynamo.graph_break()
             return p.x * p.y
 
-        @torch._dynamo.nonstrict_trace
+        nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+        @nonstrict_trace
         def trace_point_tensor(pt):
             torch._dynamo.graph_break()
             return pt.t + trace_point(pt.p)
@@ -766,7 +868,11 @@ class DecoratorTests(PytreeRegisteringTestCase):
         except torch._dynamo.exc.Unsupported as e:
             self.assertIn("Invalid input type for nonstrict_trace-ed function", str(e))
 
-    def test_nonstrict_trace_custom_class_output_error(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_custom_class_output_error(self, decorator_api):
+        if decorator_api == "opaque":
+            self.skipTest("direct API specific")
+
         class Point:
             x: torch.Tensor
             y: torch.Tensor
@@ -775,7 +881,9 @@ class DecoratorTests(PytreeRegisteringTestCase):
                 self.x = x
                 self.y = y
 
-        @torch._dynamo.nonstrict_trace
+        nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+        @nonstrict_trace
         def trace_me(x):
             torch._dynamo.graph_break()
             return Point(x, x + 1)
@@ -812,29 +920,39 @@ class DecoratorTests(PytreeRegisteringTestCase):
         # Assume `State` is implemented in C, and the author didn't bother to
         # provide a pytree decomposition for it, and its instances are safe to
         # treat as a constant by `torch.compile`.
+        name = f"{State.__module__}.{State.__qualname__}"
         torch._library.opaque_object.register_opaque_type(State, typ="reference")
-
-        @torch._dynamo.nonstrict_trace
-        def trace_me(x, s):
-            return x * s.get_num()
-
-        @torch.compile(fullgraph=True, backend="aot_eager")
-        def fn(x):
-            s = State(10)
-            res = trace_me(x, s)
-            return res
-
         try:
-            x = torch.ones(10)
-            fn(x)
-            self.assertFalse(True)  # must raise error before this
-        except torch._dynamo.exc.Unsupported as e:
-            self.assertIn(
-                "An opaque object was created in the middle of the program.",
-                str(e),
-            )
 
-    def test_nonstrict_trace_object_in_context_error(self):
+            @torch._dynamo.nonstrict_trace
+            def trace_me(x, s):
+                return x * s.get_num()
+
+            @torch.compile(fullgraph=True, backend="aot_eager")
+            def fn(x):
+                s = State(10)
+                res = trace_me(x, s)
+                return res
+
+            try:
+                x = torch.ones(10)
+                fn(x)
+                self.assertFalse(True)  # must raise error before this
+            except torch._dynamo.exc.Unsupported as e:
+                self.assertIn(
+                    "An opaque object was created in the middle of the program.",
+                    str(e),
+                )
+        finally:
+            torch._library.opaque_object._OPAQUE_TYPES.pop(State, None)
+            torch._library.opaque_object._OPAQUE_TYPES_BY_NAME.pop(name, None)
+            torch._C._unregister_opaque_type(name)
+
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_object_in_context_error(self, decorator_api):
+        if decorator_api == "opaque":
+            self.skipTest("direct API specific")
+
         class Point:
             x: torch.Tensor
             y: torch.Tensor
@@ -858,7 +976,9 @@ class DecoratorTests(PytreeRegisteringTestCase):
             serialized_type_name=f"{PointTensor.__module__}.{PointTensor.__qualname__}",
         )
 
-        @torch._dynamo.nonstrict_trace
+        nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+        @nonstrict_trace
         def trace_me(pt):
             torch._dynamo.graph_break()
             return pt.t + pt.p.x * pt.p.y
@@ -880,8 +1000,11 @@ class DecoratorTests(PytreeRegisteringTestCase):
                 "Invalid use of pytree_flatten with nonstrict_trace-ed function", str(e)
             )
 
-    def test_nonstrict_trace_nn_module_dict_input(self):
-        @torch._dynamo.nonstrict_trace
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_nonstrict_trace_nn_module_dict_input(self, decorator_api):
+        nonstrict_trace = _get_nonstrict_trace(decorator_api)
+
+        @nonstrict_trace
         def trace_me(x, modules):
             torch._dynamo.graph_break()
             return modules["a"](x) + modules["b"](x)
@@ -2564,8 +2687,11 @@ Detected recompile when torch.compile stance is 'fail_on_recompile'. filename: '
             normalize_gm(backend.bw_graphs[0].print_readable(print_output=False)),
         )
 
-    def test_leaf_function_simple(self):
-        @leaf_function
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_simple(self, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def non_tracable_forward(mod, x):
             if x.sum() > 0:
                 return (mod.linear(x),)
@@ -2642,8 +2768,11 @@ class GraphModule(torch.nn.Module):
 """,  # noqa: B950
         )
 
-    def test_leaf_function_with_logging(self):
-        @leaf_function
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_with_logging(self, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def logging_forward(mod, x):
             print("Processing input")
             return (mod.linear(x),)
@@ -2672,10 +2801,13 @@ class GraphModule(torch.nn.Module):
             # Called 6 times: eager, compile_eager, and compile_aot, 2 iterations each
             self.assertEqual(mock_print.call_count, 6)
 
-    def test_leaf_function_dynamic_autograd_module_config(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_dynamic_autograd_module_config(self, decorator_api):
         from torch._dynamo.testing import CompileCounterWithBackend
 
-        @leaf_function
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def configurable_scale(mod, x):
             # Branch based on module config, not input
             if mod.use_double_scale:
@@ -2745,12 +2877,15 @@ class GraphModule(torch.nn.Module):
         # Verify only ONE compilation happened (no recompilation when changing config)
         self.assertEqual(counter.frame_count, 1)
 
-    def test_leaf_function_dynamic_autograd_closure(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_dynamic_autograd_closure(self, decorator_api):
         from torch._dynamo.testing import CompileCounterWithBackend
 
         config = {"use_double_scale": True}
 
-        @leaf_function
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def configurable_scale(x, y):
             # Branch based on closure variable, not input
             if config["use_double_scale"]:
@@ -2813,11 +2948,14 @@ class GraphModule(torch.nn.Module):
         # Verify only ONE compilation happened (no recompilation when changing closure)
         self.assertEqual(counter.frame_count, 1)
 
-    def test_leaf_function_closure_constants_without_grad(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_closure_constants_without_grad(self, decorator_api):
         closure_scale = 2.0
         closure_tensor = torch.tensor([1.0, 2.0, 3.0])
 
-        @leaf_function
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def closure_forward(mod, x):
             out = mod.linear(x) * closure_scale * mod.scale
             out = out + closure_tensor + mod.offset
@@ -2897,8 +3035,11 @@ class GraphModule(torch.nn.Module):
 """,  # noqa: B950
         )
 
-    def test_leaf_function_pytree_inputs(self):
-        @leaf_function
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_pytree_inputs(self, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def pytree_forward(mod, inputs):
             if inputs["x"].sum() > 0:
                 return (mod.linear(inputs["x"]), inputs["y"] + 1)
@@ -2929,8 +3070,11 @@ class GraphModule(torch.nn.Module):
 
         self._test_leaf_function_helper(PytreeModule, args_fn, loss_fn)
 
-    def test_leaf_function_nested_annotations(self):
-        @leaf_function
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_nested_annotations(self, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def inner_leaf_forward(mod, x):
             y = mod.linear(x)
             return (y + x,)
@@ -2947,7 +3091,9 @@ class GraphModule(torch.nn.Module):
             def forward(self, x):
                 return inner_leaf_forward(self, x)
 
-        @leaf_function
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def outer_leaf_forward(mod, x):
             z = mod.linear(x)
             return mod.inner(z + x)
@@ -3027,8 +3173,11 @@ class GraphModule(torch.nn.Module):
 """,  # noqa: B950
         )
 
-    def test_leaf_function_data_dependent_nonzero(self):
-        @leaf_function
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_data_dependent_nonzero(self, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def nonzero_forward(mod, x):
             out = mod.linear(x)
             nonzero_indices = (out > 0).nonzero()
@@ -3070,8 +3219,11 @@ class GraphModule(torch.nn.Module):
 
         self._test_leaf_function_helper(OuterModule, args_fn, loss_fn)
 
-    def test_leaf_function_data_dependent_item(self):
-        @leaf_function
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_data_dependent_item(self, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def item_forward(mod, x):
             out = mod.linear(x)
             scalar_value = out.sum().item()
@@ -3098,9 +3250,12 @@ class GraphModule(torch.nn.Module):
 
         self._test_leaf_function_helper(ItemModule, args_fn, loss_fn)
 
+    @parametrize("decorator_api", ["direct", "opaque"])
     @parametrize("backend", ["eager", "aot_eager"])
-    def test_leaf_function_multiple_compiled_submodules(self, backend):
-        @leaf_function
+    def test_leaf_function_multiple_compiled_submodules(self, backend, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def leaf_forward(mod, x):
             if x.sum() > 0:
                 return (mod.linear(x),)
@@ -3188,10 +3343,13 @@ class GraphModule(torch.nn.Module):
             x_compiled,
         )
 
+    @parametrize("decorator_api", ["direct", "opaque"])
     @parametrize("backend", ["eager", "aot_eager"])
     @parametrize("do_compile", [False, True])
-    def test_leaf_function_with_graph_breaks(self, backend, do_compile):
-        @leaf_function
+    def test_leaf_function_with_graph_breaks(self, backend, do_compile, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def leaf_forward(mod, x):
             if x.sum() > 0:
                 return (mod.linear(x),)
@@ -3246,8 +3404,11 @@ class GraphModule(torch.nn.Module):
 
         self._assert_models_equal(model_eager, model_test, x, x_test)
 
-    def test_leaf_function_with_module_in_pytree(self):
-        @leaf_function
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_with_module_in_pytree(self, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def main_forward(modules_dict, x):
             if x.sum() > 0:
                 return (modules_dict["first"](x) + modules_dict["second"](x),)
@@ -3285,8 +3446,11 @@ class GraphModule(torch.nn.Module):
 
         self._test_leaf_function_helper(WrapperModule, args_fn, loss_fn)
 
-    def test_leaf_function_with_module_as_kwarg(self):
-        @leaf_function
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_with_module_as_kwarg(self, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def main_forward(x, helper_mod=None):
             if x.sum() > 0:
                 return (helper_mod(x),)
@@ -3321,8 +3485,13 @@ class GraphModule(torch.nn.Module):
 
         self._test_leaf_function_helper(WrapperModule, args_fn, loss_fn)
 
-    def test_leaf_function_missing_fake_impl_error(self):
-        @leaf_function
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_missing_fake_impl_error(self, decorator_api):
+        if decorator_api == "opaque":
+            self.skipTest("direct API specific")
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def no_fake_impl_forward(mod, x):
             return (mod.linear(x),)
 
@@ -3344,11 +3513,14 @@ class GraphModule(torch.nn.Module):
         with self.assertRaisesRegex(Exception, "requires a fake implementation"):
             compiled_mod(x)
 
+    @parametrize("decorator_api", ["direct", "opaque"])
     @parametrize("backend", ["eager", "aot_eager"])
-    def test_leaf_function_constant_tensor_closure_error(self, backend):
+    def test_leaf_function_constant_tensor_closure_error(self, backend, decorator_api):
         constant_weight = torch.randn(3, 3)
 
-        @leaf_function
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def constant_closure_forward(x):
             return (x @ constant_weight,)
 
@@ -3376,9 +3548,12 @@ class GraphModule(torch.nn.Module):
         ):
             compiled_mod(x)
 
+    @parametrize("decorator_api", ["direct", "opaque"])
     @parametrize("backend", ["eager", "aot_eager"])
-    def test_leaf_function_input_mutation_error(self, backend):
-        @leaf_function
+    def test_leaf_function_input_mutation_error(self, backend, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def mutate_input(x):
             x.add_(1)
             return (x,)
@@ -3403,9 +3578,12 @@ class GraphModule(torch.nn.Module):
         with self.assertRaisesRegex(RuntimeError, "leaf Variable that requires grad"):
             compiled_fn(x.clone().requires_grad_(True))
 
+    @parametrize("decorator_api", ["direct", "opaque"])
     @parametrize("backend", ["eager", "aot_eager"])
-    def test_leaf_function_validation_dtype_mismatch(self, backend):
-        @leaf_function
+    def test_leaf_function_validation_dtype_mismatch(self, backend, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def dtype_mismatch_forward(mod, x):
             return (mod.linear(x),)
 
@@ -3429,10 +3607,15 @@ class GraphModule(torch.nn.Module):
             with self.assertRaisesRegex(RuntimeError, "Dtype mismatch"):
                 compiled_mod(x)
 
+    @parametrize("decorator_api", ["direct", "opaque"])
     @parametrize("backend", ["eager", "aot_eager"])
     @parametrize("validate_outputs", [True, False])
-    def test_leaf_function_validation_shape_mismatch(self, backend, validate_outputs):
-        @leaf_function
+    def test_leaf_function_validation_shape_mismatch(
+        self, backend, validate_outputs, decorator_api
+    ):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def mismatched_forward(mod, x):
             return (mod.linear(x),)
 
@@ -3460,8 +3643,11 @@ class GraphModule(torch.nn.Module):
                 result = compiled_mod(x)
                 self.assertEqual(result[0].shape, (3, 3))
 
-    def test_leaf_function_no_module_inputs(self):
-        @leaf_function
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_no_module_inputs(self, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def my_custom_fn(inputs: dict[str, torch.Tensor], scale: float, offset: int):
             x = inputs["x"]
             y = inputs["y"]
@@ -3498,15 +3684,18 @@ class GraphModule(torch.nn.Module):
 
         self._test_leaf_function_helper(NoModuleInputsModule, args_fn, loss_fn)
 
+    @parametrize("decorator_api", ["direct", "opaque"])
     @parametrize("backend", ["eager", "aot_eager"])
     @parametrize("check_escaped_gradients", [True, False])
     def test_leaf_function_escaped_gradient_multiple_tensors(
-        self, backend, check_escaped_gradients
+        self, backend, check_escaped_gradients, decorator_api
     ):
         weight1 = torch.randn(3, 3, requires_grad=True)
         weight2 = torch.randn(3, 3, requires_grad=True)
 
-        @leaf_function
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def uses_multiple_closures(x):
             return (x @ weight1 + x @ weight2,)
 
@@ -3530,14 +3719,17 @@ class GraphModule(torch.nn.Module):
                 result = compiled_fn(x)
                 self.assertEqual(result[0].shape, (2, 3))
 
+    @parametrize("decorator_api", ["direct", "opaque"])
     @parametrize("backend", ["eager", "aot_eager"])
     @parametrize("check_escaped_gradients", [True, False])
     def test_leaf_function_escaped_gradient_input_no_grad(
-        self, backend, check_escaped_gradients
+        self, backend, check_escaped_gradients, decorator_api
     ):
         closure_weight = torch.randn(3, 3, requires_grad=True)
 
-        @leaf_function
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def uses_closure(x):
             return (x @ closure_weight,)
 
@@ -3557,17 +3749,20 @@ class GraphModule(torch.nn.Module):
             result = compiled_fn(x)
             self.assertEqual(result[0].shape, (2, 3))
 
+    @parametrize("decorator_api", ["direct", "opaque"])
     @parametrize("backend", ["eager", "aot_eager"])
     @parametrize("check_escaped_gradients", [True, False])
     def test_leaf_function_escaped_gradient_mixed_inputs(
-        self, backend, check_escaped_gradients
+        self, backend, check_escaped_gradients, decorator_api
     ):
         base1 = torch.randn(3, 3, requires_grad=True)
         base2 = torch.randn(3, 4, requires_grad=True)
         closure_weight1 = base1 * 2
         closure_weight2 = base2 * 3
 
-        @leaf_function
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def mixed_inputs(x, y):
             out1 = x @ closure_weight1 + y
             out2 = x @ closure_weight2
@@ -3595,13 +3790,16 @@ class GraphModule(torch.nn.Module):
                 self.assertEqual(result[0].shape, (2, 3))
                 self.assertEqual(result[1].shape, (2, 4))
 
+    @parametrize("decorator_api", ["direct", "opaque"])
     @parametrize("backend", ["eager", "aot_eager"])
     def test_leaf_function_escaped_gradient_error_message_contains_tensor_info(
-        self, backend
+        self, backend, decorator_api
     ):
         closure_weight = torch.randn(4, 5, dtype=torch.float32, requires_grad=True)
 
-        @leaf_function
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def uses_closure(x):
             return (x @ closure_weight,)
 
@@ -3619,11 +3817,14 @@ class GraphModule(torch.nn.Module):
             with self.assertRaisesRegex(RuntimeError, r"shape=\[4, 5\].*dtype="):
                 compiled_fn(x)
 
+    @parametrize("decorator_api", ["direct", "opaque"])
     @parametrize("backend", ["eager", "aot_eager"])
-    def test_leaf_function_escaped_gradient_actually_lost(self, backend):
+    def test_leaf_function_escaped_gradient_actually_lost(self, backend, decorator_api):
         closure_weight = torch.randn(3, 3, requires_grad=True)
 
-        @leaf_function
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def uses_closure(x):
             return (x @ closure_weight,)
 
@@ -3644,7 +3845,10 @@ class GraphModule(torch.nn.Module):
         self.assertIsNotNone(x.grad)
         self.assertIsNone(closure_weight.grad)
 
-    def test_leaf_function_and_nonstrict_trace_mutually_exclusive(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_and_nonstrict_trace_mutually_exclusive(self, decorator_api):
+        if decorator_api == "opaque":
+            self.skipTest("direct API specific")
         from torch._dynamo.decorators import leaf_function, nonstrict_trace
 
         with self.assertRaisesRegex(
@@ -3667,10 +3871,13 @@ class GraphModule(torch.nn.Module):
             def bad_fn2(x):
                 return (x,)
 
-    def test_leaf_function_no_return_value(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_no_return_value(self, decorator_api):
         printed = []
 
-        @leaf_function
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def fn_no_return(x):
             print("processing")
 
@@ -3751,8 +3958,11 @@ class GraphModule(torch.nn.Module):
 """,  # noqa: B950
         )
 
-    def test_leaf_function_output_structure_mismatch(self):
-        @leaf_function
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_output_structure_mismatch(self, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def mismatched_fn(x):
             return {"a": x, "b": x * 2}
 
@@ -3767,8 +3977,11 @@ class GraphModule(torch.nn.Module):
         with self.assertRaisesRegex(AssertionError, "output structure mismatch"):
             torch.compile(fn, backend="eager")(x)
 
-    def test_leaf_function_nested_output(self):
-        @leaf_function
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_nested_output(self, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def nested_output_fn(linear1, linear2, linear3, x):
             if x.sum() > 0:
                 return {
@@ -3814,7 +4027,8 @@ class GraphModule(torch.nn.Module):
 
         self._test_leaf_function_helper(NestedOutputModule, args_fn, loss_fn)
 
-    def test_leaf_function_custom_pytree_output(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_custom_pytree_output(self, decorator_api):
         class Point:
             x: torch.Tensor
             y: torch.Tensor
@@ -3830,7 +4044,9 @@ class GraphModule(torch.nn.Module):
             serialized_type_name=f"{Point.__module__}.{Point.__qualname__}",
         )
 
-        @leaf_function
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def point_fn(linear1, linear2, x):
             return (Point(linear1(x), linear2(x)), 0.5)
 
@@ -3856,8 +4072,11 @@ class GraphModule(torch.nn.Module):
 
         self._test_leaf_function_helper(PointModule, args_fn, loss_fn)
 
-    def test_leaf_function_fake_requires_grad_ignored(self):
-        @leaf_function
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_fake_requires_grad_ignored(self, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function
         def my_fn(x):
             return (x * 2,)
 
@@ -3889,9 +4108,12 @@ class GraphModule(torch.nn.Module):
                 self.assertIsNotNone(example_value)
                 self.assertTrue(example_value[0].requires_grad)
 
+    @parametrize("decorator_api", ["direct", "opaque"])
     @parametrize("backend", ["eager", "aot_eager"])
-    def test_leaf_function_input_mutation_non_grad(self, backend):
-        @leaf_function(mutates_args={"buf"})
+    def test_leaf_function_input_mutation_non_grad(self, backend, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function(mutates_args={"buf"})
         def mutate_buffer(x, buf):
             buf.add_(1)
             return (x + buf,)
@@ -3919,9 +4141,12 @@ class GraphModule(torch.nn.Module):
         self.assertEqual(result_compiled[0], expected)
         self.assertEqual(buf_compiled, buf + 1)
 
+    @parametrize("decorator_api", ["direct", "opaque"])
     @parametrize("backend", ["eager", "aot_eager"])
-    def test_leaf_function_input_mutation_mixed(self, backend):
-        @leaf_function(mutates_args={"buf"})
+    def test_leaf_function_input_mutation_mixed(self, backend, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function(mutates_args={"buf"})
         def mixed_fn(x, buf):
             buf.mul_(2)
             return (x * buf,)
@@ -3949,8 +4174,9 @@ class GraphModule(torch.nn.Module):
         self.assertEqual(result_compiled[0], expected)
         self.assertEqual(buf_compiled, buf * 2)
 
+    @parametrize("decorator_api", ["direct", "opaque"])
     @parametrize("backend", ["eager", "aot_eager"])
-    def test_leaf_function_input_mutation_module_buffer(self, backend):
+    def test_leaf_function_input_mutation_module_buffer(self, backend, decorator_api):
         class MyModule(torch.nn.Module):
             def __init__(self):
                 super().__init__()
@@ -3960,7 +4186,9 @@ class GraphModule(torch.nn.Module):
             def forward(self, x):
                 return update_stats(self, x)
 
-        @leaf_function(mutates_args={"model.running_mean"})
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function(mutates_args={"model.running_mean"})
         def update_stats(model, x):
             model.running_mean.add_(x.mean(dim=0))
             return (model.linear(x),)
@@ -3984,9 +4212,12 @@ class GraphModule(torch.nn.Module):
         self.assertEqual(result_compiled, result_eager)
         self.assertEqual(mod_compiled.running_mean, expected_mean)
 
+    @parametrize("decorator_api", ["direct", "opaque"])
     @parametrize("backend", ["eager", "aot_eager"])
-    def test_leaf_function_input_mutation_pytree(self, backend):
-        @leaf_function(mutates_args={"buffers"})
+    def test_leaf_function_input_mutation_pytree(self, backend, decorator_api):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function(mutates_args={"buffers"})
         def update_buffers(x, buffers):
             for buf in buffers:
                 buf.add_(1)
@@ -4018,9 +4249,14 @@ class GraphModule(torch.nn.Module):
         self.assertEqual(bufs_compiled[0], bufs[0] + 1)
         self.assertEqual(bufs_compiled[1], bufs[1] + 1)
 
+    @parametrize("decorator_api", ["direct", "opaque"])
     @parametrize("backend", ["eager", "aot_eager"])
-    def test_leaf_function_input_mutation_pytree_fine_grained(self, backend):
-        @leaf_function(mutates_args={"buffers[0]"})
+    def test_leaf_function_input_mutation_pytree_fine_grained(
+        self, backend, decorator_api
+    ):
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function(mutates_args={"buffers[0]"})
         def update_first(x, buffers):
             buffers[0].add_(1)
             return (x + buffers[0] + buffers[1],)
@@ -4050,23 +4286,33 @@ class GraphModule(torch.nn.Module):
         self.assertEqual(bufs_compiled[0], bufs[0] + 1)
         self.assertEqual(bufs_compiled[1], bufs[1])
 
-    def test_leaf_function_mutates_args_invalid_parameter(self):
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_mutates_args_invalid_parameter(self, decorator_api):
+        if decorator_api == "opaque":
+            self.skipTest("direct API specific")
         with self.assertRaisesRegex(ValueError, "refers to parameter 'buf'"):
+            _leaf_function = _get_leaf_function(decorator_api)
 
-            @leaf_function(mutates_args={"buf"})
+            @_leaf_function(mutates_args={"buf"})
             def bad_fn(x, buffers):
                 buffers.add_(1)
                 return (x + buffers,)
 
         with self.assertRaisesRegex(ValueError, "refers to parameter 'mdl'"):
+            _leaf_function = _get_leaf_function(decorator_api)
 
-            @leaf_function(mutates_args={"mdl.running_mean"})
+            @_leaf_function(mutates_args={"mdl.running_mean"})
             def bad_fn2(x, model):
                 model.running_mean.add_(1)
                 return (x,)
 
-    def test_leaf_function_mutates_args_non_leaf_expression(self):
-        @leaf_function(mutates_args={"model"})
+    @parametrize("decorator_api", ["direct", "opaque"])
+    def test_leaf_function_mutates_args_non_leaf_expression(self, decorator_api):
+        if decorator_api == "opaque":
+            self.skipTest("direct API specific")
+        _leaf_function = _get_leaf_function(decorator_api)
+
+        @_leaf_function(mutates_args={"model"})
         def bad_fn(x, model):
             model.running_mean.add_(1)
             return (x,)
