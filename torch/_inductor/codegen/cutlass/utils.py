@@ -8,7 +8,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 from typing_extensions import TypeIs
 
 import sympy
@@ -38,10 +38,13 @@ XW_DTYPES: OrderedSet[torch.dtype] = OrderedSet(
 @atexit.register
 def move_cutlass_compiled_cache() -> None:
     """Move CUTLASS compiled cache file to the cache directory if it exists."""
-    if not try_import_cutlass.cache_info().currsize > 0:
+    if try_import_cutlass.cache_info().currsize == 0:
         return
 
-    import cutlass_cppgen  # type: ignore[import-not-found]
+    try:
+        import cutlass_cppgen  # type: ignore[import-not-found]
+    except ImportError:
+        return
 
     # Check if the CACHE_FILE attribute exists in cutlass_cppgen and if the file exists
     if not hasattr(cutlass_cppgen, "CACHE_FILE") or not os.path.exists(
@@ -237,10 +240,10 @@ class CUTLASSArgs:
     CUTLASS args used to initialize a CUTLASS Manifest.
     """
 
-    architectures: Optional[str] = None
-    toolkit_version: Optional[str] = None
-    instantiation_level: Optional[str] = None
-    operations: Optional[str] = None
+    architectures: str | None = None
+    toolkit_version: str | None = None
+    instantiation_level: str | None = None
+    operations: str | None = None
 
     build_dir = ""
     curr_build_dir = ""
@@ -379,7 +382,7 @@ def torch_dtype_to_cutlass_type(
 
 @functools.lru_cache(32)
 def dtype_match(
-    torch_dtype: Optional[torch.dtype],
+    torch_dtype: torch.dtype | None,
     cutlass_dtype: "cutlass_library.library.DataType",  # type: ignore[name-defined]  # noqa: F821
 ) -> bool:
     # Import cutlass python scripts.
@@ -411,7 +414,7 @@ def dtype_match(
 
 def get_accumulator_dtype(
     input_torch_dtypes: list[torch.dtype],
-) -> Optional[torch.dtype]:
+) -> torch.dtype | None:
     """
     Given a pair of input torch dtypes, returns the inferred accumulator torch dtype.
     """
@@ -546,9 +549,7 @@ class CUTLASSCompileSourceCapturingContext:
         )
         _compile_method_orig = codecache_cls.compile
 
-        def my_compile(
-            source_code, dst_file_ext, extra_args: Optional[list[str]] = None
-        ):
+        def my_compile(source_code, dst_file_ext, extra_args: list[str] | None = None):
             self.sources.append(source_code)
             return _compile_method_orig(source_code, dst_file_ext)
 
