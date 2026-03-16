@@ -1923,17 +1923,16 @@ class GraphLowering(torch.fx.Interpreter):
                         )
                     if not unbacked_symbols_in_strides and len(strides):
                         # For views, we generally use require_stride_order to avoid
-                        # unnecessary copies. But for user-visible outputs whose
-                        # strides were changed by a pass (e.g., pad_mm introduces
-                        # views with padded base strides), we need exact strides.
-                        strides_changed_by_pass = (
-                            is_user_visible
-                            and tuple(strides) != tuple(n.meta["val"].stride())
-                        )
+                        # unnecessary copies. But for user-visible outputs we need
+                        # exact strides (e.g., pad_mm can create views with padded
+                        # base strides that have the same order but wrong values).
                         if (
                             n.meta["val"]._is_view()
                             or isinstance(result.data, ir.BaseView)
-                        ) and not strides_changed_by_pass:
+                        ) and (
+                            not is_user_visible
+                            or n.meta["val"].numel() in (0, 1)
+                        ):
                             result = ir.ExternKernel.require_stride_order(
                                 result,
                                 ir.get_stride_order(strides),
