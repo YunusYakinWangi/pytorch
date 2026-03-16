@@ -793,9 +793,7 @@ class FSDPParamGroup:
     def _with_fqn(self, label: str) -> str:
         if self._module_fqn:
             label = f"{label} ({self._module_fqn})"
-        if self._num_peer_param_groups > 1 and isinstance(
-            self.mesh_info, FSDPMeshInfo
-        ):
+        if self._num_peer_param_groups > 1 and isinstance(self.mesh_info, FSDPMeshInfo):
             label = f"{label} [pg={self.mesh_info.shard_mesh_size}]"
         return label
 
