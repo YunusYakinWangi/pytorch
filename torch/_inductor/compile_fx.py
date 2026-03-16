@@ -2026,10 +2026,6 @@ def compile_fx_aot(
             "aot_inductor.output_path": code_hash(model_.code),
         }
 
-    # AOTI defaults to allowing addmm unfusing for half dtypes (perf) unless
-    # callers explicitly opt in to the accuracy-preserving behavior.
-    config_patches.setdefault("keep_addmm_fused_for_half_dtypes", False)
-
     from .utils import maybe_aoti_standalone_config
 
     config_patches = maybe_aoti_standalone_config(config_patches)
