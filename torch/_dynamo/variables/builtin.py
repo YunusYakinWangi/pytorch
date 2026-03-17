@@ -2223,7 +2223,9 @@ class BuiltinVariable(VariableTracker):
 
         arg, value = args
         DictVariableType = (
-            ConstDictVariable if not issubclass(user_cls, defaultdict) else DefaultDictVariable
+            ConstDictVariable
+            if not issubclass(user_cls, defaultdict)
+            else DefaultDictVariable
         )
 
         if isinstance(arg, dict):
