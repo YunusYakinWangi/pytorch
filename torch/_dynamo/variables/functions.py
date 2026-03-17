@@ -394,17 +394,7 @@ class BaseUserFunctionVariable(VariableTracker):
 
     def get_dict_vt(self, tx: "InstructionTranslator") -> "DunderDictVariable":
         if self.dict_vt is None:
-            dict_proxy: dict[str, VariableTracker] = {}
-
-            if not istype(self, NestedUserFunctionVariable):
-                fn = self.get_function()
-                dict_proxy = {
-                    name: VariableTracker.build(
-                        tx, value, source=self.source and AttrSource(self.source, name)
-                    )
-                    for name, value in fn.__dict__.items()
-                }
-            self.dict_vt = variables.DunderDictVariable.create(tx, self, dict_proxy)
+            self.dict_vt = variables.DunderDictVariable.create(tx, self)
         return self.dict_vt
 
     def call_method(
