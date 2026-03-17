@@ -2027,24 +2027,33 @@ def cat(inputs, dim=0):
 
         # Skip pointwise_cat when any cat input has a fusible (pointwise)
         # multi-consumer — ConcatKernel + NonOwningLayout avoids redundant
-        # reads.  Non-fusible users (e.g. matmul) don't benefit, so they
-        # should not prevent pointwise_cat.
+        # reads. Also skip when input is an unrealized Pointwise with
+        # multiple consumers to avoid recomputation (e.g. pad-as-cat).
         def any_input_has_multi_consumers() -> bool:
-            cat_node = V.current_node
-            if cat_node is None:
+            current_node = V.current_node
+            if current_node is None:
                 return False
-            fx_args = cat_node.args[0]  # aten.cat format: cat(input_list, dim)
-            if not isinstance(fx_args, (list, tuple)):
+            fx_args = current_node.args[0]
+            if isinstance(fx_args, (list, tuple)):
+                input_nodes = fx_args
+            elif isinstance(fx_args, torch.fx.Node):
+                input_nodes = [fx_args]
+            else:
                 return False
 
-            def has_fusible_multi_consumer(arg):
+            for arg, ir_input in zip(input_nodes, inputs):
                 if not hasattr(arg, "users") or len(arg.users) <= 1:
-                    return False
-                return any(
-                    is_pointwise_use(u) for u in arg.users if u is not cat_node
-                )
-
-            return any(has_fusible_multi_consumer(arg) for arg in fx_args)
+                    continue
+                # Case 1: other consumer is pointwise → fusion opportunity
+                if any(is_pointwise_use(u) for u in arg.users if u is not current_node):
+                    return True
+                # Case 2: input is unrealized Pointwise → avoid recomputation
+                inner = ir_input
+                while isinstance(inner, (TensorBox, ir.StorageBox)):
+                    inner = unwrap_tensor(inner)
+                if isinstance(inner, ir.Pointwise):
+                    return True
+            return False
 
         has_multi_consumers = any_input_has_multi_consumers()
 
@@ -4738,7 +4747,12 @@ def inplace_constant_pad_nd(
 def _pad_as_cat(
     x: TensorBox, padding: Sequence[int], fill_value: float
 ) -> TensorBox | None:
-    """Rewrite right-pad as ConcatKernel for multi-consumer inputs (zero-copy)."""
+    """Decompose right-pad into cat([x, fill], dim) and delegate to cat lowering.
+
+    The cat lowering already has heuristics for choosing between pointwise_cat
+    (fusion) and ConcatKernel (memory planning / zero-copy).  By routing through
+    cat() we reuse those heuristics rather than duplicating them here.
+    """
     sizes = x.get_size()
     ndim = len(sizes)
     pad_pairs = list(zip(padding[::2], padding[1::2]))
@@ -4760,16 +4774,6 @@ def _pad_as_cat(
     if pad_dim is None:
         return None
 
-    # Single-consumer pads are already optimal with masked Pointwise.
-    pad_node = V.current_node
-    if pad_node is None:
-        return None
-    input_node = pad_node.args[0]
-    if not isinstance(input_node, torch.fx.Node):
-        return None
-    if len(input_node.users) <= 1:
-        return None
-
     # Build the fill tensor for the padding region
     pad_shape = list(sizes)
     pad_shape[pad_dim] = pad_amount
@@ -4781,7 +4785,7 @@ def _pad_as_cat(
     )
 
     counters["inductor"]["pad_as_cat"] += 1
-    return TensorBox(ir.ConcatKernel.create([x, pad_tensor], pad_dim))
+    return cat([x, pad_tensor], pad_dim)
 
 
 @register_lowering(aten.constant_pad_nd, type_promotion_kind=None)

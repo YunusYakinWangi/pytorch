@@ -4,8 +4,8 @@
 import torch
 from torch._dynamo.utils import counters
 from torch._inductor import metrics
-from torch._inductor.utils import run_and_get_code
 from torch._inductor.test_case import TestCase
+from torch._inductor.utils import run_and_get_code
 from torch.testing._internal.inductor_utils import GPU_TYPE, requires_gpu
 
 
@@ -77,7 +77,6 @@ class TestCatMultiConsumer(TestCase):
 
 
 class TestPadAsCat(TestCase):
-
     @requires_gpu()
     def test_mul_pad_addmm(self):
         """Multi-consumer F.pad uses ConcatKernel zero-copy."""
@@ -104,8 +103,8 @@ class TestPadAsCat(TestCase):
         self.assertGreater(counters["inductor"]["pad_as_cat"], 0)
 
     @requires_gpu()
-    def test_single_consumer_pad_unchanged(self):
-        """Single-consumer F.pad skips _pad_as_cat."""
+    def test_single_consumer_pad(self):
+        """Single-consumer F.pad is decomposed into cat, which fuses via pointwise_cat."""
         counters.clear()
 
         def fn(x, scale):
@@ -119,7 +118,7 @@ class TestPadAsCat(TestCase):
         ref = fn(x, scale)
 
         self.assertEqual(result, ref)
-        self.assertEqual(counters["inductor"]["pad_as_cat"], 0)
+        self.assertGreater(counters["inductor"]["pad_as_cat"], 0)
 
 
 if __name__ == "__main__":
