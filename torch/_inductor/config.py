@@ -662,7 +662,9 @@ use_dce: bool = True
 use_pre_grad_passes: bool = True
 
 
-pre_grad_pass_timing: Literal["early", "late", "default"] = "default"
+pre_grad_pass_timing: Literal["early", "late", "default"] = (
+    "late" if is_fbcode() else "default"
+)
 
 
 use_joint_graph_passes: bool = True
