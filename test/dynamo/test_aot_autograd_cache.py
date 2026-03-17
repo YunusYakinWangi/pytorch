@@ -2906,13 +2906,11 @@ class AOTAutogradCacheTests(InductorTestCase):
 
             def run_script(pass_uuid):
                 script = script_template.format(pass_uuid=pass_uuid)
-                result = (
-                    subprocess.run(
-                        [sys.executable, "-c", script],
-                        env=env,
-                        capture_output=True,
-                        text=True,
-                    )
+                result = subprocess.run(
+                    [sys.executable, "-c", script],
+                    env=env,
+                    capture_output=True,
+                    text=True,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
                 import json
