@@ -1770,6 +1770,5 @@ class LazyConstantVariableTests(TestCase):
         self.assertTrue(same(compiled2, torch.tensor(-1.0)))
         self.assertEqual(counter.frame_count, 2)
 
-
 if __name__ == "__main__":
     run_tests()
