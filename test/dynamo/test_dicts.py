@@ -1806,18 +1806,22 @@ class DictMethodsTests(torch._dynamo.test_case.TestCase):
         # Test invalid usage
         self.assertRaises(TypeError, d.copy, 1)
 
-    @unittest.expectedFailure
     @make_dynamo_test
     def test_fromkeys(self):
         d = self.thetype.fromkeys(["a", "b"], 1)
+        self.assertIsInstance(d, self.thetype)
         self.assertEqual(d, {"a": 1, "b": 1})
         p = self.thetype.fromkeys(["a", "b"], None)
         self.assertEqual(p, {"a": None, "b": None})
 
-        # Test Dict.fromkeys
+        # Test dict.fromkeys with default value
         d2 = self.thetype.fromkeys(["c", "d"], 2)
+        self.assertIsInstance(d2, self.thetype)
         self.assertEqual(d2, {"c": 2, "d": 2})
 
+    @unittest.expectedFailure
+    @make_dynamo_test
+    def test_fromkeys_invalid_usage(self):
         # Test invalid usage
         self.assertRaises(TypeError, self.thetype.fromkeys)
         self.assertRaises(TypeError, self.thetype.fromkeys, 1, 2)
@@ -2185,6 +2189,12 @@ class OrderedDictSubclassOverload(torch._dynamo.test_case.TestCase):
         p = self.thetype({"a": 1, "b": 2, "c": 3})
         p.move_to_end("a")
         self.assertEqual(list(p.keys()), list("bc"))
+
+    @make_dynamo_test
+    def test_fromkeys(self):
+        p = self.thetype.fromkeys("a")
+        self.assertIsInstance(p, self.thetype)
+        self.assertEqual(list(p.keys()), list("a"))
 
 
 class DunderDictVariableTests(torch._dynamo.test_case.TestCase):
