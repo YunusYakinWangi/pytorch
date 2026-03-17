@@ -3,6 +3,7 @@
 import unittest
 
 import torch
+import torch._dynamo.testing
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 TEST_CUDA = torch.cuda.is_available()
@@ -365,6 +366,77 @@ class TestPhiloxUniform(TestCase):
         key = torch.tensor([42, 0, 1], dtype=torch.uint64, device="cuda")
         with self.assertRaises(RuntimeError):
             torch.random.uniform(key, (100,))
+
+
+@unittest.skipIf(not TEST_CUDA, "CUDA not available")
+class TestPhiloxCompile(TestCase):
+    def test_uniform_aot_eager(self):
+        key = torch.random.key(42, device="cuda")
+
+        @torch.compile(backend="aot_eager", fullgraph=True)
+        def f(key):
+            return torch.random.uniform(key, (100,))
+
+        self.assertEqual(f(key), torch.random.uniform(key, (100,)))
+
+    def test_split_aot_eager(self):
+        key = torch.random.key(42, device="cuda")
+
+        @torch.compile(backend="aot_eager", fullgraph=True)
+        def f(key):
+            return torch.random.split(key, 4)
+
+        self.assertEqual(f(key), torch.random.split(key, 4))
+
+    def test_fold_in_aot_eager(self):
+        key = torch.random.key(42, device="cuda")
+
+        @torch.compile(backend="aot_eager", fullgraph=True)
+        def f(key):
+            return torch.random.fold_in(key, 7)
+
+        self.assertEqual(f(key), torch.random.fold_in(key, 7))
+
+    def test_normal_aot_eager(self):
+        key = torch.random.key(42, device="cuda")
+
+        @torch.compile(backend="aot_eager", fullgraph=True)
+        def f(key):
+            return torch.random.normal(key, (100,))
+
+        self.assertEqual(f(key), torch.random.normal(key, (100,)))
+
+    def test_batched_normal_aot_eager(self):
+        key = torch.random.key(42, device="cuda")
+        keys = torch.random.split(key, 4)
+
+        @torch.compile(backend="aot_eager", fullgraph=True)
+        def f(keys):
+            return torch.random.normal(keys, (4, 50))
+
+        self.assertEqual(f(keys), torch.random.normal(keys, (4, 50)))
+
+    def test_split_then_normal_aot_eager(self):
+        key = torch.random.key(42, device="cuda")
+
+        @torch.compile(backend="aot_eager", fullgraph=True)
+        def f(key):
+            keys = torch.random.split(key, 4)
+            return torch.random.normal(keys, (4, 100))
+
+        self.assertEqual(f(key), torch.random.normal(
+            torch.random.split(key, 4), (4, 100)))
+
+    def test_fold_in_then_uniform_aot_eager(self):
+        key = torch.random.key(42, device="cuda")
+
+        @torch.compile(backend="aot_eager", fullgraph=True)
+        def f(key):
+            k = torch.random.fold_in(key, 3)
+            return torch.random.uniform(k, (100,))
+
+        self.assertEqual(f(key), torch.random.uniform(
+            torch.random.fold_in(key, 3), (100,)))
 
 
 if __name__ == "__main__":
