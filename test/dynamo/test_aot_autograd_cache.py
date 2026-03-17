@@ -2857,8 +2857,7 @@ class AOTAutogradCacheTests(InductorTestCase):
         import tempfile
         import textwrap
 
-        cache_dir = tempfile.mkdtemp()
-        try:
+        with tempfile.TemporaryDirectory() as cache_dir:
             # Script template that accepts a custom pass UUID
             script_template = textwrap.dedent(
                 """
@@ -2907,18 +2906,18 @@ class AOTAutogradCacheTests(InductorTestCase):
 
             def run_script(pass_uuid):
                 script = script_template.format(pass_uuid=pass_uuid)
-                out = (
-                    subprocess.check_output(
+                result = (
+                    subprocess.run(
                         [sys.executable, "-c", script],
                         env=env,
-                        stderr=subprocess.DEVNULL,
+                        capture_output=True,
+                        text=True,
                     )
-                    .decode()
-                    .strip()
                 )
+                self.assertEqual(result.returncode, 0, result.stderr)
                 import json
 
-                return json.loads(out.splitlines()[-1])
+                return json.loads(result.stdout.splitlines()[-1])
 
             # First run with pass_uuid_A - expect cache miss
             c1 = run_script("pass_uuid_A")
@@ -2934,9 +2933,6 @@ class AOTAutogradCacheTests(InductorTestCase):
             c3 = run_script("pass_uuid_B")
             self.assertEqual(c3.get("autograd_cache_miss", 0), 1)
             self.assertEqual(c3.get("autograd_cache_hit", 0), 0)
-
-        finally:
-            shutil.rmtree(cache_dir, ignore_errors=True)
 
 
 @functorch_config.patch({"bundled_autograd_cache": True})
