@@ -439,5 +439,106 @@ class TestPhiloxCompile(TestCase):
             torch.random.fold_in(key, 3), (100,)))
 
 
+@unittest.skipIf(not TEST_CUDA, "CUDA not available")
+class TestPhiloxVmap(TestCase):
+    def test_vmap_normal(self):
+        key = torch.random.key(42, device="cuda")
+        keys = torch.random.split(key, 10)
+
+        result = torch.vmap(lambda k: torch.random.normal(k, 5))(keys)
+        self.assertEqual(result.shape, (10, 5))
+        for i in range(10):
+            self.assertEqual(result[i], torch.random.normal(keys[i], 5))
+
+    def test_vmap_uniform(self):
+        key = torch.random.key(42, device="cuda")
+        keys = torch.random.split(key, 10)
+
+        result = torch.vmap(lambda k: torch.random.uniform(k, 5))(keys)
+        self.assertEqual(result.shape, (10, 5))
+        for i in range(10):
+            self.assertEqual(result[i], torch.random.uniform(keys[i], 5))
+
+    def test_vmap_split(self):
+        key = torch.random.key(42, device="cuda")
+        keys = torch.random.split(key, 10)
+
+        result = torch.vmap(lambda k: torch.random.split(k, 3))(keys)
+        self.assertEqual(result.shape, (10, 3, 2))
+        for i in range(10):
+            self.assertEqual(result[i], torch.random.split(keys[i], 3))
+
+    def test_vmap_fold_in(self):
+        key = torch.random.key(42, device="cuda")
+        keys = torch.random.split(key, 10)
+
+        result = torch.vmap(lambda k: torch.random.fold_in(k, 7))(keys)
+        self.assertEqual(result.shape, (10, 2))
+        for i in range(10):
+            self.assertEqual(result[i], torch.random.fold_in(keys[i], 7))
+
+    def test_vmap_inplace_batched_self(self):
+        key = torch.random.key(42, device="cuda")
+        keys = torch.random.split(key, 10)
+        out = torch.empty(10, 5, device="cuda")
+
+        def f(o, k):
+            return torch.ops.aten._philox_normal_(o, k, 0.0, 1.0)
+
+        result = torch.vmap(f)(out, keys)
+        self.assertEqual(result.shape, (10, 5))
+        for i in range(10):
+            self.assertEqual(result[i], torch.random.normal(keys[i], 5))
+
+    def test_vmap_split_then_normal(self):
+        key = torch.random.key(42, device="cuda")
+        keys = torch.random.split(key, 8)
+
+        def f(k):
+            subkeys = torch.random.split(k, 3)
+            return torch.random.normal(subkeys, (3, 20))
+
+        result = torch.vmap(f)(keys)
+        self.assertEqual(result.shape, (8, 3, 20))
+        for i in range(8):
+            self.assertEqual(result[i], f(keys[i]))
+
+    def test_vmap_normal_multidim(self):
+        key = torch.random.key(42, device="cuda")
+        keys = torch.random.split(key, 5)
+
+        result = torch.vmap(lambda k: torch.random.normal(k, 4, 3))(keys)
+        self.assertEqual(result.shape, (5, 4, 3))
+        for i in range(5):
+            self.assertEqual(result[i], torch.random.normal(keys[i], 4, 3))
+
+    def test_vmap_compiled_normal(self):
+        key = torch.random.key(42, device="cuda")
+        keys = torch.random.split(key, 10)
+
+        @torch.compile(backend="aot_eager")
+        def f(keys):
+            return torch.vmap(lambda k: torch.random.normal(k, 5))(keys)
+
+        result = f(keys)
+        self.assertEqual(result.shape, (10, 5))
+        for i in range(10):
+            self.assertEqual(result[i], torch.random.normal(keys[i], 5))
+
+    def test_vmap_compiled_uniform(self):
+        key = torch.random.key(42, device="cuda")
+        keys = torch.random.split(key, 10)
+
+        @torch.compile(backend="aot_eager")
+        def f(keys):
+            return torch.vmap(lambda k: torch.random.uniform(k, 5))(keys)
+
+        result = f(keys)
+        self.assertEqual(result.shape, (10, 5))
+        for i in range(10):
+            self.assertEqual(result[i], torch.random.uniform(keys[i], 5))
+
+
+
 if __name__ == "__main__":
     run_tests()
