@@ -84,7 +84,8 @@ class SlotsShadowed(SlotsBase):
     x = 42  # class attribute shadows parent's slot descriptor
 
 
-class SlotsAndProperty:    __slots__ = ("_x",)
+class SlotsAndProperty:
+    __slots__ = ("_x",)
 
     def __init__(self, x):
         self._x = x

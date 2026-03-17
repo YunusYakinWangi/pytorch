@@ -1463,8 +1463,7 @@ class UserDefinedObjectVariable(UserDefinedVariable):
         #  2) a plain attribute with no descriptor
         # If the object has no __dict__, only slot descriptors (member_descriptor)
         # allow mutation. Any other attribute assignment raises AttributeError.
-        has_dict = inspect.getattr_static(self.value, "__dict__", None) is not None
-        if not has_dict:
+        if not self._hasattr_static("__dict__"):
             descriptor = self.lookup_class_mro_attr(name_str)
             if not inspect.ismemberdescriptor(descriptor):
                 error_msg = VariableTracker.build(
@@ -1639,6 +1638,13 @@ class UserDefinedObjectVariable(UserDefinedVariable):
 
         self._looked_up_attrs[name] = subobj
         return subobj
+
+    def _hasattr_static(self, name: str) -> bool:
+        try:
+            self._getattr_static(name)
+            return True
+        except AttributeError:
+            return False
 
     def lookup_class_mro_attr(self, name: str) -> object:
         """Walk type(obj).__mro__ to find *name* in the class hierarchy.
