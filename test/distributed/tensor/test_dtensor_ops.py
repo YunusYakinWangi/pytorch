@@ -271,6 +271,9 @@ dtensor_multi_threaded_fails = {
     xfail("nn.functional.dropout3d"),
     xfail("nn.functional.huber_loss"),
     skip("nn.functional.multi_head_attention_forward"),
+    # searchsorted with sorter kwarg: sorter tensor gets sharded instead of
+    # replicated in multi-threaded mode, causing size mismatch with boundary
+    xfail("searchsorted"),
 }
 
 # Ops that fail to compile with DTensor + torch.compile(fullgraph=True).
@@ -774,6 +777,8 @@ ops_unbacked_dtensor_dde = {
     xfail("frexp"),
     xfail("gather"),
     xfail("histc"),
+    # index_add shard prop guards on unbacked symints (u0 < mesh_size)
+    xfail("index_add"),
     xfail("index_put"),
     xfail("index_select"),
     xfail("kthvalue"),
@@ -847,6 +852,8 @@ ops_unbacked_dtensor_dde = {
     xfail("topk"),
     xfail("transpose_copy"),
     xfail("unflatten"),
+    # unique_consecutive has dynamic output shape; shard prop fails with unbacked
+    xfail("unique_consecutive"),
     xfail("unsqueeze_copy"),
     xfail("vdot"),
     xfail("view"),
