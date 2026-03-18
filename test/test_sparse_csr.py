@@ -4292,8 +4292,17 @@ class TestSparseCompressedTritonKernels(TestCase):
                          dict(GROUP_SIZE_ROW=4, SPLIT_N=4, num_stages=1, num_warps=4))
 
 
+class TestSparseCSRMPS(TestCase):
+    # Reuse the shared OpInfo-driven CSR unary coverage on MPS without
+    # instantiating the full sparse CSR suite for that backend.
+    test_zero_to_zero_correspondence_unary = TestSparseCSR.test_zero_to_zero_correspondence_unary
+    test_sparse_csr_unary_out = TestSparseCSR.test_sparse_csr_unary_out
+    test_sparse_csr_unary_inplace = TestSparseCSR.test_sparse_csr_unary_inplace
+
+
 # e.g., TestSparseCSRCPU and TestSparseCSRCUDA
 instantiate_device_type_tests(TestSparseCSR, globals())
+instantiate_device_type_tests(TestSparseCSRMPS, globals(), only_for="mps", allow_mps=True)
 instantiate_device_type_tests(TestSparseCompressed, globals())
 instantiate_device_type_tests(TestSparseCompressedTritonKernels, globals())
 
