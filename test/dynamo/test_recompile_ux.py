@@ -584,6 +584,56 @@ class RegionRecompileLimitTests(torch._dynamo.test_case.TestCase):
         opt_f(torch.randn(4, 8))
         self.assertEqual(cnt.frame_count, frame_count_after_3)
 
+    @torch._dynamo.config.patch(recompile_limit=3, accumulated_recompile_limit=64)
+    def test_global_recompile_limit_resume_exceeds(self):
+        """With global recompile_limit=3, the resume function recompiles
+        independently via global changes while f gets cache hits. The global
+        limit is per-code-object, so the resume function can reach 3 entries
+        even though f only has 1. This test documents the current behavior."""
+        cnt = torch._dynamo.testing.CompileCounter()
+
+        mode = {"value": "a"}
+
+        def f(x):
+            a = x.sin()
+            print("graph break")
+            if mode["value"] == "a":
+                return a.cos()
+            elif mode["value"] == "b":
+                return a.tan()
+            elif mode["value"] == "c":
+                return a.exp()
+            else:
+                return a + 1
+
+        opt_f = torch.compile(f, backend=cnt)
+
+        # Call 1: f compiles, resume compiles
+        opt_f(torch.randn(4, 8))
+        frame_count_after_1 = cnt.frame_count
+
+        # Call 2: mode changes, f cache hit, resume recompiles
+        mode["value"] = "b"
+        opt_f(torch.randn(4, 8))
+        frame_count_after_2 = cnt.frame_count
+        self.assertGreater(frame_count_after_2, frame_count_after_1)
+
+        # Call 3: mode changes, f cache hit, resume recompiles
+        mode["value"] = "c"
+        opt_f(torch.randn(4, 8))
+        frame_count_after_3 = cnt.frame_count
+        self.assertGreater(frame_count_after_3, frame_count_after_2)
+
+        # Call 4: mode changes. Global limit is per-code-object, so resume
+        # has 3 entries and should stop. But f only has 1, so if the limit
+        # were checked across all code objects, this would have stopped earlier.
+        mode["value"] = "d"
+        opt_f(torch.randn(4, 8))
+
+        # With per-code-object global limit: resume hits limit=3, stops.
+        # This PASSES because the resume function individually reaches the limit.
+        self.assertEqual(cnt.frame_count, frame_count_after_3)
+
     def test_region_recompile_limit_resume_function_independent(self):
         """Resume function recompiles independently when a global used only
         after the graph break changes, while the main function gets cache hits."""
