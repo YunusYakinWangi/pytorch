@@ -75,5 +75,3 @@ void _validate_compressed_sparse_indices_mps(
     int64_t nnz);
 
 } // namespace at::native
-
-
