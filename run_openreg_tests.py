@@ -510,42 +510,112 @@ def _run_and_tee(command, cwd, env, log_file, timeout):
     return proc.returncode
 
 
-def run_test(
+def _parse_failed_tests(log_file: str) -> list[str]:
+    """Parse pytest output for failed test nodeids.
+
+    Looks for the short test summary lines like:
+        FAILED [0.5s] test/test_foo.py::TestClass::test_method
+    """
+    failures: list[str] = []
+    try:
+        with open(log_file, "rb") as f:
+            content = f.read().decode("utf-8", errors="replace")
+    except OSError:
+        return failures
+
+    # Pytest -v output: "path/test.py::TestClass::test_name FAILED [0.5s] [ 44%]"
+    for match in re.finditer(
+        r"^(.+::.*\S) FAILED \[", content, re.MULTILINE
+    ):
+        failures.append(match.group(1).strip())
+
+    return failures
+
+
+def _run_test_no_retries(
     sharded_test: _ShardedTest,
-    openreg_pythonpath: str,
+    env: dict[str, str],
+    log_file: str,
     timeout: int,
-    retries: int,
-) -> tuple[str, float, list[str], list[str], list[dict[str, str]]]:
-    """Run a single test file (possibly sub-sharded) with timeout and per-test retry.
+) -> tuple[str, float, list[str], list[dict[str, str]]]:
+    """Run a test file straight through without retries.
 
-    Returns (status, elapsed, consistent_failures, flaky_failures, skipped).
+    Runs pytest without -x (no stop on first failure), so all tests run in
+    a single invocation. Much faster than stepcurrent for files with many
+    failures since it avoids repeated pytest collection overhead.
 
-    Uses the stepcurrent mechanism (same as CI's run_test.py) to retry
-    individual failing test methods rather than the entire file.
-
-    status is one of: "PASS", "FAIL", "FLAKY", "TIMEOUT"
+    Returns (status, elapsed, failures, skipped).
     """
     test_file = sharded_test.test_file
     full_path = os.path.join(TEST_DIR, test_file)
-    pythonpath = openreg_pythonpath
-    if "PYTHONPATH" in os.environ:
-        pythonpath += os.pathsep + os.environ["PYTHONPATH"]
-    env = {
-        **os.environ,
-        "PYTHONPATH": pythonpath,
-        "PYTHONUNBUFFERED": "1",
-        "PYTORCH_TESTING_DEVICE_ONLY_FOR": "openreg",
-        "OPENREG_DISABLE_FALLBACK_BLOCKLIST": "1",
-        "OPENREG_DISABLE_MEMORY_PROTECTION": "1",
-    }
+    command = [
+        sys.executable, "-u", full_path, "--use-pytest", "-v", "-rs",
+        *sharded_test.pytest_args(),
+    ]
 
-    log_file = _log_path(test_file)
-    print(f"\n{'=' * 60}")
-    print(f"Running {sharded_test.name}  (log: {log_file})")
-    print("=" * 60, flush=True)
+    start = time.monotonic()
 
+    with open(log_file, "wb") as lf:
+        try:
+            ret_code = _run_and_tee(
+                command,
+                cwd=TEST_DIR,
+                env=env,
+                log_file=lf,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired:
+            elapsed = time.monotonic() - start
+            print(f"  TIMEOUT  {test_file}  ({elapsed:.1f}s, exceeded {timeout}s limit)")
+            return "TIMEOUT", elapsed, [], []
+
+    elapsed = time.monotonic() - start
+
+    # Exit code 5 means "no tests collected", treat as pass
+    ret_code = 0 if ret_code == 5 else ret_code
+
+    failures = _parse_failed_tests(log_file) if ret_code != 0 else []
+    skipped = _parse_skipped_tests(log_file)
+
+    if ret_code < 0:
+        # Process killed by signal (e.g. -11 = SIGSEGV). Report partial
+        # results from whatever ran before the crash.
+        sig = -ret_code
+        print(f"  CRASH  {test_file}  ({elapsed:.1f}s, signal {sig})")
+        if failures:
+            print(f"    {len(failures)} failures before crash")
+        return "FAIL", elapsed, failures, skipped
+    elif failures:
+        print(f"  FAIL  {test_file}  ({elapsed:.1f}s, {len(failures)} failures)")
+        return "FAIL", elapsed, failures, skipped
+    elif ret_code != 0:
+        print(f"  FAIL  {test_file}  ({elapsed:.1f}s, exit code {ret_code})")
+        return "FAIL", elapsed, [], skipped
+    else:
+        print(f"  PASS  {test_file}  ({elapsed:.1f}s)")
+        return "PASS", elapsed, [], skipped
+
+
+def _run_test_with_retries(
+    sharded_test: _ShardedTest,
+    env: dict[str, str],
+    log_file: str,
+    timeout: int,
+    retries: int,
+) -> tuple[str, float, list[str], list[str], list[dict[str, str]]]:
+    """Run a test file with per-test retries via stepcurrent.
+
+    Uses -x (stop on first failure) and the stepcurrent mechanism to retry
+    individual failing tests. Slower than no-retry mode due to pytest restart
+    overhead per failure, but can distinguish flaky from consistent failures.
+
+    Returns (status, elapsed, consistent_failures, flaky_failures, skipped).
+    """
+    test_file = sharded_test.test_file
+    full_path = os.path.join(TEST_DIR, test_file)
     command = [
         sys.executable, "-u", full_path, "--use-pytest", "-v", "-x", "-rs",
+        # "-k", "not (complex32 or complex64 or complex128)",
         *sharded_test.pytest_args(),
     ]
     shard_suffix = f"_s{sharded_test.shard_id}" if sharded_test.num_shards > 1 else ""
@@ -574,7 +644,6 @@ def run_test(
             ret_code = 0 if ret_code == 5 else ret_code
 
             if ret_code == 0 and not sc_command.startswith("--rs="):
-                # Reached end of test suite successfully
                 break
 
             current_failure = _read_stepcurrent(stepcurrent_key)
@@ -587,15 +656,12 @@ def run_test(
                 num_failures[current_failure] += 1
 
             if ret_code == 0:
-                # Rerunning the previously failing test passed — it was flaky
                 sc_command = f"--scs={stepcurrent_key}"
                 print("  Test succeeded on rerun, continuing with remaining tests")
             elif num_failures[current_failure] >= retries:
                 print(f"  FAILED CONSISTENTLY: {current_failure}")
-                # Skip the consistently failing test and continue
                 sc_command = f"--scs={stepcurrent_key}"
             else:
-                # Retry the single failing test
                 sc_command = f"--rs={stepcurrent_key}"
                 print(
                     f"  Retrying {current_failure} "
@@ -604,7 +670,6 @@ def run_test(
 
     elapsed = time.monotonic() - start
 
-    # Strip quotes added by stepcurrent cache format
     strip = lambda s: s.strip('"')
     consistent_failures = [strip(t) for t, n in num_failures.items() if n >= retries]
     flaky_failures = [strip(t) for t, n in num_failures.items() if 0 < n < retries]
@@ -623,6 +688,46 @@ def run_test(
     else:
         print(f"  PASS  {test_file}  ({elapsed:.1f}s)")
         return "PASS", elapsed, [], [], skipped
+
+
+def run_test(
+    sharded_test: _ShardedTest,
+    openreg_pythonpath: str,
+    timeout: int,
+    retries: int,
+) -> tuple[str, float, list[str], list[str], list[dict[str, str]]]:
+    """Run a single test file. Returns (status, elapsed, failures, flaky, skipped).
+
+    When retries == 0, runs pytest straight through (no -x, no stepcurrent)
+    for maximum speed. When retries > 0, uses stepcurrent for per-test retries.
+    """
+    test_file = sharded_test.test_file
+    pythonpath = openreg_pythonpath
+    if "PYTHONPATH" in os.environ:
+        pythonpath += os.pathsep + os.environ["PYTHONPATH"]
+    env = {
+        **os.environ,
+        "PYTHONPATH": pythonpath,
+        "PYTHONUNBUFFERED": "1",
+        "PYTORCH_TESTING_DEVICE_ONLY_FOR": "openreg",
+        "OPENREG_DISABLE_FALLBACK_BLOCKLIST": "1",
+        "OPENREG_DISABLE_MEMORY_PROTECTION": "1",
+    }
+
+    log_file = _log_path(test_file)
+    print(f"\n{'=' * 60}")
+    print(f"Running {sharded_test.name}  (log: {log_file})")
+    print("=" * 60, flush=True)
+
+    if retries == 0:
+        status, elapsed, failures, skipped = _run_test_no_retries(
+            sharded_test, env, log_file, timeout
+        )
+        return status, elapsed, failures, [], skipped
+    else:
+        return _run_test_with_retries(
+            sharded_test, env, log_file, timeout, retries
+        )
 
 
 def print_summary(results: list[tuple[str, str, float]]) -> None:

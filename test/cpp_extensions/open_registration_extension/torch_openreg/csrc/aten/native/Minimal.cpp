@@ -184,7 +184,7 @@ void cpu_fallback(const c10::OperatorHandle& op, torch::jit::Stack* stack) {
         op_name,
         "' is not implemented for device openreg.");
   } else {
-    at::native::cpu_fallback(op, stack);
+    at::native::cpu_fallback(op, stack, /*error_on_views=*/true);
   }
 }
 // LITERALINCLUDE END: FALLBACK IMPL
