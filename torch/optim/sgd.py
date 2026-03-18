@@ -139,6 +139,7 @@ class SGD(Optimizer):  # noqa: D101
                 fused=group["fused"],
                 grad_scale=getattr(self, "grad_scale", None),
                 found_inf=getattr(self, "found_inf", None),
+                differentiable=group["differentiable"],
             )
 
             if group["momentum"] != 0:
@@ -267,6 +268,7 @@ def sgd(
     dampening: float,
     nesterov: bool,
     maximize: bool,
+    differentiable: bool = False,
 ) -> None:
     r"""Functional API that performs SGD algorithm computation.
 
@@ -280,7 +282,7 @@ def sgd(
         # because JIT can't handle Optionals nor fancy conditionals when scripting
         if not torch.jit.is_scripting():
             fused, foreach = _default_to_fused_or_foreach(
-                params, differentiable=False, use_fused=True
+                params, differentiable=differentiable, use_fused=True
             )
         else:
             foreach = False

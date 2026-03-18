@@ -2309,6 +2309,7 @@ class TestOptimRenewed(TestCase):
         module_name = f"_multi_tensor_{optim_cls.__name__.lower()}"
 
         for optim_input in optim_info.optim_inputs_func(device=device):
+            print(f"Testing {optim_cls.__name__} with input {optim_input.kwargs}")
             optim = optim_cls(model.parameters(), **optim_input.kwargs)
             optim.zero_grad()
             output = model(inpt)
@@ -2318,10 +2319,15 @@ class TestOptimRenewed(TestCase):
                 optim.step()
                 self.assertTrue(mocked_foreach_impl.called)
 
-            # Also check that step is hosted on CPU
+            # Also check that step is hosted on CPU unless capturable or ASGD
             for state in optim.state.values():
                 if "step" in state and torch.is_tensor(state["step"]):
-                    self.assertTrue(state["step"].is_cpu)
+                    if optim_cls.__name__ == "ASGD" or optim_input.kwargs.get(
+                        "capturable"
+                    ):
+                        self.assertTrue(state["step"].is_cuda)
+                    else:
+                        self.assertTrue(state["step"].is_cpu)
 
     @optims(optim_db, dtypes=[torch.float32])
     def test_non_empty_state(self, device, dtype, optim_info):
