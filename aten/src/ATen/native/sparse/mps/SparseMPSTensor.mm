@@ -276,10 +276,3 @@ TORCH_IMPL_FUNC(_convert_indices_from_csr_to_coo_structured_mps)
 }
 
 } // namespace at::native
-
-namespace at {
-namespace {
-
-
-} // anonymous namespace
-} // namespace at
