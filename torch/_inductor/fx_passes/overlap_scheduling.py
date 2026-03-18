@@ -1651,116 +1651,6 @@ def _find_uneven_sharding(gm: torch.fx.GraphModule) -> list[str]:
     return lines
 
 
-def _check_spmd_graph_match(gm: torch.fx.GraphModule) -> bool:
-    """Verify all ranks have identical FX graph structure for overlap scheduling.
-
-    Overlap scheduling assumes SPMD — all ranks have identical graphs and make
-    identical scheduling/bucketing decisions. When graphs differ (e.g. uneven
-    DTensor sharding), scheduling diverges and causes NCCL collective ordering
-    mismatches → hangs. This check must run before any scheduling.
-    """
-    import torch.distributed as dist
-
-    if not dist.is_initialized() or dist.get_world_size() <= 1:
-        return True
-
-    # Build fingerprint from collective nodes: (target_name, output_shapes)
-    fingerprint: list[tuple[str, tuple[tuple[int, ...], ...]]] = []
-    for node in gm.graph.nodes:
-        if node.op != "call_function":
-            continue
-        if not is_wait_tensor(node):
-            # Check if this is a collective start (has exactly one user that is a wait)
-            if len(node.users) != 1:
-                continue
-            user = next(iter(node.users.keys()))
-            if not is_wait_tensor(user):
-                continue
-        val = node.meta.get("val", None)
-        if val is None:
-            continue
-        if isinstance(val, torch.Tensor):
-            shapes = (tuple(val.shape),)
-        elif isinstance(val, (list, tuple)):
-            shapes = tuple(tuple(v.shape) for v in val if isinstance(v, torch.Tensor))
-        else:
-            continue
-        fingerprint.append((str(node.target), shapes))
-    fingerprint.sort()
-
-    from torch._subclasses.fake_tensor import unset_fake_temporarily
-    from torch.distributed.distributed_c10d import _get_default_group
-
-    pg = _get_default_group()
-    world_size = dist.get_world_size()
-    with unset_fake_temporarily():
-        all_fingerprints: list[list[tuple[str, tuple[tuple[int, ...], ...]]]] = [
-            [] for _ in range(world_size)
-        ]
-        dist.all_gather_object(all_fingerprints, fingerprint, pg)
-
-    if all(fp == all_fingerprints[0] for fp in all_fingerprints):
-        return True
-
-    import torch.distributed as dist
-
-    rank = dist.get_rank()
-
-    # Build diagnostic report
-    lines = [
-        "=" * 80,
-        "OVERLAP SCHEDULING SPMD MISMATCH — skipping overlap scheduling",
-        "=" * 80,
-        f"Rank {rank}, world_size={world_size}.",
-        "FX graphs differ across ranks, causing different scheduling and",
-        "bucketing decisions. Common cause: uneven Shard(0) from parameter",
-        "dimensions not divisible by world_size.",
-        "",
-    ]
-
-    uneven_lines = _find_uneven_sharding(gm)
-    if uneven_lines:
-        lines.append("UNEVEN ALL-GATHER INPUTS (likely root cause):")
-        lines.extend(uneven_lines)
-        lines.append("")
-
-    # Show only collective nodes that differ across ranks
-    ref_fp = all_fingerprints[0]
-    lines.append("COLLECTIVE FINGERPRINT DIFFS:")
-    for r in range(1, world_size):
-        fp = all_fingerprints[r]
-        if fp == ref_fp:
-            continue
-        lines.append(f"  rank 0 vs rank {r}:")
-        # Length difference
-        if len(fp) != len(ref_fp):
-            lines.append(
-                f"    collective count: rank0={len(ref_fp)}, rank{r}={len(fp)}"
-            )
-        # Entry-by-entry diffs
-        for j in range(min(len(ref_fp), len(fp))):
-            if ref_fp[j] != fp[j]:
-                lines.append(f"    [{j}] rank0: {ref_fp[j][0]} {ref_fp[j][1]}")
-                lines.append(f"    [{j}] rank{r}: {fp[j][0]} {fp[j][1]}")
-    lines.append("")
-    lines.append("=" * 80)
-    report = "\n".join(lines)
-
-    # Print to stdout so it's visible in job logs
-    print(report, flush=True)
-    log.warning("\n%s", report)
-
-    trace_structured(
-        "artifact",
-        metadata_fn=lambda: {
-            "name": "inductor_overlap_scheduling_spmd_mismatch",
-            "encoding": "string",
-        },
-        payload_fn=lambda: report,
-    )
-    return False
-
-
 def schedule_overlap_bucketing(
     gm: torch.fx.GraphModule,
     max_in_flight_gb: float = 5,
@@ -1809,9 +1699,6 @@ def schedule_overlap_bucketing(
         enable_fusion_regions: Enable fusion region detection and cost estimation for fusible ops.
     """
     if not any(is_wait_tensor(n) for n in gm.graph.nodes):
-        return gm
-
-    if not _check_spmd_graph_match(gm):
         return gm
 
     trace_structured(
