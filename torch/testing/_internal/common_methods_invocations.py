@@ -15559,6 +15559,15 @@ op_db: list[OpInfo] = [
                 "TestInductorOpInfo", "test_comprehensive",
                 device_type="cuda",
                 active_if=TEST_WITH_ROCM),
+            # RuntimeError: In order to use an autograd.Function with
+            # functorch transforms (vmap, grad, jvp, jacrev, ...), it
+            # must override the setup_context staticmethod.
+            DecorateInfo(unittest.skip("custom_op unsupported in functorch?"), 'TestOperators'),
+            # torch._inductor.exc.InductorError:
+            # MissingOperatorWithoutDecomp: missing lowering
+            DecorateInfo(unittest.skip("missing lowering"),
+                         'TestInductorOpInfo', 'test_comprehensive',
+                         device_type="cuda"),
         )
     ),
     OpInfo('nn.functional.normalize',

@@ -15,6 +15,24 @@ def chunk_iter(total_size, chunk_size):
             yield start, chunk_size
 
 
+def linear_cross_entropy_chunking_setup_context(ctx, inputs, output):
+    ctx.grad_inplace, ctx.compute_input_grad, ctx.compute_linear_weight_grad = inputs[
+        -3:
+    ]
+    _, grad_input, grad_linear_weight = output
+    save_indices: list[int | None] = [None, None]
+    saved = []
+    if ctx.compute_input_grad:
+        save_indices[0] = len(saved)
+        saved.append(grad_input)
+    if ctx.compute_linear_weight_grad:
+        save_indices[1] = len(saved)
+        saved.append(grad_linear_weight)
+    if saved:
+        ctx.save_indices = save_indices
+        ctx.save_for_backward(*saved)
+
+
 @torch.library.custom_op("torch_nn::linear_cross_entropy_chunking", mutates_args=())
 def linear_cross_entropy_chunking(
     input: torch.Tensor,
@@ -183,24 +201,6 @@ def _(
     return result, grad_input, grad_linear_weight
 
 
-def setup_context(ctx, inputs, output):
-    ctx.grad_inplace, ctx.compute_input_grad, ctx.compute_linear_weight_grad = inputs[
-        -3:
-    ]
-    _, grad_input, grad_linear_weight = output
-    save_indices: list[int | None] = [None, None]
-    saved = []
-    if ctx.compute_input_grad:
-        save_indices[0] = len(saved)
-        saved.append(grad_input)
-    if ctx.compute_linear_weight_grad:
-        save_indices[1] = len(saved)
-        saved.append(grad_linear_weight)
-    if saved:
-        ctx.save_indices = save_indices
-        ctx.save_for_backward(*saved)
-
-
 def linear_cross_entropy_chunking_backward(ctx, *grads):
     grad_output = grads[0]
     result = [None] * 10
@@ -235,5 +235,6 @@ def linear_cross_entropy_chunking_backward(ctx, *grads):
 
 
 linear_cross_entropy_chunking.register_autograd(
-    linear_cross_entropy_chunking_backward, setup_context=setup_context
+    linear_cross_entropy_chunking_backward,
+    setup_context=linear_cross_entropy_chunking_setup_context,
 )
