@@ -1939,7 +1939,9 @@ def _backward_prologue_functional(
         flat_args[num_mutated_runtime_inps + metadata.num_outputs :],
     )
     # Release grad refs from the caller's list (boxed calling convention).
-    # Slicing already copied refs into sub-lists above.
+    # Slicing already copied refs into sub-lists above, so clearing the
+    # original list only drops redundant refs. The isinstance guard skips
+    # this when flat_args is a tuple (non-boxed path from compiled_autograd).
     if isinstance(flat_args, list):
         flat_args.clear()
     # input_info contains info on *every* input,
@@ -2671,7 +2673,7 @@ Your tensor subclass must implement __coerce_same_metadata_as_tangent__."""
                 # Only save tensors that need VC checks via save_for_backward
                 ctx.save_for_backward(*tensors_to_save)
                 ctx._tensors_no_vc_check = tensors_no_vc
-                ctx._boxed_call = True
+                ctx._boxed_grads_call = True
 
                 symint_outs = fw_outs[
                     CompiledFunction.metadata.symints_saved_for_backwards_slice

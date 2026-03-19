@@ -4767,29 +4767,33 @@ def forward(self, tangents_1):
 
         compiled_loss = torch.compile(loss_fn, backend="inductor")
 
-        # Capture tangent storage as it flows from loss bw → model bw.
-        tangent_info = {}
+        refcount_box = {}
 
-        class CaptureTangent(torch.autograd.Function):
+        class CaptureRefcount(torch.autograd.Function):
             @staticmethod
             def forward(ctx, pred):
                 return pred.clone()
 
             @staticmethod
             def backward(ctx, grad):
-                tangent_info["storage"] = grad.untyped_storage()
-                tangent_info["nbytes"] = grad.untyped_storage().nbytes()
-                tangent_info["refcount"] = sys.getrefcount(grad)
+                refcount_box["at_boundary"] = sys.getrefcount(grad)
                 return grad
 
         pred = compiled_model(x)
-        pred = CaptureTangent.apply(pred)
+        pred = CaptureRefcount.apply(pred)
         loss = compiled_loss(pred, labels)
         del pred
         loss.backward()
 
-        self.assertIn("storage", tangent_info)
-        self.assertGreater(tangent_info["nbytes"], 0)
+        self.assertIn("at_boundary", refcount_box)
+        # refcount == 2: the `grad` local + getrefcount arg.
+        # The framework holds no extra refs to the tangent.
+        self.assertEqual(
+            refcount_box["at_boundary"],
+            2,
+            f"Framework holds extra refs to tangent: refcount={refcount_box['at_boundary']}, "
+            "expected 2 (only the local variable + getrefcount arg)",
+        )
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA is unavailable")
     def test_tangent_freed_compiled_model_eager_loss(self):
@@ -4800,10 +4804,33 @@ def forward(self, tangents_1):
         model, x, labels = self._make_model_and_input()
         compiled_model = torch.compile(model, backend="inductor")
 
+        refcount_box = {}
+
+        class CaptureRefcount(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, pred):
+                return pred.clone()
+
+            @staticmethod
+            def backward(ctx, grad):
+                refcount_box["at_boundary"] = sys.getrefcount(grad)
+                return grad
+
         pred = compiled_model(x)
+        pred = CaptureRefcount.apply(pred)
         loss = torch.nn.functional.cross_entropy(pred.float(), labels)
         del pred
         loss.backward()
+
+        self.assertIn("at_boundary", refcount_box)
+        # refcount == 2: the `grad` local + getrefcount arg.
+        # The framework holds no extra refs to the tangent.
+        self.assertEqual(
+            refcount_box["at_boundary"],
+            2,
+            f"Framework holds extra refs to tangent: refcount={refcount_box['at_boundary']}, "
+            "expected 2 (only the local variable + getrefcount arg)",
+        )
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA is unavailable")
     def test_tangent_user_provided_via_pop(self):
@@ -4813,8 +4840,8 @@ def forward(self, tangents_1):
         After pop(), no Python variable holds the tangent — same as torchtitan.
         The boxed calling convention should free it (no resize_(0) needed).
 
-        We verify via refcount at the model backward entry point: with pop()
-        the tangent has no user ref, so the boxed convention can release it."""
+        We verify that the framework holds no extra refs to the grad tensor
+        at the model/loss boundary."""
         model, x, _labels = self._make_model_and_input()
         compiled_model = torch.compile(model, backend="inductor")
 
@@ -4848,21 +4875,24 @@ def forward(self, tangents_1):
         loss_list.pop().backward()
 
         self.assertIn("at_boundary", refcount_box)
-        # Same low refcount as torchtitan pattern — no user ref to tangent.
-        self.assertLessEqual(
+        # sys.getrefcount(grad) == 2 means only the local `grad` variable
+        # and the getrefcount argument exist — the framework holds zero
+        # extra refs to the tangent.
+        self.assertEqual(
             refcount_box["at_boundary"],
-            6,
-            f"Tangent refcount at boundary is {refcount_box['at_boundary']}, "
-            "expected <= 6 with boxed calling convention (pop pattern)",
+            2,
+            f"Framework holds extra refs to tangent: refcount={refcount_box['at_boundary']}, "
+            "expected 2 (only the local variable + getrefcount arg)",
         )
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA is unavailable")
-    def test_tangent_refcount_during_backward(self):
-        """Verify tangent refcount drops at model/loss boundary.
+    def test_tangent_no_extra_framework_refs(self):
+        """Verify the framework holds no extra refs to grad tensors.
 
         Mirrors torchtitan simple_fsdp layout with a probe between compiled
-        model and compiled loss. Checks that boxed calling convention keeps
-        refcount low enough for deallocation when no user ref exists."""
+        model and compiled loss. With boxed calling convention, the grad
+        passed to backward should have refcount == 2 (the local variable +
+        sys.getrefcount arg), meaning the framework released all its refs."""
         model, x, labels = self._make_model_and_input()
         compiled_model = torch.compile(model, backend="inductor")
 
@@ -4890,14 +4920,13 @@ def forward(self, tangents_1):
         loss.backward()
 
         self.assertIn("at_boundary", refcount_box)
-        # With boxed calling convention, the tangent refcount at the
-        # model/loss boundary should be low (engine + our local = ~3-4).
-        # Without boxed grads it would be higher (~7+) due to tuple refs.
-        self.assertLessEqual(
+        # refcount == 2: the `grad` local + getrefcount arg.
+        # No framework refs (tuple, list, etc.) remain.
+        self.assertEqual(
             refcount_box["at_boundary"],
-            6,
-            f"Tangent refcount at boundary is {refcount_box['at_boundary']}, "
-            "expected <= 6 with boxed calling convention",
+            2,
+            f"Framework holds extra refs to tangent: refcount={refcount_box['at_boundary']}, "
+            "expected 2 (only the local variable + getrefcount arg)",
         )
 
 

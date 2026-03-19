@@ -8635,6 +8635,183 @@ for shape in [(1,), ()]:
         self.assertEqual(y.grad_fn.saved_tensors, ())
         self.assertEqual(y.grad_fn._raw_saved_tensors, ())
 
+    @unittest.skipIf(not TEST_CUDA, "CUDA is unavailable")
+    def test_custom_function_boxed_grads(self):
+        """Test the C++ boxed_grads_call mechanism without torch.compile.
+
+        A custom autograd.Function opts into boxed grads, reads from
+        ctx._boxed_grads in backward, and verifies the list is populated
+        by PyNode::apply and that grads are correct."""
+
+        class BoxedFunc(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                ctx._boxed_grads_call = True
+                ctx.save_for_backward(x)
+                return x * 2
+
+            @staticmethod
+            def backward(ctx, *args):
+                # With boxed_grads_call, PyNode::apply stores grads in
+                # _boxed_grads list and passes None through *args.
+                boxed = getattr(ctx, "_boxed_grads", None)
+                self.assertIsNotNone(boxed, "_boxed_grads not set by C++")
+                self.assertIsInstance(boxed, list)
+                self.assertEqual(len(boxed), 1)
+                grad = boxed[0]
+                self.assertTrue(
+                    all(a is None for a in args),
+                    f"Expected None args with boxed grads, got {args}",
+                )
+                (x,) = ctx.saved_tensors
+                boxed.clear()
+                ctx._boxed_grads = None
+                return grad * 2
+
+        x = torch.randn(4, device="cuda", requires_grad=True)
+        out = BoxedFunc.apply(x)
+        out.sum().backward()
+        # d/dx (2x).sum() = 2
+        self.assertEqual(x.grad, torch.full_like(x, 2.0))
+
+    @unittest.skipIf(not TEST_CUDA, "CUDA is unavailable")
+    def test_custom_function_boxed_grads_multi_output(self):
+        """Boxed grads with multiple outputs — _boxed_grads list has one
+        entry per output and *args are all None."""
+
+        class MultiOut(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                ctx._boxed_grads_call = True
+                ctx.save_for_backward(x)
+                return x * 2, x * 3
+
+            @staticmethod
+            def backward(ctx, *args):
+                boxed = getattr(ctx, "_boxed_grads", None)
+                self.assertIsNotNone(boxed)
+                self.assertEqual(len(boxed), 2)
+                self.assertTrue(all(a is None for a in args))
+                (x,) = ctx.saved_tensors
+                g1, g2 = boxed
+                boxed.clear()
+                ctx._boxed_grads = None
+                return g1 * 2 + g2 * 3
+
+        x = torch.randn(4, device="cuda", requires_grad=True)
+        a, b = MultiOut.apply(x)
+        (a.sum() + b.sum()).backward()
+        # d/dx (2x + 3x).sum() = 2*2 + 3*3 = 13
+        # forward: a=2x, b=3x; backward: grad_a=1, grad_b=1
+        # return grad_a*2 + grad_b*3 = 2+3 = 5
+        self.assertEqual(x.grad, torch.full_like(x, 5.0))
+
+    @unittest.skipIf(not TEST_CUDA, "CUDA is unavailable")
+    def test_custom_function_boxed_grads_no_extra_refs(self):
+        """Framework holds no extra refs to grads with boxed calling convention.
+
+        sys.getrefcount(grad) == 2 inside backward means only the local
+        variable + getrefcount arg — the framework released all its refs."""
+
+        refcount_box = {}
+
+        class CheckRefs(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                ctx._boxed_grads_call = True
+                ctx.save_for_backward(x)
+                return x * 2
+
+            @staticmethod
+            def backward(ctx, *args):
+                boxed = ctx._boxed_grads
+                grad = boxed[0]
+                refcount_box["rc"] = sys.getrefcount(grad)
+                boxed.clear()
+                ctx._boxed_grads = None
+                (x,) = ctx.saved_tensors
+                return grad * 2
+
+        x = torch.randn(4, device="cuda", requires_grad=True)
+        out = CheckRefs.apply(x)
+        out.sum().backward()
+        self.assertEqual(x.grad, torch.full_like(x, 2.0))
+        # refcount == 2: `grad` local + getrefcount arg. No framework refs.
+        self.assertEqual(refcount_box["rc"], 2)
+
+    @unittest.skipIf(not TEST_CUDA, "CUDA is unavailable")
+    def test_custom_function_boxed_grads_cleanup_on_error(self):
+        """_boxed_grads is cleaned up even when backward raises."""
+
+        class FailingBwd(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                ctx._boxed_grads_call = True
+                return x * 2
+
+            @staticmethod
+            def backward(ctx, *args):
+                raise RuntimeError("intentional failure")
+
+        x = torch.randn(4, device="cuda", requires_grad=True)
+        out = FailingBwd.apply(x)
+        grad_fn = out.grad_fn
+        with self.assertRaisesRegex(RuntimeError, "intentional failure"):
+            out.sum().backward()
+        # After the error, _boxed_grads should be cleaned up (set to None)
+        # by the C++ cleanup code in PyNode::apply.
+        self.assertIsNone(getattr(grad_fn, "_boxed_grads", "missing"))
+
+    @unittest.skipIf(not TEST_CUDA, "CUDA is unavailable")
+    def test_custom_function_boxed_grads_chain(self):
+        """Two boxed-grads functions chained — each gets its own _boxed_grads."""
+
+        call_order = []
+
+        class Mul2(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                ctx._boxed_grads_call = True
+                ctx.save_for_backward(x)
+                return x * 2
+
+            @staticmethod
+            def backward(ctx, *args):
+                call_order.append("Mul2")
+                boxed = ctx._boxed_grads
+                self.assertIsNotNone(boxed)
+                grad = boxed[0]
+                boxed.clear()
+                ctx._boxed_grads = None
+                (x,) = ctx.saved_tensors
+                return grad * 2
+
+        class Mul3(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x):
+                ctx._boxed_grads_call = True
+                ctx.save_for_backward(x)
+                return x * 3
+
+            @staticmethod
+            def backward(ctx, *args):
+                call_order.append("Mul3")
+                boxed = ctx._boxed_grads
+                self.assertIsNotNone(boxed)
+                grad = boxed[0]
+                boxed.clear()
+                ctx._boxed_grads = None
+                (x,) = ctx.saved_tensors
+                return grad * 3
+
+        x = torch.randn(4, device="cuda", requires_grad=True)
+        out = Mul3.apply(Mul2.apply(x))
+        out.sum().backward()
+        # backward order: Mul3 then Mul2
+        self.assertEqual(call_order, ["Mul3", "Mul2"])
+        # d/dx (3 * 2 * x).sum() = grad 1 → Mul3 bwd: 1*3=3 → Mul2 bwd: 3*2=6
+        self.assertEqual(x.grad, torch.full_like(x, 6.0))
+
     @skipIfTorchDynamo("dynamo accesses saved_tensors multiple times")
     def test_clear_saved_tensors_on_access(self):
         class MyFn(Function):

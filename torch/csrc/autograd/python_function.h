@@ -123,7 +123,7 @@ struct THPFunction {
   // When true, PyNode::apply uses boxed calling convention: grad tensors are
   // moved from the immutable args tuple into a mutable list (_boxed_grads) so
   // the backward can release individual tensor references mid-execution.
-  bool boxed_call = false;
+  bool boxed_grads_call = false;
 
   PyObject* compiled_autograd_backward_state;
   std::vector<c10::SymInt> compiled_autograd_symints;
