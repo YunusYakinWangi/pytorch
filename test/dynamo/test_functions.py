@@ -636,7 +636,7 @@ class FunctionTests(torch._dynamo.test_case.TestCaseWithNestedGraphBreaks):
     def test_is_integer(self):
         @torch.compile(backend="eager", fullgraph=True)
         def forward(t, m):
-            return 2 * t if m.is_integer() else t
+            return 2 * t if m.is_integer() else t + 0
 
         t = torch.tensor([1])
         self.assertEqual(forward(t, 1.0).item(), 2)
@@ -1019,7 +1019,7 @@ class FunctionTests(torch._dynamo.test_case.TestCaseWithNestedGraphBreaks):
         @torch.compile(backend="eager", fullgraph=True)
         def fn1(x, arg):
             if callable(arg):
-                return x
+                return x + 0
             return x + 1
 
         @torch.compile(backend="eager", fullgraph=True)
