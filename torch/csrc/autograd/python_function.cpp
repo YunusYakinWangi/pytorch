@@ -160,11 +160,44 @@ auto PyNode::apply(variable_list&& inputs) -> variable_list {
 
   // Massage a C++ variable_list into a Python arguments tuple
   THPObjectPtr pyInputs(to_py_args(inputs, &_device_guard));
+  inputs.clear();
+
+  // Check if this function opts into the boxed calling convention.
+  // Only CompiledFunction (AOTAutograd) sets _supports_boxed_grads = True.
+  THPObjectPtr supports_boxed(
+      PyObject_GetAttrString(obj, "_supports_boxed_grads"));
+  bool use_boxed = supports_boxed && PyObject_IsTrue(supports_boxed.get());
+  if (PyErr_Occurred())
+    PyErr_Clear();
+
+  if (use_boxed) {
+    // Move grad tensors from the immutable args tuple into a mutable Python
+    // list on the function object. Replace tuple items with None so pyInputs
+    // doesn't keep tensors alive during the blocking PyObject_CallObject.
+    Py_ssize_t n = PyTuple_GET_SIZE(pyInputs.get());
+    THPObjectPtr gradsList(PyList_New(n));
+    if (!gradsList)
+      throw_python_error();
+    for (Py_ssize_t i = 0; i < n; i++) {
+      PyObject* item = PyTuple_GET_ITEM(pyInputs.get(), i);
+      Py_INCREF(item);
+      PyList_SET_ITEM(gradsList.get(), i, item);
+      Py_INCREF(Py_None);
+      Py_DECREF(PyTuple_GET_ITEM(pyInputs.get(), i));
+      PyTuple_SET_ITEM(pyInputs.get(), i, Py_None);
+    }
+    if (PyObject_SetAttrString(obj, "_boxed_grads", gradsList.get()) < 0)
+      throw_python_error();
+  }
 
   THPObjectPtr apply_fn(PyObject_GetAttrString(obj, "apply"));
   if (!apply_fn)
     throw_python_error();
   THPObjectPtr r(PyObject_CallObject(apply_fn, pyInputs.get()));
+  pyInputs = nullptr;
+  if (use_boxed) {
+    PyObject_SetAttrString(obj, "_boxed_grads", Py_None);
+  }
   if (!r)
     throw_python_error();
   ensure_tuple(r);
