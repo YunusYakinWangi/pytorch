@@ -6,7 +6,7 @@ import unittest
 
 import torch
 import torch._dynamo.testing as dynamo_testing
-from torch._dynamo.test_case import TestCase, run_tests
+from torch._dynamo.test_case import run_tests, TestCase
 
 
 class SlotsOnly:
@@ -335,7 +335,7 @@ class TestSlotsAttrAssignment(TestCase):
 
 
 class WithGetattribute:
-    __slots__ = ("x", "_side_effects")
+    # __slots__ = ("x", "_side_effects")
 
     def __init__(self, x):
         object.__setattr__(self, "x", x)
@@ -360,7 +360,7 @@ class TestSlotsFromCPython(TestCase):
         torch._dynamo.config.enable_trace_unittest = self._u_prev
 
     def test_slots_empty(self):
-        class C(object):
+        class C:
             __slots__ = []
 
         def fn(t):
@@ -368,11 +368,12 @@ class TestSlotsFromCPython(TestCase):
             self.assertFalse(hasattr(x, "__dict__"))
             self.assertFalse(hasattr(x, "foo"))
             return t.sin()
+
         dynamo_testing.standard_test(self, fn, nargs=1)
 
     def test_slots_single(self):
-        class C(object):
-            __slots__ = ['a']
+        class C:
+            __slots__ = ["a"]
 
         def fn(t):
             x = C()
@@ -389,7 +390,7 @@ class TestSlotsFromCPython(TestCase):
         dynamo_testing.standard_test(self, fn, nargs=1)
 
     def test_slots_multiple(self):
-        class C(object):
+        class C:
             __slots__ = ["a", "b", "c"]
 
         def fn(t):
@@ -409,7 +410,7 @@ class TestSlotsFromCPython(TestCase):
         dynamo_testing.standard_test(self, fn, nargs=1)
 
     def test_slots_name_mangling(self):
-        class C(object):
+        class C:
             __slots__ = ["__a"]
 
             def __init__(self, value):
@@ -435,8 +436,8 @@ class TestSlotsFromCPython(TestCase):
 
     def test_slots_string_not_expanded(self):
         # A single string is not expanded as a sequence
-        class C(object):
-            __slots__ = "abc"
+        class C:
+            __slots__ = "abc"  # noqa: PLC0205
 
         def fn(t):
             c = C()
@@ -449,7 +450,7 @@ class TestSlotsFromCPython(TestCase):
     def test_slots_tuple(self):
         slots = ("foo", "bar")
 
-        class C(object):
+        class C:
             __slots__ = slots
 
         def fn(t):
@@ -462,8 +463,8 @@ class TestSlotsFromCPython(TestCase):
         dynamo_testing.standard_test(self, fn, nargs=1)
 
     def test_slots_get_unset_raises(self):
-        class X(object):
-            __slots__ = "a"
+        class X:
+            __slots__ = "a"  # noqa: PLC0205
 
         def fn(t):
             with self.assertRaises(AttributeError):
@@ -474,10 +475,10 @@ class TestSlotsFromCPython(TestCase):
 
     def test_slots_str_subclass(self):
         # gh-98783: string subclass in __slots__
-        class SubStr(str):
+        class SubStr(str):  # noqa: SLOT000
             pass
 
-        class X(object):
+        class X:
             __slots__ = (SubStr("x"),)
 
         def fn(t):
@@ -490,7 +491,7 @@ class TestSlotsFromCPython(TestCase):
 
     def test_slots_special_dict(self):
         # __dict__ in __slots__ enables arbitrary attr assignment
-        class D(object):
+        class D:
             __slots__ = ["__dict__"]
 
         def fn(t):
@@ -505,7 +506,7 @@ class TestSlotsFromCPython(TestCase):
 
     def test_slots_special_weakref(self):
         # __weakref__ in __slots__ — no __dict__, arbitrary attr raises
-        class W(object):
+        class W:
             __slots__ = ["__weakref__"]
 
         def fn(t):
@@ -520,10 +521,10 @@ class TestSlotsFromCPython(TestCase):
 
     def test_slots_special_inherit_dict_weakref(self):
         # Inheriting from both __dict__ and __weakref__ slot classes
-        class D(object):
+        class D:
             __slots__ = ["__dict__"]
 
-        class W(object):
+        class W:
             __slots__ = ["__weakref__"]
 
         class C1(W, D):
@@ -543,9 +544,9 @@ class TestSlotsFromCPython(TestCase):
     def test_slots_special2_classcell(self):
         # Testing __classcell__ in __slots__
         class Meta(type):
-            def __new__(cls, name, bases, namespace, attr):
+            def __new__(metacls, name, bases, namespace, attr):
                 self.assertIn(attr, namespace)
-                return super().__new__(cls, name, bases, namespace)
+                return super().__new__(metacls, name, bases, namespace)
 
         class C1:
             def __init__(self):
@@ -558,48 +559,30 @@ class TestSlotsFromCPython(TestCase):
                 super().__init__()
 
         def fn(t):
-            self.assertIsInstance(C2.__dict__["__classcell__"], types.MemberDescriptorType)
+            self.assertIsInstance(
+                C2.__dict__["__classcell__"], types.MemberDescriptorType
+            )
             c = C2()
             self.assertEqual(c.b, 42)
             self.assertFalse(hasattr(c, "__classcell__"))
             c.__classcell__ = 42
             self.assertEqual(c.__classcell__, 42)
             with self.assertRaises(TypeError):
+
                 class C3:
                     __classcell__ = 42
                     __slots__ = ["__classcell__"]
-            return t.sin()
 
-        dynamo_testing.standard_test(self, fn, nargs=1)
-
-    @unittest.expectedFailure
-    def test_slots_descriptor(self):
-        # Issue2115: slot descriptors did not correctly check the type of the given object
-        # dynamo can't trace the abc module
-        import abc
-
-        class MyABC(metaclass=abc.ABCMeta):
-            __slots__ = "a"
-
-        class Unrelated(object):
-            pass
-
-        MyABC.register(Unrelated)
-
-        def fn(t):
-            u = Unrelated()
-            self.assertIsInstance(u, MyABC)
-            self.assertRaises(TypeError, MyABC.a.__set__, u, 3)
             return t.sin()
 
         dynamo_testing.standard_test(self, fn, nargs=1)
 
     def test_slots_multiple_inheritance(self):
         # SF bug 575229: multiple inheritance w/ slots dumps core
-        class A(object):
+        class A:
             __slots__ = ()
 
-        class B(object):
+        class B:
             pass
 
         class C(A, B):

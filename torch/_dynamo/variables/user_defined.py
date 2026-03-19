@@ -96,7 +96,13 @@ from ..utils import (
     tuple_methods,
     unpatched_nn_module_getattr,
 )
-from .base import MutationType, raise_type_error_exc, ValueMutationNew, VariableTracker
+from .base import (
+    MutationType,
+    NO_SUCH_SUBOBJ,
+    raise_type_error_exc,
+    ValueMutationNew,
+    VariableTracker,
+)
 from .dicts import ConstDictVariable, DefaultDictVariable, SetVariable
 
 
@@ -1111,10 +1117,6 @@ class UserDefinedEnumClassVariable(UserDefinedClassVariable):
         return super().var_getattr(tx, name)
 
 
-class NO_SUCH_SUBOBJ:
-    pass
-
-
 class RemovableHandleClass:
     # Dummy class to pass to python_type of
     # RemovableHandleVariable
@@ -1225,6 +1227,9 @@ class UserDefinedObjectVariable(UserDefinedVariable):
 
     def python_type(self) -> type:
         return self.value_type  # type: ignore[return-value]
+
+    def python_value_for_identity(self) -> object:
+        return self.value
 
     def as_python_constant(self) -> object:
         if self.is_pytree_constant_class and self.source:
@@ -1463,7 +1468,7 @@ class UserDefinedObjectVariable(UserDefinedVariable):
         #  2) a plain attribute with no descriptor
         # If the object has no __dict__, only slot descriptors (member_descriptor)
         # allow mutation. Any other attribute assignment raises AttributeError.
-        if not self._hasattr_static("__dict__"):
+        if not hasattr(self.value, "__dict__"):
             descriptor = self.lookup_class_mro_attr(name_str)
             if not inspect.ismemberdescriptor(descriptor):
                 error_msg = VariableTracker.build(
@@ -1638,13 +1643,6 @@ class UserDefinedObjectVariable(UserDefinedVariable):
 
         self._looked_up_attrs[name] = subobj
         return subobj
-
-    def _hasattr_static(self, name: str) -> bool:
-        try:
-            self._getattr_static(name)
-            return True
-        except AttributeError:
-            return False
 
     def lookup_class_mro_attr(self, name: str) -> object:
         """Walk type(obj).__mro__ to find *name* in the class hierarchy.
