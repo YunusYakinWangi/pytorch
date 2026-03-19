@@ -2671,7 +2671,7 @@ Your tensor subclass must implement __coerce_same_metadata_as_tangent__."""
                 # Only save tensors that need VC checks via save_for_backward
                 ctx.save_for_backward(*tensors_to_save)
                 ctx._tensors_no_vc_check = tensors_no_vc
-                ctx._supports_boxed_grads = True
+                ctx._boxed_call = True
 
                 symint_outs = fw_outs[
                     CompiledFunction.metadata.symints_saved_for_backwards_slice

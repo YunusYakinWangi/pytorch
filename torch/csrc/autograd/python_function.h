@@ -120,10 +120,10 @@ struct THPFunction {
   // https://github.com/pytorch/pytorch/pull/98659#pullrequestreview-1376822560
   bool materialize_non_diff_grads;
 
-  // When true, PyNode::apply moves grad tensors from the immutable args
-  // tuple into a mutable list (_boxed_grads) so the backward implementation
-  // can release individual tensor references mid-execution.
-  bool boxed_grads = false;
+  // When true, PyNode::apply uses boxed calling convention: grad tensors are
+  // moved from the immutable args tuple into a mutable list (_boxed_grads) so
+  // the backward can release individual tensor references mid-execution.
+  bool boxed_call = false;
 
   PyObject* compiled_autograd_backward_state;
   std::vector<c10::SymInt> compiled_autograd_symints;

@@ -4806,6 +4806,57 @@ def forward(self, tangents_1):
         loss.backward()
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA is unavailable")
+    def test_tangent_user_provided_via_pop(self):
+        """Scenario: user creates tangent but releases it before backward runs.
+
+        The user wraps the tangent in a list and calls out.backward(l.pop()).
+        After pop(), no Python variable holds the tangent — same as torchtitan.
+        The boxed calling convention should free it (no resize_(0) needed).
+
+        We verify via refcount at the model backward entry point: with pop()
+        the tangent has no user ref, so the boxed convention can release it."""
+        model, x, _labels = self._make_model_and_input()
+        compiled_model = torch.compile(model, backend="inductor")
+
+        def loss_fn(pred, labels):
+            return torch.nn.functional.cross_entropy(pred.float(), labels)
+
+        compiled_loss = torch.compile(loss_fn, backend="inductor")
+        _, _, labels = self._make_model_and_input()
+
+        refcount_box = {}
+
+        class CaptureRefcount(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, pred):
+                return pred.clone()
+
+            @staticmethod
+            def backward(ctx, grad):
+                refcount_box["at_boundary"] = sys.getrefcount(grad)
+                return grad
+
+        pred = compiled_model(x)
+        pred = CaptureRefcount.apply(pred)
+        loss = compiled_loss(pred, labels)
+        del pred
+
+        # Wrap loss in a list and use pop() — no user variable holds loss
+        # after this. The tangent created by loss backward has no user ref.
+        loss_list = [loss]
+        del loss
+        loss_list.pop().backward()
+
+        self.assertIn("at_boundary", refcount_box)
+        # Same low refcount as torchtitan pattern — no user ref to tangent.
+        self.assertLessEqual(
+            refcount_box["at_boundary"],
+            6,
+            f"Tangent refcount at boundary is {refcount_box['at_boundary']}, "
+            "expected <= 6 with boxed calling convention (pop pattern)",
+        )
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA is unavailable")
     def test_tangent_refcount_during_backward(self):
         """Verify tangent refcount drops at model/loss boundary.
 

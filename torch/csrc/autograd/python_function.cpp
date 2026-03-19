@@ -162,7 +162,7 @@ auto PyNode::apply(variable_list&& inputs) -> variable_list {
   THPObjectPtr pyInputs(to_py_args(inputs, &_device_guard));
   inputs.clear();
 
-  if (py_fn->boxed_grads) {
+  if (py_fn->boxed_call) {
     // Move grad tensors from the immutable args tuple into a mutable Python
     // list on the function object. Replace tuple items with None so pyInputs
     // doesn't keep tensors alive during the blocking PyObject_CallObject.
@@ -187,7 +187,7 @@ auto PyNode::apply(variable_list&& inputs) -> variable_list {
     throw_python_error();
   THPObjectPtr r(PyObject_CallObject(apply_fn, pyInputs.get()));
   pyInputs = nullptr;
-  if (py_fn->boxed_grads) {
+  if (py_fn->boxed_call) {
     PyObject_SetAttrString(obj, "_boxed_grads", Py_None);
   }
   if (!r)
@@ -602,7 +602,7 @@ static PyObject* THPFunction_new(
   self->materialize_grads = true;
   self->pure_view = false;
   self->materialize_non_diff_grads = true;
-  self->boxed_grads = false;
+  self->boxed_call = false;
   self->clear_saved_tensors_on_access = false;
   self->saved_tensors_accessed_and_cleared = false;
   return obj;
@@ -1535,17 +1535,17 @@ int THPFunction_set_materialize_grads(
   END_HANDLE_TH_ERRORS_RET(-1)
 }
 
-int THPFunction_set_boxed_grads(
+int THPFunction_set_boxed_call(
     THPFunction* self,
     PyObject* value,
     void* unused) {
   HANDLE_TH_ERRORS
   if (!PyBool_Check(value)) {
     THPUtils_invalidArguments(
-        value, nullptr, "set_boxed_grads", 1, "(bool)");
+        value, nullptr, "set_boxed_call", 1, "(bool)");
     return -1;
   }
-  self->boxed_grads = (value == Py_True);
+  self->boxed_call = (value == Py_True);
   return 0;
   END_HANDLE_TH_ERRORS_RET(-1)
 }
@@ -1885,9 +1885,9 @@ static struct PyGetSetDef THPFunction_properties[] = {
      (setter)THPFunction_set_compiled_autograd_backward_state,
      nullptr,
      nullptr},
-    {"_supports_boxed_grads",
+    {"_boxed_call",
      nullptr,
-     (setter)THPFunction_set_boxed_grads,
+     (setter)THPFunction_set_boxed_call,
      nullptr,
      nullptr},
     {nullptr}};
