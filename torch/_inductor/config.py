@@ -661,7 +661,11 @@ use_dce: bool = True
 # Use fx graph passes
 use_pre_grad_passes: bool = True
 
-
+# "early": pre-grad passes run before cache lookup (every compile).
+# "late": pre-grad passes run after cache lookup (only on cache miss);
+#   requires custom passes to implement uuid() for the cache key.
+# "default": resolves to "late" when possible (no custom pass, or custom pass
+#   with uuid), falls back to "early" otherwise.
 pre_grad_pass_timing: Literal["early", "late", "default"] = (
     "late" if is_fbcode() else "default"
 )
@@ -1864,6 +1868,10 @@ class triton:
         os.environ.get("TORCHINDUCTOR_MIX_ORDER_REDUCTION_ALLOW_MULTI_STAGES") == "1"
     )
 
+    enable_tlx_templates: bool = (
+        os.environ.get("TORCHINDUCTOR_ENABLE_TLX_TEMPLATES", "0") == "1"
+    )
+
     # Map for storing the amount of kernel runs with dumped input tensors
     # Based on hash of Triton source code to avoid bloating the folder
     debug_dump_kernel_inputs: dict[str, int] = {}
@@ -1872,14 +1880,6 @@ class triton:
     # When the maximum is reached the first values get overwritten
     # This ensures the last N runs are saved, where N is this value
     max_kernel_dump_occurrences = 3
-
-    # TLX template mode: "default", "allow", or "force"
-    tlx_mode: str = os.environ.get("TORCHINDUCTOR_TLX_MODE", "default")
-
-    # TLX heuristic config: when True, use heuristic-based config selection for TLX templates
-    tlx_heuristic_config: bool = (
-        os.environ.get("TORCHINDUCTOR_TLX_HEURISTIC_CONFIG", "1") == "1"
-    )
 
     proton_profiling: bool = (
         os.environ.get("TORCHINDUCTOR_TRITON_PROTON_PROFILING", "0") == "1"
