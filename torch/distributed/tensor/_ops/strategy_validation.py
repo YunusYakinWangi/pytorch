@@ -1627,7 +1627,7 @@ def _validate_aten_op_for_sample(
 ) -> tuple[int, int]:
     """Validate a single aten op with captured args against ground truth.
 
-    Shared logic used by both default (1:1) and exhaustive modes in
+    Shared logic used by both default (1:1) and allow_composite modes in
     compare_operator. Returns (samples_counted, combinations_counted).
     """
     tensors = extract_tensors_from_args(captured_args, captured_kwargs)
@@ -1774,7 +1774,7 @@ def compare_operator(
     max_samples: int | None = None,
     verbose: bool = False,
     incorrect_only: bool = False,
-    exhaustive: bool = False,
+    allow_composite: bool = False,
 ) -> ComparisonStats:
     """
     Compare DTensor's sharding rules against ground truth for an operator.
@@ -1787,8 +1787,8 @@ def compare_operator(
         max_samples: Maximum number of samples to test per OpInfo
         verbose: Print detailed output
         incorrect_only: If True, only test DTensor's claimed rules for correctness.
-            Skips exhaustive search for missing rules (much faster).
-        exhaustive: If True, validate each supported aten op individually for
+            Skips search for missing rules (much faster).
+        allow_composite: If True, validate each supported aten op individually for
             samples that decompose into multiple aten calls. Default (False)
             skips samples where the OpInfo doesn't map 1:1 to a single aten op.
     """
@@ -1799,7 +1799,7 @@ def compare_operator(
 
     stats = ComparisonStats()
 
-    if not exhaustive:
+    if not allow_composite:
         aten_op = _discover_aten_op(opinfos, device, dtype)
         if aten_op is None or not _has_dtensor_support(aten_op):
             if verbose:
@@ -1854,7 +1854,7 @@ def compare_operator(
             ]
             num_supported = len(supported_ops)
 
-            if exhaustive:
+            if allow_composite:
                 # Validate each supported aten op individually
                 if num_supported == 0:
                     skip_reasons["no supported aten ops"] += 1
@@ -1912,8 +1912,8 @@ def compare_operator(
     stats.total_combinations = total_combinations
     stats.skip_reasons = dict(skip_reasons)
 
-    # In exhaustive mode, check DTensor support after processing
-    if exhaustive and total_samples == 0 and not skip_reasons:
+    # In allow_composite mode, check DTensor support after processing
+    if allow_composite and total_samples == 0 and not skip_reasons:
         stats.no_dtensor_support = True
 
     return stats
@@ -2062,7 +2062,7 @@ if __name__ == "__main__":
         help="Only test DTensor's claimed rules (faster, skips missing detection)",
     )
     parser.add_argument(
-        "--exhaustive",
+        "--allow-composite",
         action="store_true",
         help="Validate each supported aten op individually for decomposed ops "
         "(default skips non-1:1 aten mappings)",
@@ -2125,8 +2125,10 @@ if __name__ == "__main__":
         # Preamble
         display_names = [_format_op_name(n) for n in op_names]
         print(f"Testing ops: {', '.join(display_names)}")
-        if args.exhaustive:
-            print("Mode: exhaustive (validates each aten op in decomposed samples)")
+        if args.allow_composite:
+            print(
+                "Mode: allow-composite (validates each aten op in decomposed samples)"
+            )
         if args.incorrect_only:
             print("Mode: incorrect-only (fast)")
         print(f"Device: {args.device}, Dtype: {dtype}, World size: {args.world_size}")
@@ -2153,7 +2155,7 @@ if __name__ == "__main__":
                     args.max_samples,
                     verbose=True,
                     incorrect_only=args.incorrect_only,
-                    exhaustive=args.exhaustive,
+                    allow_composite=args.allow_composite,
                 )
                 elapsed = time.time() - op_start
 

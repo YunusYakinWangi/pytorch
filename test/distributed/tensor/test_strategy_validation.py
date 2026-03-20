@@ -1319,7 +1319,7 @@ class TestCompareOperatorEndToEnd(TestCase):
 
 
 class TestAtenLevelValidation(TestCase):
-    """Tests for aten-level validation (validate_aten_combination + exhaustive mode)."""
+    """Tests for aten-level validation (validate_aten_combination + allow_composite mode)."""
 
     world_size = 2
 
@@ -1389,8 +1389,8 @@ class TestAtenLevelValidation(TestCase):
             )
             self.assertFalse(valid)
 
-    def test_exhaustive_eliminates_non_1to1_skips(self):
-        """Exhaustive mode should validate decomposed ops that default mode skips."""
+    def test_allow_composite_eliminates_non_1to1_skips(self):
+        """allow_composite mode should validate decomposed ops that default mode skips."""
         from torch.distributed.tensor._ops.strategy_validation import compare_operator
 
         def run():
@@ -1402,18 +1402,22 @@ class TestAtenLevelValidation(TestCase):
                 max_samples=3,
                 incorrect_only=True,
             )
-            exhaustive = compare_operator(
+            allow_composite = compare_operator(
                 "inner",
                 device="cpu",
                 dtype=torch.float32,
                 world_size=self.world_size,
                 max_samples=3,
                 incorrect_only=True,
-                exhaustive=True,
+                allow_composite=True,
             )
             self.assertGreater(default.skip_reasons.get("non-1:1 aten mapping", 0), 0)
-            self.assertEqual(exhaustive.skip_reasons.get("non-1:1 aten mapping", 0), 0)
-            self.assertGreaterEqual(exhaustive.total_samples, default.total_samples)
+            self.assertEqual(
+                allow_composite.skip_reasons.get("non-1:1 aten mapping", 0), 0
+            )
+            self.assertGreaterEqual(
+                allow_composite.total_samples, default.total_samples
+            )
 
         self._with_even_sizes(run)
 
