@@ -77,6 +77,8 @@ __global__ void reduce_scatter_columns_kernel(
   T* dst_base = reinterpret_cast<T*>(info.dst_ptrs[slot]);
   const int cols = static_cast<int>(info.dst_cols[slot]);
 
+  // Each CTA handles a strided subset of rows; the reduce reads from all peers
+  // and writes cols elements starting at dst_row.
   for (int row = local_block; row < rows; row += gridDim.y) {
     const size_t row_offset =
         base_byte_offset +
