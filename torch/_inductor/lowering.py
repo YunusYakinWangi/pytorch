@@ -2881,16 +2881,22 @@ def bucketize(
     return result
 
 
+def _is_tensor_irnode(x):
+    return isinstance(x, ir.IRNode) and not isinstance(x, ir.NonTensorObj)
+
+
 def require_dense(_, *args, **kwargs):
     args, kwargs = pytree.tree_map_only(
-        ir.IRNode, ir.ExternKernel.require_stride1, (args, kwargs)
+        _is_tensor_irnode, ir.ExternKernel.require_stride1, (args, kwargs)
     )
     return args, kwargs
 
 
 def require_contiguous(_, *args, **kwargs):
     args, kwargs = pytree.tree_map_only(
-        ir.IRNode, ir.ExternKernel.require_contiguous, (args, kwargs)
+        _is_tensor_irnode,
+        ir.ExternKernel.require_contiguous,
+        (args, kwargs),
     )
     return args, kwargs
 
@@ -2899,14 +2905,18 @@ def require_contiguous_strides(_, *args, **kwargs):
     # TODO: combine this with require_contiguous after
     # https://github.com/pytorch/pytorch/pull/148235 lands.
     args, kwargs = pytree.tree_map_only(
-        ir.IRNode, ir.ExternKernel.require_contiguous_strides, (args, kwargs)
+        _is_tensor_irnode,
+        ir.ExternKernel.require_contiguous_strides,
+        (args, kwargs),
     )
     return args, kwargs
 
 
 def require_channels_last(_, *args, **kwargs):
     args, kwargs = pytree.tree_map_only(
-        ir.IRNode, ir.ExternKernel.require_channels_last, (args, kwargs)
+        _is_tensor_irnode,
+        ir.ExternKernel.require_channels_last,
+        (args, kwargs),
     )
     return args, kwargs
 
@@ -2939,8 +2949,11 @@ def constrain_to_fake_tensors(args, kwargs, fake_args, fake_kwargs):
 def constrain_to_fx_strides(fx_node, *args, **kwargs):
     def apply_constraint(arg, fx_arg):
         if isinstance(arg, ir.IRNode):
+            meta_val = fx_arg.meta.get("val")
+            if not isinstance(meta_val, torch.Tensor):
+                return arg
             stride_order = ir.get_stride_order(
-                fx_arg.meta["val"].stride(), V.graph.sizevars.shape_env
+                meta_val.stride(), V.graph.sizevars.shape_env
             )
             return ir.ExternKernel.require_stride_order(arg, stride_order)
         if isinstance(arg, dict):
@@ -2964,10 +2977,12 @@ def sdpa_constraint(fx_node, *args, **kwargs):
     """Apply stride constraints to SDPA inputs, ensuring dense last dimension."""
 
     def apply_constraint(idx, arg, fx_arg):
-        if not isinstance(arg, ir.IRNode):
+        if not isinstance(arg, ir.IRNode) or isinstance(arg, ir.NonTensorObj):
             return arg
 
-        meta_val = fx_arg.meta["val"]
+        meta_val = fx_arg.meta.get("val")
+        if not isinstance(meta_val, torch.Tensor):
+            return arg
         meta_stride_expr = [
             s.node.expr if isinstance(s, torch.SymInt) else s for s in meta_val.stride()
         ]
