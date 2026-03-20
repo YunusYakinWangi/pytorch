@@ -23,7 +23,6 @@ from torch.distributed.tensor._op_schema import (
     OutputSharding,
     OutputSpecType,
 )
-from torch.distributed.tensor._random import is_rng_supported_mesh
 from torch.distributed.tensor._redistribute import redistribute_local_tensor
 from torch.distributed.tensor._sharding_prop import ShardingPropagator
 from torch.distributed.tensor._tp_conv import (
@@ -320,21 +319,7 @@ class OpDispatcher:
             # run local op computation with potentially modified args/kwargs
             local_tensor_args = cast(tuple[object, ...], local_tensor_args)
             if op_call in self._random_ops:
-                if not random._rng_tracker and is_rng_supported_mesh(mesh):
-                    # Default to `OffsetBasedRNGTracker` if the parallelism API did not already construct one
-                    # Skip RNG state sync during tracing to avoid lazily initializing real RNG state under fake mode.
-                    run_state_sync = not _are_we_tracing()
-                    if not run_state_sync:
-                        logger.info(
-                            "DTensor RNG tracker is being lazily initialized during tracing. "
-                            "RNG states may not be synchronized across ranks, which can lead "
-                            "to silent incorrectness. Please call `torch.manual_seed()` with "
-                            "the same seed on all ranks before compiling DTensor random ops.",
-                            stacklevel=2,
-                        )
-                    random._rng_tracker = random.OffsetBasedRNGTracker(
-                        mesh, run_state_sync
-                    )
+                random._get_rng_tracker(mesh)
 
                 first_arg, first_local_arg = (
                     cast(dtensor.DTensor, args[0]),
@@ -359,6 +344,7 @@ class OpDispatcher:
                     if (
                         maybe_user_generator is not None
                         or first_local_arg.device.type != "cuda"
+                        or isinstance(random._rng_tracker, random.ThreadBasedRNGTracker)
                         or (
                             not _are_we_tracing()
                             and type(first_local_arg) is not torch.Tensor
