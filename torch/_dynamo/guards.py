@@ -4926,7 +4926,7 @@ def format_user_stack_trace(
     return "\n".join(lines)
 
 
-def describe_backend(backend: Callable | None) -> str:
+def describe_backend(backend: Callable[..., object] | None) -> str:
     """Return a human-readable string describing a backend callable for debugging."""
     if backend is None:
         return "None"
