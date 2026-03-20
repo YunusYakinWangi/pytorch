@@ -95,6 +95,8 @@ if [[ "$BUILD_ENVIRONMENT" == *aarch64* ]]; then
   export USE_MKLDNN=1
   export USE_MKLDNN_ACL=1
   export ACL_ROOT_DIR=/acl
+  export CFLAGS="${CFLAGS:+$CFLAGS }-mno-fix-cortex-a53-835769 -mno-fix-cortex-a53-843419"
+  export CXXFLAGS="${CXXFLAGS:+$CXXFLAGS }-mno-fix-cortex-a53-835769 -mno-fix-cortex-a53-843419"
 fi
 
 if [[ "$BUILD_ENVIRONMENT" == *riscv64* ]]; then
@@ -237,8 +239,7 @@ if [[ "${BUILD_ENVIRONMENT}" == *-pch* ]]; then
 fi
 
 if [[ "${BUILD_ENVIRONMENT}" != *cuda* ]]; then
-  # TODO: toggling to off to see if it fixes linking issues.
-  export BUILD_STATIC_RUNTIME_BENCHMARK=OFF
+  export BUILD_STATIC_RUNTIME_BENCHMARK=ON
 fi
 
 if [[ "$BUILD_ENVIRONMENT" == *-full-debug* ]]; then
