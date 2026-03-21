@@ -452,6 +452,14 @@ class FakeIdVariable(VariableTracker):
             return self.value == other.as_python_constant()
         return False
 
+    def richcompare_impl(self, tx: Any, other: "VariableTracker", op: str) -> "VariableTracker":
+        # FakeIdVariable wraps an integer id; compare as integers
+        if not isinstance(other, (FakeIdVariable, ConstantVariable)):
+            return ConstantVariable.create(NotImplemented)
+        return ConstantVariable.create(
+            cmp_name_to_op_mapping[op](self.as_python_constant(), other.as_python_constant())
+        )
+
     def reconstruct(self, codegen: Any) -> None:
         unimplemented(
             gb_type="Reconstruction of FakeIdVariable",

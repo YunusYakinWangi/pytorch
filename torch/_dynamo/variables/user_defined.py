@@ -1205,6 +1205,15 @@ class UserDefinedClassVariable(UserDefinedVariable):
     def get_real_python_backed_value(self) -> object:
         return self.value
 
+    def richcompare_impl(
+        self,
+        tx: "InstructionTranslator",
+        other: "VariableTracker",
+        op: str,
+    ) -> "VariableTracker":
+        # CPython: type objects use identity comparison (object_richcompare)
+        return variables.ConstantVariable.create(NotImplemented)
+
 
 class UserDefinedExceptionClassVariable(UserDefinedClassVariable):
     @property
@@ -1390,6 +1399,41 @@ class UserDefinedObjectVariable(UserDefinedVariable):
 
     def get_real_python_backed_value(self) -> object:
         return self.value
+
+    def richcompare_impl(
+        self,
+        tx: "InstructionTranslator",
+        other: "VariableTracker",
+        op: str,
+    ) -> "VariableTracker":
+        # CPython: object_richcompare — identity for EQ/NE, TypeError for ordering
+        # If the type defines a pure-Python comparison method, trace into it
+        method = getattr(type(self.value), op)
+        if hasattr(method, "__code__"):
+            # Pure-Python comparison method: trace into it directly
+            from .builder import SourcelessBuilder
+
+            return SourcelessBuilder.create(tx, method).call_function(
+                tx, [self, other], {}
+            )
+
+        if op == "__ne__" and method is object.__ne__:
+            # Default object.__ne__ delegates to __eq__ then negates
+            eq_method = type(self.value).__eq__
+            if hasattr(eq_method, "__code__"):
+                from .builder import SourcelessBuilder
+
+                result = SourcelessBuilder.create(tx, eq_method).call_function(
+                    tx, [self, other], {}
+                )
+                if _is_richcompare_not_implemented(result):
+                    return result
+                if result.is_python_constant():
+                    return variables.ConstantVariable.create(
+                        not result.as_python_constant()
+                    )
+
+        return variables.ConstantVariable.create(NotImplemented)
 
     def as_python_constant(self) -> object:
         if self.is_pytree_constant_class and self.source:

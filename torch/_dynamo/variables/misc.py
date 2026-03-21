@@ -598,6 +598,15 @@ class ExceptionVariable(VariableTracker):
     def set_context(self, context: VariableTracker) -> None:
         self.__context__ = context
 
+    def richcompare_impl(
+        self,
+        tx: "InstructionTranslator",
+        other: VariableTracker,
+        op: str,
+    ) -> VariableTracker:
+        # CPython: BaseException uses identity comparison (object_richcompare)
+        return ConstantVariable.create(NotImplemented)
+
     def reconstruct(self, codegen: "PyCodegen") -> None:
         codegen.add_push_null(
             lambda: codegen.load_import_from("builtins", self.exc_type.__name__)

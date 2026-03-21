@@ -1074,6 +1074,9 @@ class MappingProxyVariable(VariableTracker):
         args: list[VariableTracker],
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker:
+        if name in cmp_name_to_op_mapping:
+            # Comparison ops are handled via richcompare_impl; don't delegate to dv_dict
+            return super().call_method(tx, name, args, kwargs)
         if self.source and tx.output.side_effects.has_existing_dict_mutation():
             msg = (
                 "A dict has been modified while we have an existing mappingproxy object. "
@@ -1102,6 +1105,20 @@ class MappingProxyVariable(VariableTracker):
         if self.python_type() is types.MappingProxyType:
             return VariableTracker.build(tx, name in types.MappingProxyType.__dict__)
         return super().call_obj_hasattr(tx, name)
+
+    def richcompare_impl(
+        self,
+        tx: "InstructionTranslator",
+        other: "VariableTracker",
+        op: str,
+    ) -> "VariableTracker":
+        # CPython: mappingproxy_richcompare delegates to the underlying mapping, EQ/NE only
+        # https://github.com/python/cpython/blob/main/Objects/descrobject.c
+        if op not in ("__eq__", "__ne__"):
+            return ConstantVariable.create(NotImplemented)
+        if not isinstance(other, MappingProxyVariable):
+            return ConstantVariable.create(NotImplemented)
+        return self.dv_dict.richcompare_impl(tx, other.dv_dict, op)
 
 
 class NNModuleHooksDictVariable(ConstDictVariable):
@@ -1857,6 +1874,40 @@ class DictViewVariable(VariableTracker):
         return super().call_method(tx, name, args, kwargs)
 
 
+def _dictview_all_contained_in(
+    a_elems: list["VariableTracker"], b_elems: list["VariableTracker"]
+) -> bool:
+    """Trace-time mirror of CPython's all_contained_in() in Objects/dictobject.c.
+
+    For each element of a, check if it equals some element of b using is_python_equal.
+    Elements are VTs: key VTs for dict_keys/sets, TupleVariable([k, v]) for dict_items.
+    """
+    return all(
+        any(a_elem.is_python_equal(b_elem) for b_elem in b_elems) for a_elem in a_elems
+    )
+
+
+def _dictview_richcompare(
+    a_elems: list["VariableTracker"],
+    b_elems: list["VariableTracker"],
+    op: str,
+) -> bool:
+    """Trace-time mirror of CPython's dictview_richcompare() in Objects/dictobject.c."""
+    len_a, len_b = len(a_elems), len(b_elems)
+    if op == "__eq__":
+        return len_a == len_b and _dictview_all_contained_in(a_elems, b_elems)
+    elif op == "__ne__":
+        return not (len_a == len_b and _dictview_all_contained_in(a_elems, b_elems))
+    elif op == "__lt__":
+        return len_a < len_b and _dictview_all_contained_in(a_elems, b_elems)
+    elif op == "__le__":
+        return len_a <= len_b and _dictview_all_contained_in(a_elems, b_elems)
+    elif op == "__gt__":
+        return len_a > len_b and _dictview_all_contained_in(b_elems, a_elems)
+    else:  # __ge__
+        return len_a >= len_b and _dictview_all_contained_in(b_elems, a_elems)
+
+
 class DictKeysVariable(DictViewVariable):
     kv = "keys"
 
@@ -1915,7 +1966,7 @@ class DictKeysVariable(DictViewVariable):
         other: VariableTracker,
         op: str,
     ) -> VariableTracker:
-        # CPython: dictviews_richcompare in Objects/dictobject.c
+        # CPython: dictview_richcompare in Objects/dictobject.c
         # https://github.com/python/cpython/blob/main/Objects/dictobject.c
         #
         # Belongs on DictKeysVariable (not DictViewVariable) because:
@@ -1924,12 +1975,24 @@ class DictKeysVariable(DictViewVariable):
         #
         # SetVariable is included because CPython uses PyAnySet_Check(other),
         # which accepts set/frozenset. In Python: {1:2}.keys() == {1} → True.
-        if not isinstance(other, (SetVariable, DictKeysVariable)):
+        # DictItemsVariable is included because CPython uses PyDictViewSet_Check(other),
+        # which accepts dict_keys and dict_items (but not dict_values).
+        if not isinstance(other, (SetVariable, DictKeysVariable, DictItemsVariable)):
             return ConstantVariable.create(NotImplemented)
-        return VariableTracker.build(
-            tx,
-            cmp_name_to_op_mapping[op](self.set_items, other.set_items),  # type: ignore[attr-defined]
-        )
+        if isinstance(other, DictItemsVariable):
+            # Cross-view comparison: keys are single VTs, items are TupleVariable([k, v]).
+            # Use trace-time all_contained_in; 'k in items' checks k == (k2,v2) for some item.
+            a_elems = self.view_items_vt
+            b_elems = other.view_items_vt
+        else:
+            # SetVariable or DictKeysVariable: both have set_items as set[_HashableTracker].
+            # Python set operators on _HashableTracker use _HashableTracker.__eq__ (is_python_equal),
+            # correctly implementing subset/superset semantics.
+            return VariableTracker.build(
+                tx,
+                cmp_name_to_op_mapping[op](self.set_items, other.set_items),  # type: ignore[attr-defined]
+            )
+        return VariableTracker.build(tx, _dictview_richcompare(a_elems, b_elems, op))
 
 
 class DictValuesVariable(DictViewVariable):
@@ -1999,13 +2062,21 @@ class DictItemsVariable(DictViewVariable):
         other: VariableTracker,
         op: str,
     ) -> VariableTracker:
-        # CPython: dictviews_richcompare in Objects/dictobject.c
+        # CPython: dictview_richcompare in Objects/dictobject.c
         # https://github.com/python/cpython/blob/main/Objects/dictobject.c
-        if op == "__eq__":
-            if isinstance(other, DictItemsVariable):
-                return self.dv_dict.richcompare_impl(tx, other.dv_dict, "__eq__")
+        #
+        # dict_items supports all 6 comparison ops with set/subset semantics,
+        # accepting any PyAnySet_Check (set/frozenset) or PyDictViewSet_Check
+        # (dict_keys or dict_items, but NOT dict_values) as the other operand.
+        # Elements are (k, v) tuples, so containment means matching both key and value.
+        if not isinstance(other, (SetVariable, DictKeysVariable, DictItemsVariable)):
             return ConstantVariable.create(NotImplemented)
-        return ConstantVariable.create(NotImplemented)
+        a_elems = self.view_items_vt  # list of TupleVariable([k, v])
+        if isinstance(other, (DictItemsVariable, DictKeysVariable)):
+            b_elems = other.view_items_vt
+        else:  # SetVariable
+            b_elems = [k.vt for k in other.set_items]  # type: ignore[attr-defined]
+        return VariableTracker.build(tx, _dictview_richcompare(a_elems, b_elems, op))
 
     def is_python_hashable(self) -> Literal[False]:
         """

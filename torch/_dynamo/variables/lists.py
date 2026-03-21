@@ -40,6 +40,7 @@ from ..utils import (
     get_fake_value,
     guard_if_dyn,
     iter_contains,
+    istype,
     namedtuple_fields,
     odict_values,
     raise_args_mismatch,
@@ -1880,6 +1881,20 @@ class SliceVariable(VariableTracker):
                 hints=[*graph_break_hints.USER_ERROR],
             )
         return self.items[fields.index(name)]
+
+    def richcompare_impl(
+        self,
+        tx: "InstructionTranslator",
+        other: VariableTracker,
+        op: str,
+    ) -> VariableTracker:
+        # CPython: slice_richcompare packs (start, stop, step) into tuples and delegates
+        # https://github.com/python/cpython/blob/main/Objects/sliceobject.c
+        if not istype(other, SliceVariable):
+            return ConstantVariable.create(NotImplemented)
+        self_tuple = TupleVariable(list(self.items))
+        other_tuple = TupleVariable(list(other.items))
+        return self_tuple.richcompare_impl(tx, other_tuple, op)
 
 
 class ListIteratorVariable(IteratorVariable):

@@ -774,14 +774,30 @@ class BuiltinVariable(VariableTracker):
                     ]
                 )
 
-                def handler(
-                    tx: "InstructionTranslator", a: VariableTracker, b: VariableTracker
-                ) -> VariableTracker:
-                    return tx.inline_user_function_return(
-                        VariableTracker.build(tx, polyfill_fn_mapping[op]), [a, b], {}
-                    )
+                # Map operator function → dunder name (e.g. operator.eq → "__eq__")
+                _op_to_dunder = {v: k for k, v in cmp_name_to_op_mapping.items()}
+                dunder_op = _op_to_dunder[op]
 
-                result.append(((VariableTracker, VariableTracker), handler))
+                def make_richcompare_handler(
+                    dunder: str,
+                ) -> _HandlerCallback:
+                    def handler(
+                        tx: "InstructionTranslator",
+                        a: VariableTracker,
+                        b: VariableTracker,
+                    ) -> VariableTracker:
+                        from .user_defined import generic_richcompare
+
+                        return generic_richcompare(tx, a, b, dunder)
+
+                    return handler
+
+                result.append(
+                    (
+                        (VariableTracker, VariableTracker),
+                        make_richcompare_handler(dunder_op),
+                    )
+                )
                 return result
 
             result = [((ConstantVariable, ConstantVariable), compare_by_value)]

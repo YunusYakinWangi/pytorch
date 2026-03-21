@@ -422,6 +422,15 @@ class BaseUserFunctionVariable(VariableTracker):
             return self.get_dict_vt(tx).call_method(tx, "__delitem__", list(args), {})
         return super().call_method(tx, name, list(args), kwargs)
 
+    def richcompare_impl(
+        self,
+        tx: "InstructionTranslator",
+        other: VariableTracker,
+        op: str,
+    ) -> VariableTracker:
+        # CPython: functions use identity comparison (object_richcompare)
+        return ConstantVariable.create(NotImplemented)
+
     def get_filename(self) -> str:
         return self.get_code().co_filename
 

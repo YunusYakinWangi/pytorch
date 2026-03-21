@@ -218,6 +218,17 @@ class NNModuleVariable(VariableTracker):
     def get_real_python_backed_value(self) -> object:
         return self.value
 
+    def richcompare_impl(
+        self,
+        tx: "InstructionTranslator",
+        other: VariableTracker,
+        op: str,
+    ) -> VariableTracker:
+        # CPython: nn.Module uses identity comparison (object_richcompare)
+        from .constant import ConstantVariable
+
+        return ConstantVariable.create(NotImplemented)
+
     def _wrap_submodule(
         self,
         tx: "InstructionTranslator",
