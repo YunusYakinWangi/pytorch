@@ -6964,9 +6964,13 @@ class ExternKernel(InputsKernel):
                 if torch.Tag.inplace_view in self.op_overload.tags:
                     assert isinstance(self.inputs[0], IRNode)
                     name = self.inputs[0].get_name()
-            wrapper.writeline(
-                f'assert_size_stride({name}, {size}, {stride}, "{op_name}");'
-            )
+            stmt = f'assert_size_stride({name}, {size}, {stride}, "{op_name}");'
+            if V.graph.aot_mode:
+                wrapper.writeline(
+                    f"if (_check_aoti_runtime_check_inputs_env()) {{ {stmt} }}"
+                )
+            else:
+                wrapper.writeline(stmt)
         else:
             wrapper.writeline(
                 f"assert_size_stride({name}, {size}, {stride}, {op_name!r})"
@@ -6976,13 +6980,24 @@ class ExternKernel(InputsKernel):
         if not config.alignment_asserts or config.aot_inductor.allow_stack_allocation:
             return
         name = self.get_name()
+        if V.graph.cpp_wrapper:
+            # inplace_view ops (e.g. set_.source_Tensor) don't declare an
+            # output variable; assert on the mutated input instead.
+            if isinstance(self.op_overload, torch._ops.OpOverload):
+                if torch.Tag.inplace_view in self.op_overload.tags:
+                    assert isinstance(self.inputs[0], IRNode)
+                    name = self.inputs[0].get_name()
         aligned = name not in V.graph.unaligned_buffers
         op_name = self.get_op_name()
         if aligned:
             if V.graph.cpp_wrapper:
-                wrapper.writeline(
-                    f'assert_alignment({name}, {GPU_ALIGN_BYTES}, "{op_name}");'
-                )
+                stmt = f'assert_alignment({name}, {GPU_ALIGN_BYTES}, "{op_name}");'
+                if V.graph.aot_mode:
+                    wrapper.writeline(
+                        f"if (_check_aoti_runtime_check_inputs_env()) {{ {stmt} }}"
+                    )
+                else:
+                    wrapper.writeline(stmt)
             else:
                 wrapper.writeline(
                     f"assert_alignment({name}, {GPU_ALIGN_BYTES}, {op_name!r})"
