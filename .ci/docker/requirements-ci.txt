@@ -374,7 +374,7 @@ pwlf==2.2.1
 #test that import: test_sac_estimator.py
 
 # To build PyTorch itself
-pip==25.0.3
+pip==26.0
 pyyaml==6.0.3
 pyzstd
 setuptools==78.1.1
