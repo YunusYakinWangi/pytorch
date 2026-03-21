@@ -11,23 +11,13 @@ from torch._torchlite.passes.common import (
     _set_phase,
     PassResult,
 )
-from torch._torchlite.ops import adamw_step, param_update
+from torch._torchlite.ops import adamw_step, sgd_step
 
 
 def _emit_sgd_update(graph, param_node, grad_node, short, lr):
-    scaled_grad = graph.call_function(torch.mul, (lr, grad_node))
-    scaled_grad.name = _create_name(graph, short + "_step")
-    _set_phase(scaled_grad, "optimizer")
-
-    new_param = graph.call_function(torch.sub, (param_node, scaled_grad))
-    new_param.name = _create_name(graph, short + "_new")
-    _set_phase(new_param, "optimizer")
-
-    copy_node = graph.call_function(
-        param_update, (param_node, new_param)
-    )
-    copy_node.name = _create_name(graph, short + "_update")
-    _set_phase(copy_node, "optimizer")
+    update_node = graph.call_function(sgd_step, (param_node, grad_node, lr))
+    update_node.name = _create_name(graph, short + "_sgd_update")
+    _set_phase(update_node, "optimizer")
 
 
 def optimizer(

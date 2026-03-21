@@ -14,13 +14,15 @@ import os
 import sys
 
 import torch
+import torch.nn.functional as F
+from torch._torchlite import compile, trace
 from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.testing._internal.inductor_utils import (
     clone_preserve_strides_offset,
     GPU_TYPE,
     HAS_GPU,
 )
-from torch._torchlite import compile, trace
+
 
 # Adjust sys.path to find test_torchinductor in the same directory
 test_dir = os.path.dirname(os.path.abspath(__file__))
@@ -73,7 +75,11 @@ def check_torchlite(
     if assert_equal:
         self.assertEqual(actual, expected, atol=atol, rtol=rtol, equal_nan=True)
         self.assertEqual(
-            replay_inputs, ref_inputs, atol=atol, rtol=rtol, equal_nan=True,
+            replay_inputs,
+            ref_inputs,
+            atol=atol,
+            rtol=rtol,
+            equal_nan=True,
             msg="Input mutation mismatch between eager and torchlite",
         )
 
@@ -104,8 +110,13 @@ def check_torchlite_gpu(
         ]
 
     check_torchlite(
-        self, model, example_inputs, kwargs,
-        atol=atol, rtol=rtol, assert_equal=assert_equal,
+        self,
+        model,
+        example_inputs,
+        kwargs,
+        atol=atol,
+        rtol=rtol,
+        assert_equal=assert_equal,
     )
 
     if check_lowp:
@@ -124,8 +135,13 @@ def check_torchlite_gpu(
         lowp_rtol = 1e-2 if rtol is None else max(rtol, 1e-2)
 
         check_torchlite(
-            self, lowp_model, lowp_inputs, kwargs,
-            atol=lowp_atol, rtol=lowp_rtol, assert_equal=assert_equal,
+            self,
+            lowp_model,
+            lowp_inputs,
+            kwargs,
+            atol=lowp_atol,
+            rtol=lowp_rtol,
+            assert_equal=assert_equal,
         )
 
 
@@ -309,7 +325,11 @@ def check_torchlite_compiled(
     if assert_equal:
         self.assertEqual(actual, expected, atol=atol, rtol=rtol, equal_nan=True)
         self.assertEqual(
-            replay_inputs, ref_inputs, atol=atol, rtol=rtol, equal_nan=True,
+            replay_inputs,
+            ref_inputs,
+            atol=atol,
+            rtol=rtol,
+            equal_nan=True,
             msg="Input mutation mismatch between eager and torchlite compiled",
         )
 
@@ -340,8 +360,13 @@ def check_torchlite_compiled_gpu(
         ]
 
     check_torchlite_compiled(
-        self, model, example_inputs, kwargs,
-        atol=atol, rtol=rtol, assert_equal=assert_equal,
+        self,
+        model,
+        example_inputs,
+        kwargs,
+        atol=atol,
+        rtol=rtol,
+        assert_equal=assert_equal,
     )
 
     if check_lowp:
@@ -360,8 +385,13 @@ def check_torchlite_compiled_gpu(
         lowp_rtol = 1e-2 if rtol is None else max(rtol, 1e-2)
 
         check_torchlite_compiled(
-            self, lowp_model, lowp_inputs, kwargs,
-            atol=lowp_atol, rtol=lowp_rtol, assert_equal=assert_equal,
+            self,
+            lowp_model,
+            lowp_inputs,
+            kwargs,
+            atol=lowp_atol,
+            rtol=lowp_rtol,
+            assert_equal=assert_equal,
         )
 
 
@@ -487,11 +517,14 @@ class TestTorchliteVsTorchCompile(TestCase):
         def f(x, w1, w2):
             return (x @ w1) @ w2
 
-        self._compare(f, [
-            torch.randn(4, 8),
-            torch.randn(8, 16),
-            torch.randn(16, 4),
-        ])
+        self._compare(
+            f,
+            [
+                torch.randn(4, 8),
+                torch.randn(8, 16),
+                torch.randn(16, 4),
+            ],
+        )
 
     def test_softmax(self):
         def f(x):
@@ -541,9 +574,48 @@ class TestTorchliteInferencePipeline(TestCase):
         torch.manual_seed(seed)
         return LlamaFFN().cuda().eval()
 
+    def _make_gqa_block(self, d=64, n_heads=4, n_kv_heads=2, seed=1337):
+        class GQABlock(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.n_heads = n_heads
+                self.n_kv_heads = n_kv_heads
+                self.head_dim = d // n_heads
+                self.n_rep = n_heads // n_kv_heads
+                self.q_proj = torch.nn.Linear(d, d)
+                self.k_proj = torch.nn.Linear(d, n_kv_heads * self.head_dim)
+                self.v_proj = torch.nn.Linear(d, n_kv_heads * self.head_dim)
+                self.out_proj = torch.nn.Linear(d, d)
+
+            def forward(self, x):
+                bsz, seqlen, _ = x.shape
+                q = (
+                    self.q_proj(x)
+                    .view(bsz, seqlen, self.n_heads, self.head_dim)
+                    .transpose(1, 2)
+                )
+                k = (
+                    self.k_proj(x)
+                    .view(bsz, seqlen, self.n_kv_heads, self.head_dim)
+                    .transpose(1, 2)
+                )
+                v = (
+                    self.v_proj(x)
+                    .view(bsz, seqlen, self.n_kv_heads, self.head_dim)
+                    .transpose(1, 2)
+                )
+                k = k.repeat_interleave(self.n_rep, dim=1)
+                v = v.repeat_interleave(self.n_rep, dim=1)
+                attn = F.scaled_dot_product_attention(q, k, v)
+                attn = attn.transpose(1, 2).reshape(bsz, seqlen, -1)
+                return self.out_proj(attn)
+
+        torch.manual_seed(seed)
+        return GQABlock().cuda().eval()
+
     @torch.no_grad()
     def test_llama_ffn_inference_pipeline_matches_eager(self):
-        from torch._torchlite.api import inference_passes, run_passes, codegen
+        from torch._torchlite.api import codegen, inference_passes, run_passes
         from torch._torchlite.passes.triton import _TritonMatmulModule
 
         model = self._make_llama_ffn()
@@ -566,6 +638,27 @@ class TestTorchliteInferencePipeline(TestCase):
         self.assertEqual(out1, ref, atol=1e-3, rtol=1e-3)
         self.assertEqual(out2, ref, atol=1e-3, rtol=1e-3)
         self.assertEqual(out3, ref, atol=1e-3, rtol=1e-3)
+
+    @torch.no_grad()
+    def test_gqa_inference_pipeline_matches_eager(self):
+        from torch._torchlite.api import codegen, inference_passes, run_passes
+
+        model = self._make_gqa_block()
+        x = torch.randn(2, 16, 64, device="cuda", dtype=torch.bfloat16)
+        model = model.to(torch.bfloat16)
+
+        gm = trace(model, [x])
+        gm = run_passes(gm, [x], pipeline=inference_passes(gm, [x]))
+        fn_tl = codegen(gm, inference_codegen=True, example_inputs=[x])
+
+        ref = model(x)
+        out1 = fn_tl(x)
+        out2 = fn_tl(x)
+
+        self.assertFalse(torch.isnan(out1).any(), "run 1 has NaN")
+        self.assertFalse(torch.isnan(out2).any(), "run 2 has NaN")
+        self.assertEqual(out1, ref, atol=1e-2, rtol=1e-2)
+        self.assertEqual(out2, ref, atol=1e-2, rtol=1e-2)
 
 
 if __name__ == "__main__":

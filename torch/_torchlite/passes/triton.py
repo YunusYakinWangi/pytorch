@@ -1,20 +1,20 @@
 """Triton code generation pass."""
+
 import importlib.util
 import os
 import tempfile
-from typing import Dict, List
 
 import torch
-from torch.fx import GraphModule
-
 from torch._torchlite.passes.common import (
     _graph_meta,
+    _supported_pow_exponent,
     AddLayerNormKernel,
     AddRmsNormKernel,
     FusedKernel,
     MatmulEpilogueKernel,
     PassResult,
 )
+from torch.fx import GraphModule
 
 
 _MATMUL_AUTOTUNE_CONFIGS = [
@@ -48,6 +48,18 @@ _TORCH_OP_MAP = {
     "mul": lambda a, b: a * b,
     "div": lambda a, b: a / b,
     "reciprocal": lambda acc, *a: 1.0 / acc,
+    "gt": lambda a, b: a > b,
+    "ge": lambda a, b: a >= b,
+    "lt": lambda a, b: a < b,
+    "le": lambda a, b: a <= b,
+    "eq": lambda a, b: a == b,
+    "ne": lambda a, b: a != b,
+    "rsub": lambda a, b: b - a,
+    "pow": lambda a, b: a**b,
+    "where": lambda cond, a, b: torch.where(cond, a, b),
+    "clamp": lambda x, lo, hi: torch.clamp(x, lo, hi),
+    "clamp_min": lambda x, lo: torch.clamp_min(x, lo),
+    "clamp_max": lambda x, hi: torch.clamp_max(x, hi),
 }
 
 _TORCH_UNARY_INPLACE_OP_MAP = {
@@ -63,10 +75,15 @@ _TORCH_UNARY_INPLACE_OP_MAP = {
 def _apply_epilogue_inplace(acc, epilogue_ops, input_t, weight_t, bias, extras):
     """Apply epilogue ops to acc, preferring in-place ops to avoid allocation."""
     for op in epilogue_ops:
-        if op.op_name in _TORCH_UNARY_INPLACE_OP_MAP and len(op.args) == 1 and op.args[0][0] in ("acc", "tmp"):
+        if (
+            op.op_name in _TORCH_UNARY_INPLACE_OP_MAP
+            and len(op.args) == 1
+            and op.args[0][0] in ("acc", "tmp")
+        ):
             acc = _TORCH_UNARY_INPLACE_OP_MAP[op.op_name](acc)
             continue
         if op.op_name in ("add", "mul") and len(op.args) == 2:
+
             def _resolve(arg):
                 tag = arg[0]
                 if tag in ("acc", "tmp"):
@@ -80,6 +97,7 @@ def _apply_epilogue_inplace(acc, epilogue_ops, input_t, weight_t, bias, extras):
                     return arg[1]
                 elif tag == "extra":
                     return extras[arg[1]]
+
             a, b = _resolve(op.args[0]), _resolve(op.args[1])
             if op.op_name == "add":
                 if a is acc:
@@ -127,20 +145,99 @@ _TRITON_OP_MAP = {
     "sqrt": ("tl.math.sqrt(({0}).to(tl.float32)).to(({0}).dtype)", 1),
     "rsqrt": ("tl.math.rsqrt(({0}).to(tl.float32)).to(({0}).dtype)", 1),
     "sigmoid": ("tl.sigmoid(({0}).to(tl.float32)).to(({0}).dtype)", 1),
-    "tanh": ("(2.0 * tl.sigmoid((2.0 * ({0})).to(tl.float32)) - 1.0).to(({0}).dtype)", 1),
+    "tanh": (
+        "(2.0 * tl.sigmoid((2.0 * ({0})).to(tl.float32)) - 1.0).to(({0}).dtype)",
+        1,
+    ),
     "relu": ("tl.maximum({}, 0.0)", 1),
     "silu": ("(({0}) * tl.sigmoid(({0}).to(tl.float32))).to(({0}).dtype)", 1),
-    "gelu": ("(0.5 * {0} * (1.0 + (2.0 * tl.sigmoid((2.0 * 0.7978845608028654 * ({0} + 0.044715 * {0} * {0} * {0})).to(tl.float32)) - 1.0))).to(({0}).dtype)", 1),
+    "gelu": (
+        "(0.5 * {0} * (1.0 + (2.0 * tl.sigmoid((2.0 * 0.7978845608028654 * ({0} + 0.044715 * {0} * {0} * {0})).to(tl.float32)) - 1.0))).to(({0}).dtype)",
+        1,
+    ),
     "add": ("({} + {})", 2),
     "sub": ("({} - {})", 2),
     "mul": ("({} * {})", 2),
     "div": ("({} / {})", 2),
     "where": ("tl.where({}, {}, {})", 3),
     "reciprocal": ("(1.0 / {})", 1),
+    "gt": ("({} > {})", 2),
+    "ge": ("({} >= {})", 2),
+    "lt": ("({} < {})", 2),
+    "le": ("({} <= {})", 2),
+    "eq": ("({} == {})", 2),
+    "ne": ("({} != {})", 2),
+    "rsub": ("({1} - {0})", 2),
+    "pow": ("tl.math.pow({}, {})", 2),
+    "clamp": ("tl.minimum(tl.maximum({}, {}), {})", 3),
+    "clamp_min": ("tl.maximum({}, {})", 2),
+    "clamp_max": ("tl.minimum({}, {})", 2),
 }
 
 
-def triton_codegen(gm: GraphModule, example_inputs: List[torch.Tensor]) -> PassResult:
+def _pow_product_expr(base: str, exponent: int) -> str:
+    if exponent == 1:
+        return f"({base})"
+    if exponent % 2 == 0:
+        half = _pow_product_expr(base, exponent // 2)
+        return f"(({half}) * ({half}))"
+    return f"(({base}) * {_pow_product_expr(base, exponent - 1)})"
+
+
+def _format_triton_pow_expr(op, arg_vars) -> str | None:
+    if len(op.args) != 2 or len(arg_vars) < 2:
+        return None
+
+    exponent_arg = op.args[1]
+    if exponent_arg[0] != "const":
+        return None
+
+    exponent = exponent_arg[1]
+    if not _supported_pow_exponent(exponent):
+        return None
+
+    base = arg_vars[0]
+    exponent_f = float(exponent)
+    if exponent_f == 0.0:
+        return f"(({base}) * 0 + 1)"
+    if exponent_f == 1.0:
+        return f"({base})"
+    if exponent_f == 0.5:
+        return f"tl.sqrt(({base}).to(tl.float32)).to(({base}).dtype)"
+    if exponent_f == -0.5:
+        return f"tl.rsqrt(({base}).to(tl.float32)).to(({base}).dtype)"
+    if exponent_f.is_integer():
+        exponent_i = int(exponent_f)
+        if exponent_i > 0:
+            return _pow_product_expr(base, exponent_i)
+        return f"(1.0 / ({_pow_product_expr(base, -exponent_i)}))"
+    return None
+
+
+def _format_triton_expr(op, arg_vars) -> str | None:
+    if op.op_name == "pow":
+        expr = _format_triton_pow_expr(op, arg_vars)
+        if expr is None:
+            raise NotImplementedError(
+                f"Unsupported Triton pow pattern for fused op: {op.args}"
+            )
+        return expr
+
+    entry = _TRITON_OP_MAP.get(op.op_name)
+    if entry is None:
+        return None
+
+    template, nargs = entry
+    if nargs == 1 and arg_vars:
+        return template.format(arg_vars[0])
+    if nargs == 2 and len(arg_vars) >= 2:
+        return template.format(arg_vars[0], arg_vars[1])
+    if nargs == 3 and len(arg_vars) >= 3:
+        return template.format(arg_vars[0], arg_vars[1], arg_vars[2])
+    return None
+
+
+def triton_codegen(gm: GraphModule, example_inputs: list[torch.Tensor]) -> PassResult:
     """Generate Triton GPU kernel source code for fused ops in the graph.
 
     Walks the graph looking for FusedKernel nodes (created by the fuse pass)
@@ -198,7 +295,11 @@ def _generate_kernel_source(kernel: FusedKernel) -> str:
             # both 2D [M, D] and 3D [B, S, D] output tensors.
             idx_expr = f"offs % {out_n}"
             load_mask = f"(offs % {out_n}) < {out_n}"
-        elif n_out >= 2 and in_shape[-1] == 1 and list(in_shape[:-1]) == list(out_shape[:-1]):
+        elif (
+            n_out >= 2
+            and in_shape[-1] == 1
+            and list(in_shape[:-1]) == list(out_shape[:-1])
+        ):
             # Column-vector shaped [*, 1] broadcast over the last dim:
             # drop the last dimension by integer-dividing out D.  Covers
             # both [M, 1] in 2D and [B, S, 1] in 3D.
@@ -213,16 +314,11 @@ def _generate_kernel_source(kernel: FusedKernel) -> str:
         lines.append(f"    x{i} = tl.load(in_ptr{i} + {idx_expr}, mask={load_mask})")
     lines.append("")
 
-    val_map: Dict[tuple, str] = {}
+    val_map: dict[tuple, str] = {}
     for i in range(kernel.n_inputs):
         val_map[("input", i)] = f"x{i}"
 
     for tmp_idx, op in enumerate(kernel.ops):
-        entry = _TRITON_OP_MAP.get(op.op_name)
-        if entry is None:
-            continue
-        template, nargs = entry
-
         arg_vars = []
         for arg in op.args:
             key = (arg[0], arg[1])
@@ -234,14 +330,8 @@ def _generate_kernel_source(kernel: FusedKernel) -> str:
                 arg_vars.append("???")
 
         result = f"tmp{tmp_idx}"
-
-        if nargs == 1 and arg_vars:
-            expr = template.format(arg_vars[0])
-        elif nargs == 2 and len(arg_vars) >= 2:
-            expr = template.format(arg_vars[0], arg_vars[1])
-        elif nargs == 3 and len(arg_vars) >= 3:
-            expr = template.format(arg_vars[0], arg_vars[1], arg_vars[2])
-        else:
+        expr = _format_triton_expr(op, arg_vars)
+        if expr is None:
             expr = f"# {op.op_name}({', '.join(arg_vars)})"
 
         lines.append(f"    {result} = {expr}")
@@ -260,6 +350,7 @@ def _generate_kernel_source(kernel: FusedKernel) -> str:
 
 class _TritonKernelModule(torch.nn.Module):
     """Wraps a compiled Triton kernel as an nn.Module for use as a call_module node."""
+
     def __init__(self, triton_fn, shape, numel, dtype):
         super().__init__()
         self.triton_fn = triton_fn
@@ -272,7 +363,8 @@ class _TritonKernelModule(torch.nn.Module):
         # calculations (offs % N, offs // N).  Sliced or permuted tensors
         # can have non-unit strides that violate this, so force contiguous.
         inputs = tuple(
-            x.contiguous() if isinstance(x, torch.Tensor) and not x.is_contiguous()
+            x.contiguous()
+            if isinstance(x, torch.Tensor) and not x.is_contiguous()
             else x
             for x in inputs
         )
@@ -360,6 +452,7 @@ class _AddRmsNormModule(torch.nn.Module):
     When has_add=True: takes (a, b, weight), returns (add_result, norm_result).
     When has_add=False: takes (x, weight), returns norm_result.
     """
+
     def __init__(self, triton_fn, shape, norm_dim, eps, dtype, has_add=True):
         super().__init__()
         self.triton_fn = triton_fn
@@ -382,8 +475,14 @@ class _AddRmsNormModule(torch.nn.Module):
             b = b.contiguous()
         grid = (self.n_rows,)
         self.triton_fn[grid](
-            a, b, weight, add_out, norm_out,
-            self.n_rows, self.norm_dim, self.eps,
+            a,
+            b,
+            weight,
+            add_out,
+            norm_out,
+            self.n_rows,
+            self.norm_dim,
+            self.eps,
             BLOCK_SIZE=self.block_size,
         )
 
@@ -392,8 +491,12 @@ class _AddRmsNormModule(torch.nn.Module):
             x = x.contiguous()
         grid = (self.n_rows,)
         self.triton_fn[grid](
-            x, weight, norm_out,
-            self.n_rows, self.norm_dim, self.eps,
+            x,
+            weight,
+            norm_out,
+            self.n_rows,
+            self.norm_dim,
+            self.eps,
             BLOCK_SIZE=self.block_size,
         )
 
@@ -416,8 +519,8 @@ class _AddRmsNormModule(torch.nn.Module):
 
 
 def _compile_add_rms_norm_kernels(
-    kernels: List[AddRmsNormKernel],
-) -> Dict[str, object]:
+    kernels: list[AddRmsNormKernel],
+) -> dict[str, object]:
     lines = [
         "import triton",
         "import triton.language as tl",
@@ -428,15 +531,11 @@ def _compile_add_rms_norm_kernels(
         lines.append("")
         lines.append("")
 
-    fd, path = tempfile.mkstemp(
-        suffix=".py", prefix="torchlite_add_rms_norm_"
-    )
+    fd, path = tempfile.mkstemp(suffix=".py", prefix="torchlite_add_rms_norm_")
     try:
         with os.fdopen(fd, "w") as f:
             f.write("\n".join(lines))
-        spec = importlib.util.spec_from_file_location(
-            "_torchlite_add_rms_norm", path
-        )
+        spec = importlib.util.spec_from_file_location("_torchlite_add_rms_norm", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
     finally:
@@ -524,9 +623,7 @@ def _generate_add_layer_norm_source(kernel: AddLayerNormKernel) -> str:
             "    bias = tl.load(bias_ptr + col_offs, mask=mask)",
             "    out = out + bias",
         ]
-    lines.append(
-        "    tl.store(norm_out_ptr + row_start + col_offs, out, mask=mask)"
-    )
+    lines.append("    tl.store(norm_out_ptr + row_start + col_offs, out, mask=mask)")
     return "\n".join(lines)
 
 
@@ -536,7 +633,10 @@ class _AddLayerNormModule(torch.nn.Module):
     When has_add=True: takes (a, b, weight[, bias]), returns (add_result, norm_result).
     When has_add=False: takes (x, weight[, bias]), returns norm_result.
     """
-    def __init__(self, triton_fn, shape, norm_dim, eps, dtype, has_add=True, has_norm_bias=False):
+
+    def __init__(
+        self, triton_fn, shape, norm_dim, eps, dtype, has_add=True, has_norm_bias=False
+    ):
         super().__init__()
         self.triton_fn = triton_fn
         self.shape = shape
@@ -607,8 +707,8 @@ class _AddLayerNormModule(torch.nn.Module):
 
 
 def _compile_add_layer_norm_kernels(
-    kernels: List[AddLayerNormKernel],
-) -> Dict[str, object]:
+    kernels: list[AddLayerNormKernel],
+) -> dict[str, object]:
     lines = [
         "import triton",
         "import triton.language as tl",
@@ -619,15 +719,11 @@ def _compile_add_layer_norm_kernels(
         lines.append("")
         lines.append("")
 
-    fd, path = tempfile.mkstemp(
-        suffix=".py", prefix="torchlite_add_layer_norm_"
-    )
+    fd, path = tempfile.mkstemp(suffix=".py", prefix="torchlite_add_layer_norm_")
     try:
         with os.fdopen(fd, "w") as f:
             f.write("\n".join(lines))
-        spec = importlib.util.spec_from_file_location(
-            "_torchlite_add_layer_norm", path
-        )
+        spec = importlib.util.spec_from_file_location("_torchlite_add_layer_norm", path)
         mod = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(mod)
     finally:
@@ -636,7 +732,7 @@ def _compile_add_layer_norm_kernels(
     return {k.name: getattr(mod, k.name) for k in kernels}
 
 
-def _compile_triton_kernels(kernels: List[FusedKernel]) -> Dict[str, object]:
+def _compile_triton_kernels(kernels: list[FusedKernel]) -> dict[str, object]:
     """Write all kernels to a temp file, import the module, return name->fn map.
 
     Triton's @jit decorator calls inspect.getsourcelines, which requires
@@ -667,7 +763,7 @@ def _compile_triton_kernels(kernels: List[FusedKernel]) -> Dict[str, object]:
     return {k.name: getattr(mod, k.name) for k in kernels}
 
 
-def _compile_matmul_kernels(kernels: List[MatmulEpilogueKernel]) -> Dict[str, object]:
+def _compile_matmul_kernels(kernels: list[MatmulEpilogueKernel]) -> dict[str, object]:
     """Write matmul epilogue kernels to a temp file, import, return name->fn map.
 
     Deduplicates kernels that generate identical Triton source (same
@@ -676,8 +772,8 @@ def _compile_matmul_kernels(kernels: List[MatmulEpilogueKernel]) -> Dict[str, ob
     is populated once and reused across all instances with the same
     structure, avoiding repeated autotuning at runtime.
     """
-    unique_sources: Dict[str, str] = {}
-    kernel_to_canonical: Dict[str, str] = {}
+    unique_sources: dict[str, str] = {}
+    kernel_to_canonical: dict[str, str] = {}
 
     for kernel in kernels:
         source = _generate_matmul_epilogue_source(kernel)
@@ -718,10 +814,7 @@ def _compile_matmul_kernels(kernels: List[MatmulEpilogueKernel]) -> Dict[str, ob
     finally:
         os.unlink(path)
 
-    return {
-        k.name: getattr(mod, kernel_to_canonical[k.name])
-        for k in kernels
-    }
+    return {k.name: getattr(mod, kernel_to_canonical[k.name]) for k in kernels}
 
 
 def _generate_matmul_epilogue_source(kernel: MatmulEpilogueKernel) -> str:
@@ -759,7 +852,7 @@ def _generate_matmul_epilogue_source(kernel: MatmulEpilogueKernel) -> str:
     configs_src = ", ".join(
         f'triton.Config({{"BLOCK_M": {c["BLOCK_M"]}, "BLOCK_N": {c["BLOCK_N"]}, '
         f'"BLOCK_K": {c["BLOCK_K"]}}}, num_warps={c["num_warps"]}, '
-        f'num_stages={c["num_stages"]})'
+        f"num_stages={c['num_stages']})"
         for c in _MATMUL_AUTOTUNE_CONFIGS
     )
 
@@ -774,7 +867,7 @@ def _generate_matmul_epilogue_source(kernel: MatmulEpilogueKernel) -> str:
         "    offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)",
         "    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)",
         "    offs_k = tl.arange(0, BLOCK_K)",
-        f"    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)",
+        "    acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)",
         "    for k_start in range(0, K, BLOCK_K):",
         "        k_offs = k_start + offs_k",
         "        a_mask = (offs_m[:, None] < M) & (k_offs[None, :] < K)",
@@ -794,11 +887,6 @@ def _generate_matmul_epilogue_source(kernel: MatmulEpilogueKernel) -> str:
     val_map = {}
     extra_idx = 0
     for tmp_idx, op in enumerate(kernel.epilogue_ops):
-        entry = _TRITON_OP_MAP.get(op.op_name)
-        if entry is None:
-            continue
-        template, nargs = entry
-
         arg_vars = []
         for arg in op.args:
             tag = arg[0]
@@ -812,8 +900,7 @@ def _generate_matmul_epilogue_source(kernel: MatmulEpilogueKernel) -> str:
             elif tag == "extra":
                 ei = arg[1]
                 is_2d = (
-                    ei < len(kernel.extra_shapes)
-                    and len(kernel.extra_shapes[ei]) >= 2
+                    ei < len(kernel.extra_shapes) and len(kernel.extra_shapes[ei]) >= 2
                 )
                 if is_2d:
                     lines.append(
@@ -829,9 +916,7 @@ def _generate_matmul_epilogue_source(kernel: MatmulEpilogueKernel) -> str:
                     )
                     arg_vars.append(f"extra{extra_idx}")
                 else:
-                    lines.append(
-                        f"    extra{extra_idx}_mask = offs_n < N"
-                    )
+                    lines.append(f"    extra{extra_idx}_mask = offs_n < N")
                     lines.append(
                         f"    extra{extra_idx} = tl.load("
                         f"extra_ptr{ei} + offs_n, "
@@ -854,13 +939,8 @@ def _generate_matmul_epilogue_source(kernel: MatmulEpilogueKernel) -> str:
                 extra_idx += 1
 
         result_var = f"ep_tmp{tmp_idx}"
-        if nargs == 1 and arg_vars:
-            expr = template.format(arg_vars[0])
-        elif nargs == 2 and len(arg_vars) >= 2:
-            expr = template.format(arg_vars[0], arg_vars[1])
-        elif nargs == 3 and len(arg_vars) >= 3:
-            expr = template.format(arg_vars[0], arg_vars[1], arg_vars[2])
-        else:
+        expr = _format_triton_expr(op, arg_vars)
+        if expr is None:
             expr = f"# {op.op_name}({', '.join(arg_vars)})"
 
         lines.append(f"    {result_var} = {expr}")
@@ -875,7 +955,9 @@ def _generate_matmul_epilogue_source(kernel: MatmulEpilogueKernel) -> str:
     return "\n".join(lines)
 
 
-def _generate_epilogue_pointwise_source(name, epilogue_ops, has_bias, extra_shapes=None):
+def _generate_epilogue_pointwise_source(
+    name, epilogue_ops, has_bias, extra_shapes=None
+):
     """Generate a Triton 1D pointwise kernel for bias + epilogue ops.
 
     This kernel applies bias addition and epilogue operations (relu, silu, etc.)
@@ -930,31 +1012,25 @@ def _generate_epilogue_pointwise_source(name, epilogue_ops, has_bias, extra_shap
     for i in range(n_extras):
         eshape = extra_shapes[i] if i < len(extra_shapes) else ()
         if len(eshape) == 1:
-            lines.append(f"    extra{i} = tl.load(extra_ptr{i} + (offs % N), mask=mask)")
+            lines.append(
+                f"    extra{i} = tl.load(extra_ptr{i} + (offs % N), mask=mask)"
+            )
         else:
             lines.append(f"    extra{i} = tl.load(extra_ptr{i} + offs, mask=mask)")
 
-    for tmp_idx, op in enumerate(epilogue_ops):
-        entry = _TRITON_OP_MAP.get(op.op_name)
-        if entry is None:
-            continue
-        template, nargs = entry
-        if nargs == 1:
-            expr = template.format("acc")
+    for op in epilogue_ops:
+        arg_vars = []
+        for arg in op.args:
+            tag = arg[0]
+            if tag in ("acc", "tmp"):
+                arg_vars.append("acc")
+            elif tag == "extra":
+                arg_vars.append(f"extra{arg[1]}")
+            elif tag == "const":
+                arg_vars.append(str(arg[1]))
+        expr = _format_triton_expr(op, arg_vars)
+        if expr is not None:
             lines.append(f"    acc = {expr}")
-        elif nargs == 2:
-            arg_vars = []
-            for arg in op.args:
-                tag = arg[0]
-                if tag in ("acc", "tmp"):
-                    arg_vars.append("acc")
-                elif tag == "extra":
-                    arg_vars.append(f"extra{arg[1]}")
-                elif tag == "const":
-                    arg_vars.append(str(arg[1]))
-            if len(arg_vars) == 2:
-                expr = template.format(arg_vars[0], arg_vars[1])
-                lines.append(f"    acc = {expr}")
 
     lines += [
         "",
@@ -963,7 +1039,7 @@ def _generate_epilogue_pointwise_source(name, epilogue_ops, has_bias, extra_shap
     return "\n".join(lines)
 
 
-_epilogue_kernel_cache: Dict[str, object] = {}
+_epilogue_kernel_cache: dict[str, object] = {}
 
 
 def _get_epilogue_kernel(name, epilogue_ops, has_bias, extra_shapes=None):
@@ -972,7 +1048,9 @@ def _get_epilogue_kernel(name, epilogue_ops, has_bias, extra_shapes=None):
     if cache_key in _epilogue_kernel_cache:
         return _epilogue_kernel_cache[cache_key]
 
-    source = _generate_epilogue_pointwise_source(name, epilogue_ops, has_bias, extra_shapes)
+    source = _generate_epilogue_pointwise_source(
+        name, epilogue_ops, has_bias, extra_shapes
+    )
     code_lines = [
         "import triton",
         "import triton.language as tl",
@@ -994,7 +1072,9 @@ def _get_epilogue_kernel(name, epilogue_ops, has_bias, extra_shapes=None):
     return fn
 
 
-def _cublas_matmul_epilogue(input_t, weight_t, bias, extras, epilogue_ops, dtype, out_shape=None):
+def _cublas_matmul_epilogue(
+    input_t, weight_t, bias, extras, epilogue_ops, dtype, out_shape=None
+):
     """Execute matmul via cuBLAS then apply epilogue ops eagerly.
 
     When out_shape is provided (e.g. [B, S, N] for a 3D batch), the 2D
@@ -1017,6 +1097,11 @@ def _cublas_matmul_epilogue(input_t, weight_t, bias, extras, epilogue_ops, dtype
 def _is_fusable_ep_op(op):
     if op.op_name not in _TRITON_OP_MAP:
         return False
+    if op.op_name == "pow":
+        if len(op.args) != 2 or op.args[1][0] != "const":
+            return False
+        if not _supported_pow_exponent(op.args[1][1]):
+            return False
     if len(op.args) == 1 and op.args[0][0] in ("acc", "tmp"):
         return True
     if len(op.args) == 2:
@@ -1034,9 +1119,21 @@ class _TritonMatmulModule(torch.nn.Module):
     more than cuBLAS for the matmul portion.
     """
 
-    _backend_cache: Dict[tuple, str] = {}
+    _backend_cache: dict[tuple, str] = {}
 
-    def __init__(self, triton_fn, M, N, K, dtype, has_bias, n_extra, epilogue_ops, extra_shapes=None, out_shape=None):
+    def __init__(
+        self,
+        triton_fn,
+        M,
+        N,
+        K,
+        dtype,
+        has_bias,
+        n_extra,
+        epilogue_ops,
+        extra_shapes=None,
+        out_shape=None,
+    ):
         super().__init__()
         self.triton_fn = triton_fn
         self.M = M
@@ -1050,12 +1147,51 @@ class _TritonMatmulModule(torch.nn.Module):
         self.out_shape = out_shape
         self._use_cublas = None
         self._epilogue_fn = None
+        self._epilogue_autotuned = False
         # Check if epilogue is purely unary (no extra inputs, no binary ops
         # with non-acc args) — these can be fused into a Triton pointwise
         # kernel to avoid separate eager kernel launches when cuBLAS wins.
-        self._can_fuse_epilogue = all(
-            _is_fusable_ep_op(op) for op in epilogue_ops
+        self._can_fuse_epilogue = all(_is_fusable_ep_op(op) for op in epilogue_ops)
+
+    def _backend_cache_key(self):
+        epilogue_sig = tuple(
+            (op.op_name, len(op.args), any(a[0] == "extra" for a in op.args))
+            for op in self.epilogue_ops
         )
+        return (self.M, self.N, self.K, self.dtype, self.has_bias, epilogue_sig)
+
+    def _pick_backend_heuristic(self) -> str | None:
+        op_names = tuple(op.op_name for op in self.epilogue_ops)
+        has_extra = any(a[0] == "extra" for op in self.epilogue_ops for a in op.args)
+
+        if not op_names:
+            return "cublas"
+
+        # Unary fused epilogues are the main case where the Triton
+        # matmul kernel wins consistently enough to skip benchmarking.
+        if (
+            self._can_fuse_epilogue
+            and not has_extra
+            and all(name in {"relu", "silu", "gelu"} for name in op_names)
+        ):
+            return "triton"
+
+        # Residual-add epilogues are bandwidth-sensitive: smaller-K
+        # projections and tiny bias-only outputs are better served by
+        # cuBLAS plus a fused pointwise add. For larger bias-style adds
+        # we keep the previous Triton-vs-cuBLAS heuristic.
+        if has_extra and all(name == "add" for name in op_names):
+            if any(len(shape) > 1 for shape in self.extra_shapes):
+                return "cublas"
+            if (
+                self.extra_shapes
+                and all(len(shape) == 1 for shape in self.extra_shapes)
+                and self.N <= 64
+            ):
+                return "cublas"
+            return "triton" if self.K > self.N else "cublas"
+
+        return None
 
     def _run_triton(self, input_t, weight_t, bias, extras):
         import triton
@@ -1069,21 +1205,25 @@ class _TritonMatmulModule(torch.nn.Module):
         # inputs.  When inputs arrive as ND tensors (e.g. [B, S, N] from a
         # 3D batch), we flatten leading dimensions to produce a contiguous
         # 2D view [M, N] before computing strides so memory addresses match.
-        flat_extras = [
-            ext.reshape(M, -1) if ext.ndim > 2 else ext
-            for ext in extras
-        ]
+        flat_extras = [ext.reshape(M, -1) if ext.ndim > 2 else ext for ext in extras]
         args = [input_t, weight_t]
         if bias is not None:
             args.append(bias)
         args.append(out)
         args.extend(flat_extras)
-        args.extend([
-            M, N, K,
-            input_t.stride(0), input_t.stride(1),
-            weight_t.stride(0), weight_t.stride(1),
-            out.stride(0), out.stride(1),
-        ])
+        args.extend(
+            [
+                M,
+                N,
+                K,
+                input_t.stride(0),
+                input_t.stride(1),
+                weight_t.stride(0),
+                weight_t.stride(1),
+                out.stride(0),
+                out.stride(1),
+            ]
+        )
         for i, ext in enumerate(flat_extras):
             if i < len(self.extra_shapes) and len(self.extra_shapes[i]) >= 2:
                 args.extend([ext.stride(0), ext.stride(1)])
@@ -1093,15 +1233,24 @@ class _TritonMatmulModule(torch.nn.Module):
         return out
 
     def _benchmark_backends(self, input_t, weight_t, bias, extras):
-        epilogue_sig = tuple(
-            (op.op_name, len(op.args), any(a[0] == "extra" for a in op.args))
-            for op in self.epilogue_ops
-        )
-        cache_key = (self.M, self.N, self.K, self.dtype, self.has_bias, epilogue_sig)
+        cache_key = self._backend_cache_key()
         cached = _TritonMatmulModule._backend_cache.get(cache_key)
         if cached is not None:
             self._use_cublas = cached == "cublas"
             return
+
+        if (
+            os.environ.get(
+                "TORCHLITE_MATMUL_BACKEND_POLICY",
+                "heuristic_then_benchmark",
+            )
+            != "benchmark"
+        ):
+            heuristic = self._pick_backend_heuristic()
+            if heuristic is not None:
+                self._use_cublas = heuristic == "cublas"
+                _TritonMatmulModule._backend_cache[cache_key] = heuristic
+                return
 
         bench_buf = torch.empty(
             (self.M, self.N), dtype=self.dtype, device=input_t.device
@@ -1125,9 +1274,14 @@ class _TritonMatmulModule(torch.nn.Module):
             else:
                 if bias is not None:
                     bench_buf.add_(bias)
-                _apply_epilogue_inplace(acc, self.epilogue_ops, input_t, weight_t, bias, extras)
+                _apply_epilogue_inplace(
+                    acc, self.epilogue_ops, input_t, weight_t, bias, extras
+                )
 
-        for _ in range(5):
+        warmup_iters = int(os.environ.get("TORCHLITE_MATMUL_BENCH_WARMUP", "2"))
+        bench_iters = int(os.environ.get("TORCHLITE_MATMUL_BENCH_ITERS", "7"))
+
+        for _ in range(warmup_iters):
             self._run_triton(input_t, weight_t, bias, extras)
             _run_cublas_inplace()
         torch.cuda.synchronize()
@@ -1137,9 +1291,8 @@ class _TritonMatmulModule(torch.nn.Module):
         # start/end around N calls) includes GPU idle time when the CPU
         # can't submit the next kernel fast enough, which systematically
         # penalises cuBLAS (faster GPU, more Python overhead per call).
-        n_bench = 25
         triton_times = []
-        for _ in range(n_bench):
+        for _ in range(bench_iters):
             s = torch.cuda.Event(enable_timing=True)
             e = torch.cuda.Event(enable_timing=True)
             s.record()
@@ -1149,7 +1302,7 @@ class _TritonMatmulModule(torch.nn.Module):
             triton_times.append(s.elapsed_time(e))
 
         cublas_times = []
-        for _ in range(n_bench):
+        for _ in range(bench_iters):
             s = torch.cuda.Event(enable_timing=True)
             e = torch.cuda.Event(enable_timing=True)
             s.record()
@@ -1158,8 +1311,8 @@ class _TritonMatmulModule(torch.nn.Module):
             torch.cuda.synchronize()
             cublas_times.append(s.elapsed_time(e))
 
-        triton_ms = sorted(triton_times)[n_bench // 2]
-        cublas_ms = sorted(cublas_times)[n_bench // 2]
+        triton_ms = sorted(triton_times)[bench_iters // 2]
+        cublas_ms = sorted(cublas_times)[bench_iters // 2]
 
         # Per-call synchronization adds fixed overhead (~3-5us) that
         # compresses the ratio between backends. In practice cuBLAS
@@ -1176,21 +1329,25 @@ class _TritonMatmulModule(torch.nn.Module):
         grid = lambda META: (  # noqa: E731
             triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(N, META["BLOCK_N"]),
         )
-        flat_extras = [
-            ext.reshape(M, -1) if ext.ndim > 2 else ext
-            for ext in extras
-        ]
+        flat_extras = [ext.reshape(M, -1) if ext.ndim > 2 else ext for ext in extras]
         args = [input_t, weight_t]
         if bias is not None:
             args.append(bias)
         args.append(buf)
         args.extend(flat_extras)
-        args.extend([
-            M, N, K,
-            input_t.stride(0), input_t.stride(1),
-            weight_t.stride(0), weight_t.stride(1),
-            buf.stride(0), buf.stride(1),
-        ])
+        args.extend(
+            [
+                M,
+                N,
+                K,
+                input_t.stride(0),
+                input_t.stride(1),
+                weight_t.stride(0),
+                weight_t.stride(1),
+                buf.stride(0),
+                buf.stride(1),
+            ]
+        )
         for i, ext in enumerate(flat_extras):
             if i < len(self.extra_shapes) and len(self.extra_shapes[i]) >= 2:
                 args.extend([ext.stride(0), ext.stride(1)])
@@ -1209,8 +1366,37 @@ class _TritonMatmulModule(torch.nn.Module):
         extra_suffix = f"_e{n_extra}" if n_extra else ""
         name = f"epilogue_{epilogue_sig}_{self.M}_{self.N}{extra_suffix}"
         self._epilogue_fn = _get_epilogue_kernel(
-            name, self.epilogue_ops, self.has_bias, self.extra_shapes,
+            name,
+            self.epilogue_ops,
+            self.has_bias,
+            self.extra_shapes,
         )
+
+    def _autotune_epilogue_if_needed(self, acc, bias, extras):
+        """Prime Triton autotune on scratch buffers before any in-place launch.
+
+        The pointwise epilogue kernel is launched as acc->acc in production.
+        If the first invocation also triggers Triton autotune, repeated config
+        trials can reapply the epilogue to the same buffer and corrupt the
+        first real output. Autotune on a separate destination once, then use
+        the in-place fast path for subsequent calls.
+        """
+        if self._epilogue_autotuned:
+            return
+
+        self._ensure_epilogue_fn()
+
+        numel = acc.numel()
+        grid = lambda meta, n=numel: (
+            (n + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],
+        )  # noqa: E731
+        scratch = torch.empty_like(acc)
+        extras = extras or []
+        if self.has_bias:
+            self._epilogue_fn[grid](acc, bias, *extras, scratch, self.N, numel)
+        else:
+            self._epilogue_fn[grid](acc, *extras, scratch, self.N, numel)
+        self._epilogue_autotuned = True
 
     def _cublas_with_triton_epilogue(self, acc, bias, extras=None):
         """Apply bias + epilogue ops via a single Triton pointwise kernel.
@@ -1219,9 +1405,11 @@ class _TritonMatmulModule(torch.nn.Module):
         because the epilogue is purely pointwise: each thread reads acc[i],
         computes, and writes out[i] with no cross-element dependencies.
         """
-        self._ensure_epilogue_fn()
+        self._autotune_epilogue_if_needed(acc, bias, extras)
         numel = acc.numel()
-        grid = lambda meta, n=numel: ((n + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],)  # noqa: E731
+        grid = lambda meta, n=numel: (
+            (n + meta["BLOCK_SIZE"] - 1) // meta["BLOCK_SIZE"],
+        )  # noqa: E731
         extras = extras or []
         if self.has_bias:
             self._epilogue_fn[grid](acc, bias, *extras, acc, self.N, numel)
@@ -1247,13 +1435,17 @@ class _TritonMatmulModule(torch.nn.Module):
             else:
                 self._use_cublas = True
 
-        matmul_buf = buf.view(self.M, self.N) if list(buf.shape) != [self.M, self.N] else buf
+        matmul_buf = (
+            buf.view(self.M, self.N) if list(buf.shape) != [self.M, self.N] else buf
+        )
 
         if self._use_cublas:
             if self._can_fuse_epilogue and self.epilogue_ops and input_t.is_cuda:
                 torch.ops.aten.mm.out(input_t, weight_t, out=matmul_buf)
                 acc = matmul_buf
-                if self.out_shape is not None and list(acc.shape) != list(self.out_shape):
+                if self.out_shape is not None and list(acc.shape) != list(
+                    self.out_shape
+                ):
                     acc = acc.view(self.out_shape)
                 return self._cublas_with_triton_epilogue(acc, bias, extras)
             if bias is not None and not self.epilogue_ops:
@@ -1265,7 +1457,9 @@ class _TritonMatmulModule(torch.nn.Module):
             acc = matmul_buf
             if self.out_shape is not None and list(acc.shape) != list(self.out_shape):
                 acc = acc.view(self.out_shape)
-            return _apply_epilogue_inplace(acc, self.epilogue_ops, input_t, weight_t, bias, extras)
+            return _apply_epilogue_inplace(
+                acc, self.epilogue_ops, input_t, weight_t, bias, extras
+            )
         return self._run_triton_into_buf(matmul_buf, input_t, weight_t, bias, extras)
 
     def forward(self, input_t, weight_t, *rest):
@@ -1281,17 +1475,24 @@ class _TritonMatmulModule(torch.nn.Module):
         if self._use_cublas:
             if self._can_fuse_epilogue and self.epilogue_ops and input_t.is_cuda:
                 acc = torch.mm(input_t, weight_t)
-                if self.out_shape is not None and list(acc.shape) != list(self.out_shape):
+                if self.out_shape is not None and list(acc.shape) != list(
+                    self.out_shape
+                ):
                     acc = acc.view(self.out_shape)
                 return self._cublas_with_triton_epilogue(acc, bias, extras)
             return _cublas_matmul_epilogue(
-                input_t, weight_t, bias, extras,
-                self.epilogue_ops, self.dtype, self.out_shape,
+                input_t,
+                weight_t,
+                bias,
+                extras,
+                self.epilogue_ops,
+                self.dtype,
+                self.out_shape,
             )
         return self._run_triton(input_t, weight_t, bias, extras)
 
 
-def triton_lower(gm: GraphModule, example_inputs: List[torch.Tensor]) -> PassResult:
+def triton_lower(gm: GraphModule, example_inputs: list[torch.Tensor]) -> PassResult:
     """JIT-compile FusedKernel nodes into callable Triton kernels.
 
     Unlike triton_codegen which only generates source strings, this pass
@@ -1327,7 +1528,12 @@ def triton_lower(gm: GraphModule, example_inputs: List[torch.Tensor]) -> PassRes
             add_ln_kernels.append(node.target)
             add_ln_nodes.append(node)
 
-    if not fused_kernels and not matmul_kernels and not add_rms_kernels and not add_ln_kernels:
+    if (
+        not fused_kernels
+        and not matmul_kernels
+        and not add_rms_kernels
+        and not add_ln_kernels
+    ):
         return PassResult(gm=gm)
 
     if fused_kernels:
@@ -1350,13 +1556,18 @@ def triton_lower(gm: GraphModule, example_inputs: List[torch.Tensor]) -> PassRes
         for node, kernel in zip(matmul_nodes, matmul_kernels):
             triton_fn = matmul_name_to_fn[kernel.name]
             n_extra = sum(
-                1 for op in kernel.epilogue_ops
-                for a in op.args if a[0] == "extra"
+                1 for op in kernel.epilogue_ops for a in op.args if a[0] == "extra"
             )
             mod = _TritonMatmulModule(
-                triton_fn, kernel.M, kernel.N, kernel.K,
-                kernel.dtype, kernel.has_bias, n_extra,
-                kernel.epilogue_ops, kernel.extra_shapes,
+                triton_fn,
+                kernel.M,
+                kernel.N,
+                kernel.K,
+                kernel.dtype,
+                kernel.has_bias,
+                n_extra,
+                kernel.epilogue_ops,
+                kernel.extra_shapes,
                 out_shape=kernel.out_shape,
             )
             mod_name = f"_triton_{kernel.name}"
@@ -1369,8 +1580,12 @@ def triton_lower(gm: GraphModule, example_inputs: List[torch.Tensor]) -> PassRes
         for node, kernel in zip(add_rms_nodes, add_rms_kernels):
             triton_fn = add_rms_name_to_fn[kernel.name]
             mod = _AddRmsNormModule(
-                triton_fn, kernel.shape, kernel.norm_dim,
-                kernel.eps, kernel.dtype, kernel.has_add,
+                triton_fn,
+                kernel.shape,
+                kernel.norm_dim,
+                kernel.eps,
+                kernel.dtype,
+                kernel.has_add,
             )
             mod_name = f"_triton_{kernel.name}"
             gm.add_module(mod_name, mod)
@@ -1382,8 +1597,12 @@ def triton_lower(gm: GraphModule, example_inputs: List[torch.Tensor]) -> PassRes
         for node, kernel in zip(add_ln_nodes, add_ln_kernels):
             triton_fn = add_ln_name_to_fn[kernel.name]
             mod = _AddLayerNormModule(
-                triton_fn, kernel.shape, kernel.norm_dim,
-                kernel.eps, kernel.dtype, kernel.has_add,
+                triton_fn,
+                kernel.shape,
+                kernel.norm_dim,
+                kernel.eps,
+                kernel.dtype,
+                kernel.has_add,
                 kernel.has_norm_bias,
             )
             mod_name = f"_triton_{kernel.name}"
@@ -1394,4 +1613,3 @@ def triton_lower(gm: GraphModule, example_inputs: List[torch.Tensor]) -> PassRes
     gm.graph.lint()
     gm.recompile()
     return PassResult(gm=gm)
-

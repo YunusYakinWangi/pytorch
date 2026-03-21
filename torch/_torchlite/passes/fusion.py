@@ -14,19 +14,42 @@ from torch._torchlite.passes.common import (
     _graph_meta,
     _node_shape,
     _set_phase,
+    _supported_pow_exponent,
     AddLayerNormKernel,
     AddRmsNormKernel,
     FusedKernel,
     FusedOp,
     FusionGroup,
+    MatmulAddRmsNormKernel,
     MatmulEpilogueKernel,
     PassResult,
 )
 from torch._torchlite.ops import _UNARY_POINTWISE_OPS
 
 _POINTWISE_OPS = _UNARY_POINTWISE_OPS | frozenset({
-    "add", "sub", "mul", "div", "where",
+    "add", "sub", "rsub", "mul", "div", "where",
+    "gt", "ge", "lt", "le", "eq", "ne",
+    "pow", "clamp", "clamp_min", "clamp_max",
 })
+_MATMUL_ADD_RMS_VIEW_TARGETS = frozenset({
+    torch.ops.aten.reshape.default,
+    torch.ops.aten.view.default,
+    torch.ops.aten._unsafe_view.default,
+    torch.Tensor.reshape,
+    torch.Tensor.view,
+})
+
+
+def _is_supported_pow_node(node: torch.fx.Node) -> bool:
+    if _aten_op_name(node.target) != "pow":
+        return True
+    if len(node.args) != 2:
+        return False
+    exponent = node.args[1]
+    return (
+        not isinstance(exponent, torch.fx.Node)
+        and _supported_pow_exponent(exponent)
+    )
 
 
 def fuse(gm: GraphModule, example_inputs: List[torch.Tensor]) -> PassResult:
@@ -49,8 +72,11 @@ def fuse(gm: GraphModule, example_inputs: List[torch.Tensor]) -> PassResult:
             continue
         if node.kwargs:
             continue
+        if op_name == "pow" and not _is_supported_pow_node(node):
+            continue
 
         shape = _node_shape(node)
+        node_phase = node.meta.get("phase", "forward")
 
         merged = False
         for arg in node.args:
@@ -72,7 +98,8 @@ def fuse(gm: GraphModule, example_inputs: List[torch.Tensor]) -> PassResult:
             if has_blocking_user:
                 continue
             group = node_to_group[arg]
-            if group.shape is not None and group.shape == shape:
+            if (group.shape is not None and group.shape == shape
+                    and group.phase == node_phase):
                 group.node_names.append(node.name)
                 group.op_names.append(op_name)
                 group.output = node.name
@@ -88,6 +115,7 @@ def fuse(gm: GraphModule, example_inputs: List[torch.Tensor]) -> PassResult:
                 shape=shape,
                 inputs=[],
                 output=node.name,
+                phase=node_phase,
             )
             groups.append(group)
             node_to_group[node] = group
@@ -273,6 +301,8 @@ def matmul_epilogue(
                 break
             if user.kwargs:
                 break
+            if user_op == "pow" and not _is_supported_pow_node(user):
+                break
             has_bad_extra = False
             for arg in user.args:
                 if not isinstance(arg, torch.fx.Node):
@@ -408,6 +438,219 @@ def matmul_epilogue(
             graph.erase_node(reshape_node)
         if not node.users:
             graph.erase_node(node)
+
+        changed = True
+
+    if changed:
+        graph.lint()
+        gm.recompile()
+    return PassResult(gm=gm, changed=changed)
+
+
+def _match_matmul_add_rms_projection(node: torch.fx.Node):
+    view_node = None
+    projection_node = node
+
+    if (
+        node.op == "call_function"
+        and node.target in _MATMUL_ADD_RMS_VIEW_TARGETS
+        and node.args
+        and isinstance(node.args[0], torch.fx.Node)
+    ):
+        candidate = node.args[0]
+        if (
+            candidate.op == "call_function"
+            and candidate.target
+            in (torch.ops.aten.mm.default, torch.ops.aten.addmm.default)
+        ):
+            view_node = node
+            projection_node = candidate
+
+    if (
+        projection_node.op != "call_function"
+        or projection_node.target
+        not in (torch.ops.aten.mm.default, torch.ops.aten.addmm.default)
+    ):
+        return None
+
+    if projection_node.target == torch.ops.aten.addmm.default:
+        if len(projection_node.args) != 3:
+            return None
+        bias_node, input_2d, weight_t_node = projection_node.args
+    else:
+        if len(projection_node.args) != 2:
+            return None
+        bias_node = None
+        input_2d, weight_t_node = projection_node.args
+
+    if not isinstance(input_2d, torch.fx.Node) or not isinstance(
+        weight_t_node, torch.fx.Node
+    ):
+        return None
+
+    input_shape = _node_shape(input_2d)
+    proj_shape = _node_shape(projection_node)
+    out_shape = _node_shape(view_node or projection_node)
+    if (
+        input_shape is None
+        or proj_shape is None
+        or out_shape is None
+        or len(input_shape) != 2
+        or len(proj_shape) != 2
+        or len(out_shape) < 2
+    ):
+        return None
+
+    M, K = input_shape
+    if proj_shape[0] != M:
+        return None
+    N = proj_shape[1]
+
+    flat_M = 1
+    for dim in out_shape[:-1]:
+        flat_M *= dim
+    if flat_M != M or out_shape[-1] != N:
+        return None
+
+    if view_node is not None and len(list(projection_node.users.keys())) != 1:
+        return None
+
+    return {
+        "view_node": view_node,
+        "projection_node": projection_node,
+        "input_2d": input_2d,
+        "weight_t_node": weight_t_node,
+        "bias_node": bias_node,
+        "shape": list(out_shape),
+        "M": M,
+        "N": N,
+        "K": K,
+    }
+
+
+def fuse_matmul_add_rms_norm(
+    gm: GraphModule, example_inputs: List[torch.Tensor]
+) -> PassResult:
+    """Fuse matmul/addmm + residual add + rms_norm into one runtime node.
+
+    This targets the common transformer boundary:
+      addmm/mm -> optional reshape/view -> add(residual) -> rms_norm
+    It collapses the projection and add+rms_norm into a single placeholder
+    that later lowers to one module call, reducing Python/launch overhead
+    in inference without changing the underlying CUDA kernels.
+    """
+
+    del example_inputs
+
+    graph = gm.graph
+    changed = False
+    counter = 0
+
+    for node in list(graph.nodes):
+        if node.op != "call_function" or node.target is not _F.rms_norm:
+            continue
+
+        input_node = node.args[0]
+        if not isinstance(input_node, torch.fx.Node):
+            continue
+        if input_node.op != "call_function" or _aten_op_name(input_node.target) != "add":
+            continue
+        if len(input_node.args) != 2:
+            continue
+
+        shape = _node_shape(node)
+        if shape is None or len(shape) < 2:
+            continue
+
+        norm_dim = shape[-1]
+        normalized_shape = node.args[1] if len(node.args) > 1 else None
+        if normalized_shape is None or normalized_shape != (norm_dim,):
+            continue
+
+        norm_weight = node.kwargs.get("weight")
+        if norm_weight is None or not isinstance(norm_weight, torch.fx.Node):
+            continue
+
+        eps = node.kwargs.get("eps", 1e-6)
+        dtype = node.meta.get("dtype", torch.float32)
+
+        lhs, rhs = input_node.args
+        lhs_match = (
+            _match_matmul_add_rms_projection(lhs)
+            if isinstance(lhs, torch.fx.Node)
+            else None
+        )
+        rhs_match = (
+            _match_matmul_add_rms_projection(rhs)
+            if isinstance(rhs, torch.fx.Node)
+            else None
+        )
+
+        if lhs_match is None and rhs_match is None:
+            continue
+        if lhs_match is not None and rhs_match is not None:
+            continue
+
+        projection = lhs_match or rhs_match
+        residual_node = rhs if lhs_match is not None else lhs
+        if not isinstance(residual_node, torch.fx.Node):
+            continue
+        if list(projection["shape"]) != list(shape):
+            continue
+
+        kernel_name = f"matmul_add_rms_norm_{counter}"
+        counter += 1
+        kernel = MatmulAddRmsNormKernel(
+            name=kernel_name,
+            shape=list(shape),
+            M=projection["M"],
+            N=projection["N"],
+            K=projection["K"],
+            norm_dim=norm_dim,
+            eps=eps,
+            dtype=dtype,
+            has_bias=projection["bias_node"] is not None,
+        )
+
+        args = [projection["input_2d"], projection["weight_t_node"]]
+        if projection["bias_node"] is not None:
+            args.append(projection["bias_node"])
+        args.extend([residual_node, norm_weight])
+
+        graph.inserting_before(node)
+        fused_node = graph.call_function(kernel, tuple(args))
+        fused_node.name = _create_name(graph, kernel_name)
+        _set_phase(fused_node, node.meta.get("phase", "forward"))
+        fused_node.meta["shape"] = list(shape)
+        fused_node.meta["dtype"] = dtype
+
+        add_getitem = graph.call_function(operator.getitem, (fused_node, 0))
+        add_getitem.name = _create_name(graph, f"{kernel_name}_add")
+        add_getitem.meta["shape"] = list(shape)
+        add_getitem.meta["dtype"] = dtype
+        _set_phase(add_getitem, node.meta.get("phase", "forward"))
+
+        norm_getitem = graph.call_function(operator.getitem, (fused_node, 1))
+        norm_getitem.name = _create_name(graph, f"{kernel_name}_norm")
+        norm_getitem.meta["shape"] = list(shape)
+        norm_getitem.meta["dtype"] = dtype
+        _set_phase(norm_getitem, node.meta.get("phase", "forward"))
+
+        node.replace_all_uses_with(norm_getitem)
+        input_node.replace_all_uses_with(add_getitem)
+        add_getitem.replace_input_with(add_getitem, fused_node)
+
+        if not node.users:
+            graph.erase_node(node)
+        if not input_node.users:
+            graph.erase_node(input_node)
+
+        view_node = projection["view_node"]
+        if view_node is not None and not view_node.users:
+            graph.erase_node(view_node)
+        projection_node = projection["projection_node"]
+        if not projection_node.users:
+            graph.erase_node(projection_node)
 
         changed = True
 
@@ -651,4 +894,3 @@ def fuse_add_layer_norm(
         graph.lint()
         gm.recompile()
     return PassResult(gm=gm, changed=changed)
-

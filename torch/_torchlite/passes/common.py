@@ -49,6 +49,17 @@ def _graph_meta(graph):
     return meta
 
 
+def _supported_pow_exponent(value) -> bool:
+    if isinstance(value, bool):
+        value = int(value)
+    if not isinstance(value, (int, float)):
+        return False
+    value_f = float(value)
+    if value_f in {0.0, 0.5, 1.0, 2.0, 3.0, 4.0, -0.5}:
+        return True
+    return value_f.is_integer() and abs(int(value_f)) <= 8
+
+
 @dataclass
 class FusionGroup:
     group_id: int
@@ -57,6 +68,7 @@ class FusionGroup:
     shape: Optional[List[int]]
     inputs: List[str]
     output: str
+    phase: str = "forward"
 
 
 
@@ -112,6 +124,42 @@ class MatmulEpilogueKernel:
         raise NotImplementedError(
             f"{self.name}: matmul epilogue placeholder — run triton_lower "
             f"to compile into a Triton kernel"
+        )
+
+
+@dataclass(eq=False)
+class MatmulAddRmsNormKernel:
+    """Fused matmul/addmm + residual add + rms_norm placeholder.
+
+    Pattern:
+      proj = addmm/mm(input_2d, weight_t[, bias])
+      proj = view/reshape(proj, shape)   # optional
+      add = residual + proj
+      out = rms_norm(add, weight, eps)
+
+    Produces two outputs (add_result, norm_result) accessed via getitem.
+    The runtime lowering computes the matmul directly into the add buffer,
+    then launches the existing Triton add+rms_norm kernel on that buffer.
+    """
+
+    name: str
+    shape: List[int]
+    M: int
+    N: int
+    K: int
+    norm_dim: int
+    eps: float
+    dtype: torch.dtype
+    has_bias: bool = True
+
+    def __post_init__(self):
+        self.__name__ = self.name
+        self.__qualname__ = self.name
+
+    def __call__(self, *args):
+        raise NotImplementedError(
+            f"{self.name}: matmul+add+rms_norm placeholder — run triton_lower "
+            f"to compile into a runnable module"
         )
 
 
@@ -226,6 +274,22 @@ def _set_phase(node, phase):
     node.meta["phase"] = phase
 
 
+_REGION_META_KEYS = frozenset({"region_id", "region_kind", "region_role"})
+
+
+def _copy_region_meta(
+    dst,
+    src,
+    *,
+    role: Optional[str] = None,
+):
+    for key in _REGION_META_KEYS:
+        if key in src.meta:
+            dst.meta[key] = src.meta[key]
+    if role is not None:
+        dst.meta["region_role"] = role
+
+
 def _deep_getattr(obj, target):
     for part in target.split("."):
         obj = getattr(obj, part)
@@ -241,13 +305,30 @@ def _deep_setattr(obj, target, value):
     setattr(obj, parts[-1], value)
 
 
-_PROVENANCE_KEYS = frozenset({"phase", "bwd_of", "dtensor_spec", "rng_replay_for"})
+_PROVENANCE_KEYS = frozenset({
+    "phase",
+    "bwd_of",
+    "dtensor_spec",
+    "rng_replay_for",
+    "region_id",
+    "region_kind",
+    "region_role",
+})
 
 
 def _is_torch_op(target):
     if target is operator.getitem:
         return False
-    if isinstance(target, (FusedKernel, MatmulEpilogueKernel, AddRmsNormKernel, AddLayerNormKernel)):
+    if isinstance(
+        target,
+        (
+            FusedKernel,
+            MatmulEpilogueKernel,
+            MatmulAddRmsNormKernel,
+            AddRmsNormKernel,
+            AddLayerNormKernel,
+        ),
+    ):
         return False
     if isinstance(target, torch._ops.OpOverload):
         return True

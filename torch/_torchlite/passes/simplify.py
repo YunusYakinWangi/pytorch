@@ -1,11 +1,12 @@
-"""View chain simplification pass.
+"""Graph simplification passes.
 
-Compresses redundant view/reshape chains that arise from MHA decomposition
-and other patterns. This reduces graph op count without changing semantics.
+Includes view-chain cleanup plus small pointwise canonicalizations that
+make downstream fusion matchers less sensitive to frontend spelling.
 """
 from typing import List
 
 import torch
+from torch._torchlite.passes.common import _aten_op_name
 from torch.fx import GraphModule, Node
 
 from torch._torchlite.passes.common import (
@@ -48,6 +49,59 @@ def _get_shape(node: Node):
     return node.meta.get("shape")
 
 
+_DEFAULT_SAFE_POINTWISE_KWARGS = {
+    "relu": {"inplace": False},
+    "silu": {"inplace": False},
+    "gelu": {"approximate": "none"},
+}
+
+
+def canonicalize_pointwise_kwargs(
+    gm: GraphModule,
+    example_inputs: List[torch.Tensor],
+) -> PassResult:
+    """Strip benign default kwargs from pointwise activations.
+
+    Frontend calls like ``F.relu(x, inplace=False)`` and
+    ``F.silu(x, inplace=False)`` are semantically identical to the kwarg-free
+    form, but the extra kwargs block downstream fusion passes that currently
+    pattern-match only positional pointwise ops.
+    """
+
+    del example_inputs
+
+    graph = gm.graph
+    changed = False
+
+    for node in list(graph.nodes):
+        if node.op != "call_function" or not node.kwargs:
+            continue
+
+        op_name = _aten_op_name(node.target)
+        safe_defaults = _DEFAULT_SAFE_POINTWISE_KWARGS.get(op_name)
+        if safe_defaults is None:
+            continue
+        if any(
+            key not in safe_defaults or node.kwargs[key] != safe_defaults[key]
+            for key in node.kwargs
+        ):
+            continue
+
+        graph.inserting_before(node)
+        new_node = graph.call_function(node.target, node.args, {})
+        new_node.name = node.name
+        new_node.meta.update(node.meta)
+        node.replace_all_uses_with(new_node)
+        graph.erase_node(node)
+        changed = True
+
+    if changed:
+        graph.lint()
+        gm.recompile()
+
+    return PassResult(gm=gm, changed=changed)
+
+
 def simplify_views(gm: GraphModule, example_inputs: List[torch.Tensor]) -> PassResult:
     graph = gm.graph
     changed = False
@@ -55,6 +109,18 @@ def simplify_views(gm: GraphModule, example_inputs: List[torch.Tensor]) -> PassR
     for node in list(graph.nodes):
         if node.op != "call_function":
             continue
+
+        # --- Eliminate detach nodes ---
+        # aten.detach.default is a no-op identity under torch.no_grad()
+        # (which codegen_training wraps everything in). These nodes sit
+        # between backward ops and prevent pointwise fusion chains.
+        if node.target == torch.ops.aten.detach.default:
+            src = node.args[0]
+            if isinstance(src, Node):
+                node.replace_all_uses_with(src)
+                graph.erase_node(node)
+                changed = True
+                continue
 
         # --- Merge consecutive reshapes ---
         # reshape(reshape(x, s1), s2) -> reshape(x, s2)
@@ -170,6 +236,36 @@ def simplify_views(gm: GraphModule, example_inputs: List[torch.Tensor]) -> PassR
             graph.erase_node(node)
             changed = True
             continue
+
+        # --- Fold ones_like + expand into full ---
+        # Backward pass starts with ones_like(loss) -> expand(batch_shape)
+        # to create the gradient seed. Replace with a single full() node.
+        if node.target == torch.ops.aten.expand.default:
+            src = node.args[0]
+            if (
+                isinstance(src, Node)
+                and src.op == "call_function"
+                and src.target == torch.ops.aten.ones_like.default
+            ):
+                target_shape = node.args[1]
+                dtype = node.meta.get("dtype", torch.float32)
+                graph.inserting_before(node)
+                full_node = graph.call_function(
+                    torch.ops.aten.full.default,
+                    (list(target_shape),),
+                    {"fill_value": 1.0, "dtype": dtype},
+                )
+                full_node.meta["shape"] = list(target_shape)
+                full_node.meta["dtype"] = dtype
+                phase = node.meta.get("phase")
+                if phase is not None:
+                    _set_phase(full_node, phase)
+                node.replace_all_uses_with(full_node)
+                graph.erase_node(node)
+                if not src.users:
+                    graph.erase_node(src)
+                changed = True
+                continue
 
         # --- Remove clones feeding into matmul ops ---
         # clone -> (optional reshape) -> addmm/mm/bmm is redundant because

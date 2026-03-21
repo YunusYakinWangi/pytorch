@@ -1,4 +1,5 @@
 """Memory planning pass."""
+import operator
 from typing import Dict, List
 
 import torch
@@ -23,6 +24,27 @@ _VIEW_OPS = frozenset({
     torch.Tensor.reshape,
     torch.Tensor.view,
 })
+_ALIAS_TUPLE_OPS = frozenset({
+    torch.ops.aten.unbind.int,
+})
+
+
+def _is_alias_like_user(node) -> bool:
+    if node.op != "call_function":
+        return False
+    if node.target in _VIEW_OPS or node.target in _ALIAS_TUPLE_OPS:
+        return True
+    if node.target is not operator.getitem or not node.args:
+        return False
+
+    base = node.args[0]
+    if not hasattr(base, "op") or base.op != "call_function":
+        return False
+    if base.target in _ALIAS_TUPLE_OPS:
+        return True
+    if base.target is operator.getitem:
+        return True
+    return False
 
 
 def memory_plan(
@@ -55,7 +77,7 @@ def memory_plan(
             t = node_order.get(user, best)
             if t > best:
                 best = t
-            if user.op == "call_function" and user.target in _VIEW_OPS:
+            if _is_alias_like_user(user):
                 worklist.extend(user.users)
         return best
 
@@ -63,10 +85,12 @@ def memory_plan(
     for node in graph.nodes:
         if node.op not in ("call_function", "call_module"):
             continue
-        if node.op == "call_function" and node.target in _VIEW_OPS:
+        if node.op == "call_function" and _is_alias_like_user(node):
             continue
         shape = node.meta.get("shape")
         if shape is None:
+            continue
+        if node.meta.get("disable_memory_pool"):
             continue
 
         creation = node_order[node]
@@ -100,7 +124,7 @@ def memory_plan(
             while (
                 hasattr(out_val, "op")
                 and out_val.op == "call_function"
-                and out_val.target in _VIEW_OPS
+                and _is_alias_like_user(out_val)
             ):
                 out_val = out_val.args[0]
             if hasattr(out_val, "op") and out_val in intervals:
