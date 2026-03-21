@@ -103,20 +103,38 @@ def _build_repro_context(
     }
 
 
-def _print_repro(group_id: str, step: TestStep, ctx: dict) -> None:
-    lines = [f"\nTo reproduce {group_id}/{step.test_id}:"]
-    for pip_args in ctx["pip_installs"]:
-        lines.append(f"  pip install {' '.join(pip_args)}")
-    if ctx["working_dir"]:
-        lines.append(f"  cd {ctx['working_dir']}")
-    for k, v in ctx["plan_env_vars"].items():
-        lines.append(f"  export {k}={v}  # plan-level")
-    for k, v in ctx["step_env_vars"].items():
-        lines.append(f"  export {k}={v}  # step-level (scoped)")
-    lines.append(
-        f"  python -m cli.run test pytorch-core"
-        f" --group-id {group_id} --test-id {step.test_id}"
+def _print_repro(
+    group_id: str,
+    step: TestStep,
+    build_env: str,
+    ctx: dict,
+) -> None:
+    lumen_cmd = (
+        f"lumen test pytorch-core"
+        f" --group-id {group_id}"
+        f" --build-env {build_env}"
+        f" --test-id {step.test_id}"
+        f" --no-upload"
     )
+    for k, v in step.params.items():
+        lumen_cmd += f" --filter {k}={v}"
+
+    manual: list[str] = []
+    for pip_args in ctx["pip_installs"]:
+        manual.append(f"  pip install {' '.join(pip_args)}")
+    if ctx["working_dir"]:
+        manual.append(f"  cd {ctx['working_dir']}")
+    for k, v in {**ctx["plan_env_vars"], **ctx["step_env_vars"]}.items():
+        manual.append(f"  export {k}={v}")
+    manual.append(f"  # then run your command directly")
+
+    lines = [
+        f"\nTo reproduce {group_id}/{step.test_id}:",
+        f"  # Option 1 — lumen (replays full setup automatically):",
+        f"  {lumen_cmd}",
+        f"  # Option 2 — manual:",
+        *manual,
+    ]
     logger.error("\n".join(lines))
 
 
@@ -125,22 +143,30 @@ def run_test_plan(
     build_env: str,
     test_id: str | None = None,
     cmd: str | None = None,
+    filters: dict[str, str] | None = None,
     shard_id: int = 1,
     num_shards: int = 1,
+    no_upload: bool = False,
     library: dict[str, BasePytorchTestPlan] | None = None,
 ) -> None:
     """
-    Run a test plan (or a single step within it) from the registry.
+    Run a test plan (or a subset of its steps) from the registry.
 
     Args:
-        group_id:  Key in PYTORCH_TEST_LIBRARY, e.g. "pytorch_cpuonly".
-        test_id:   If set, run only that step — used for single-step reproduction.
-        cmd:       If set, replay the setup context of test_id but run this
-                   command instead of step.fn(). Requires test_id to be set.
-                   Use this to reproduce a specific pytest line within a step.
-        shard_id:  Current shard (1-based).
+        group_id:   Key in PYTORCH_TEST_LIBRARY, e.g. "pytorch_cpuonly".
+        test_id:    If set, run only the step with this exact id.
+        filters:    Key=value pairs matched against step.params — useful for
+                    reproducing a specific combo, e.g. {"mode": "training"}.
+                    All filters must match (AND logic). Combined with test_id
+                    when both are provided.
+        cmd:        If set, replay the setup context of test_id but run this
+                    command instead of step.fn(). Requires test_id to be set.
+                    Use this to reproduce a specific pytest line within a step.
+        shard_id:   Current shard (1-based).
         num_shards: Total number of shards.
-        library:   Override the default registry (useful for testing).
+        no_upload:  If True, sets LUMEN_NO_UPLOAD=1 so upload flags are stripped
+                    from run_test.py invocations (useful for local reproduction).
+        library:    Override the default registry (useful for testing).
     """
     if not build_env:
         raise RuntimeError("build_env is required and must be non-empty")
@@ -153,12 +179,19 @@ def run_test_plan(
             f"group '{group_id}' not found. Available: {sorted(registry)}"
         )
     plan = registry[group_id]
+    all_steps = plan.get_steps(build_env)
 
-    steps = [s for s in plan.steps if s.test_id == test_id] if test_id else plan.steps
+    steps = all_steps
+    if test_id:
+        steps = [s for s in steps if s.test_id == test_id]
+    if filters:
+        steps = [s for s in steps if all(s.params.get(k) == v for k, v in filters.items())]
+
     if not steps:
         raise RuntimeError(
-            f"test_id '{test_id}' not found in '{group_id}'. "
-            f"Available: {[s.test_id for s in plan.steps]}"
+            f"No steps matched in '{group_id}' "
+            f"(test_id={test_id!r}, filters={filters}). "
+            f"Available: {[s.test_id for s in all_steps]}"
         )
 
     if plan.setup_fn:
@@ -167,9 +200,11 @@ def run_test_plan(
 
     failures: list[str] = []
 
+    upload_env = {"LUMEN_NO_UPLOAD": "1"} if no_upload else {}
+
     # Plan-level env_vars wrap all steps — set once, persist across the whole plan.
     first_ctx = _build_repro_context(plan, steps[0], build_env)
-    with temp_environ(first_ctx["plan_env_vars"]):
+    with temp_environ({**first_ctx["plan_env_vars"], **upload_env}):
         for step in steps:
             ctx = _build_repro_context(plan, step, build_env)
             logger.info("[%s/%s] starting", group_id, step.test_id)
@@ -201,7 +236,7 @@ def run_test_plan(
                     logger.info("[%s/%s] passed", group_id, step.test_id)
                 except Exception as e:
                     logger.error("[%s/%s] FAILED: %s", group_id, step.test_id, e)
-                    _print_repro(group_id, step, ctx)
+                    _print_repro(group_id, step, build_env, ctx)
                     failures.append(step.test_id)
 
     if failures:

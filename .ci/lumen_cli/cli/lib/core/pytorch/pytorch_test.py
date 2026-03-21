@@ -15,6 +15,10 @@ class PytorchTestRunner(BaseRunner):
         self.cmd = getattr(args, "cmd", None)
         self.shard_id = getattr(args, "shard_id", 1)
         self.num_shards = getattr(args, "num_shards", 1)
+        self.no_upload = getattr(args, "no_upload", False)
+        # --filter key=value pairs → dict
+        raw_filters = getattr(args, "filter", []) or []
+        self.filters = dict(f.split("=", 1) for f in raw_filters) if raw_filters else None
 
     def run(self) -> None:
         # --group-id: direct invocation or single-step repro, no resolution needed.
@@ -29,6 +33,8 @@ class PytorchTestRunner(BaseRunner):
             build_env=self.build_env,
             test_id=self.test_id,
             cmd=self.cmd,
+            filters=self.filters,
             shard_id=self.shard_id,
             num_shards=self.num_shards,
+            no_upload=self.no_upload,
         )

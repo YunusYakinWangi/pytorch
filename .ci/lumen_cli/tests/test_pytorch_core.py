@@ -569,8 +569,8 @@ class TestBenchmarkTestPlan:
         step_ids = [s.test_id for s in plan.steps]
         assert "resnet50" in step_ids
         assert "BERT_pytorch" in step_ids
-        assert "_join_results" in step_ids
-        assert step_ids[-1] == "_join_results"
+        assert "join_results" in step_ids
+        assert step_ids[-1] == "join_results"
 
     def test_per_model_output_path_format(self):
         plan = BenchmarkTestPlan(
@@ -592,7 +592,7 @@ class TestBenchmarkTestPlan:
         assert "cuda" in path
         assert path.startswith("test/test-reports")
 
-    def test_join_results_called_with_all_paths(self, patch_lib):
+    def testjoin_results_called_with_all_paths(self, patch_lib):
         joined: list[list[str]] = []
         plan = BenchmarkTestPlan(
             group_id="bench_a",
@@ -609,7 +609,7 @@ class TestBenchmarkTestPlan:
         with (
             MagicMock() as mock_run,
         ):
-            for step in plan.steps[:-1]:  # all except _join_results
+            for step in plan.steps[:-1]:  # all except join_results
                 step.fn = lambda: None
 
             patch_lib.run_test_plan("bench_a", "pytorch-cuda12.1", library=lib)
