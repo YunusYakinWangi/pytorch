@@ -2,6 +2,7 @@
 #include <ATen/Dispatch.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/csrc/distributed/c10d/NCCLUtils.hpp>
+#include <torch/csrc/distributed/c10d/symm_mem/macros.hpp>
 #include <torch/csrc/distributed/c10d/symm_mem/nccl_dev_cap.hpp>
 #include <torch/csrc/distributed/c10d/symm_mem/nccl_extension.hpp>
 #include <torch/csrc/distributed/c10d/symm_mem/nccl_devcomm_manager.hpp>
@@ -91,7 +92,7 @@ __global__ void reduce_scatter_offset_kernel(
       devComm,
       ncclTeamLsa(devComm),
       devComm.lsaBarrier,
-      static_cast<int>(blockIdx.x)};
+      blockIdx.x};
   // Acquire: wait until all peers have written their data into the window.
   bar.sync(coop, cuda::memory_order_acquire);
 
@@ -353,9 +354,7 @@ void nccl_reduce_scatter_offset(
   // Each owned (slot, local_block) pair gets one CTA; the flat CTA index is
   // the LSA barrier index.  All ranks launch the same total_ctas because
   // owned_sizes[j] is consistent, so every rank's ctas_offset is identical.
-  AT_DISPATCH_FLOATING_TYPES_AND2(
-      at::kBFloat16,
-      at::kHalf,
+  AT_DISPATCH_NV_FLOATS(
       input.scalar_type(),
       "nccl_reduce_scatter_offset",
       [&]() {
