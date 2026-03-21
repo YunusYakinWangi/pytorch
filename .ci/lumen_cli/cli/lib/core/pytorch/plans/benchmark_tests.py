@@ -13,6 +13,7 @@ from cli.lib.core.pytorch.pytorch_test_library import (
     BenchmarkTestPlan,
     is_cuda,
     is_rocm,
+    is_xpu,
 )
 
 
@@ -49,12 +50,12 @@ BENCHMARK_TEST_PLANS: dict[str, BenchmarkTestPlan] = {
     "pytorch_inductor_smoketest": BenchmarkTestPlan(
         group_id="pytorch_inductor_smoketest",
         title="Inductor Torchbench Smoketest",
-        run_on=[is_cuda, is_rocm],  # callables: cuda-only logic vs rocm-only logic
-        device="cuda",
+        run_on=[is_cuda, is_rocm],
+        device={is_xpu: "xpu", "cpu": "cpu", is_cuda: "cuda", is_rocm: "cuda"},
         backend="inductor",
         suite="torchbench",
-        modes=["training"],
-        dtype="float16",
+        modes={is_rocm: ["training", "inference"], is_cuda: ["training"]},
+        dtype={is_rocm: "amp", is_cuda: ["float16", "amp"]},
         models=[
             "BERT_pytorch",
             "resnet50",
@@ -64,6 +65,6 @@ BENCHMARK_TEST_PLANS: dict[str, BenchmarkTestPlan] = {
             paths,
             merged_path="test/test-reports/inductor_smoketest_merged.csv",
         ),
-        steps=[],  # populated by __post_init__
+        steps=[],
     ),
 }

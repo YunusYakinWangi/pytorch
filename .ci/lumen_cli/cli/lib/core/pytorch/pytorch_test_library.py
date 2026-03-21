@@ -4,7 +4,7 @@ import functools
 import os
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Union
+from typing import Any, Union
 
 
 # ---------------------------------------------------------------------------
@@ -37,25 +37,70 @@ def resolve_env_vars(spec: EnvVarsSpec, build_env: str) -> dict[str, str]:
 
 
 # ---------------------------------------------------------------------------
-# Common pre-built conditions for readability in plan definitions
+# EnvMap — declarative env-conditional value resolution
+#
+# Instead of a lambda, use a dict keyed by EnvCondition.
+# First matching condition wins.
+#
+#   device={is_xpu: "xpu", "cpu": "cpu", is_cuda: "cuda", is_rocm: "cuda"}
+#   modes={is_rocm: ["training", "inference"], is_cuda: ["training"]}
+#   dtype={is_rocm: "amp", is_cuda: ["float16", "amp"]}
+#
+# Also accepts a plain value (str / list) — passed through unchanged.
 # ---------------------------------------------------------------------------
 
+# EnvMap: dict keyed by EnvCondition, first matching key wins.
+# Values can be any type — str, list[str], etc.
+EnvMap = dict[EnvCondition, Any]
+
+
+def resolve(spec: Any, build_env: str) -> Any:
+    """
+    Resolve an EnvMap or plain value against build_env.
+
+    - Plain value (str, list, …) → returned as-is.
+    - dict (EnvMap)              → first key (EnvCondition) that matches wins.
+                                   Raises RuntimeError if nothing matches.
+    """
+    if not isinstance(spec, dict):
+        return spec
+    for condition, value in spec.items():
+        if matches_env(condition, build_env):
+            return value
+    raise RuntimeError(
+        f"No condition in EnvMap matched build_env={build_env!r}. "
+        f"Conditions: {list(spec.keys())}"
+    )
+
+
+def resolve_to_list(spec: Any, build_env: str) -> list[str]:
+    """Resolve spec and normalise to list[str] (wraps a bare str in a list)."""
+    value = resolve(spec, build_env)
+    return [value] if isinstance(value, str) else list(value)
+
+
+# Convenience type aliases for BenchmarkTestPlan fields.
+# Each accepts a plain value or an EnvMap keyed by EnvCondition.
+DeviceSpec = Union[str, EnvMap]             # resolves to str
+ModeSpec   = Union[list[str], EnvMap]       # resolves to list[str]
+DtypeSpec  = Union[str, list[str], EnvMap]  # resolves to str | list[str] → normalised to list[str]
+
+
+# ---------------------------------------------------------------------------
+# Common pre-built conditions for readability in plan definitions
+# ---------------------------------------------------------------------------
 
 def is_cuda(env: str) -> bool:
     return "cuda" in env and "rocm" not in env
 
-
 def is_rocm(env: str) -> bool:
     return "rocm" in env
-
 
 def is_xpu(env: str) -> bool:
     return "xpu" in env
 
-
 def is_gpu(env: str) -> bool:
     return is_cuda(env) or is_rocm(env) or is_xpu(env)
-
 
 def is_cpu_only(env: str) -> bool:
     return not is_gpu(env)
@@ -70,6 +115,9 @@ def is_cpu_only(env: str) -> bool:
 class TestStep:
     test_id: str
     fn: Callable[[], None]
+    # Arbitrary key=value metadata describing this step's combo (model, mode, dtype…).
+    # Used by run_test_plan --filter to select a subset of steps at repro time.
+    params: dict[str, str] = field(default_factory=dict)
     env_vars: EnvVarsSpec = field(default_factory=dict)
     # Each inner list is a separate pip install invocation, preserving flags and order.
     # e.g. [["--pre", "torchao", "--index-url", "https://..."], ["-e", "."]]
@@ -117,11 +165,20 @@ class BasePytorchTestPlan:
     test_configs: list[EnvCondition] = field(default_factory=list)
 
     def is_eligible(self, build_env: str, test_config: str = "") -> bool:
-        env_ok = not self.run_on or any(matches_env(c, build_env) for c in self.run_on)
+        env_ok = not self.run_on or any(
+            matches_env(c, build_env) for c in self.run_on
+        )
         config_ok = not self.test_configs or any(
             matches_env(c, test_config) for c in self.test_configs
         )
         return env_ok and config_ok
+
+    def get_steps(self, build_env: str) -> list[TestStep]:
+        """
+        Return the steps to run for the given build_env.
+        Override in subclasses for custom step generation.
+        """
+        return self.steps
 
 
 # ---------------------------------------------------------------------------
@@ -132,68 +189,120 @@ class BasePytorchTestPlan:
 @dataclass
 class CoreTestPlan(BasePytorchTestPlan):
     """Standard python test/run_test.py based tests."""
+    pass
 
 
 @dataclass
 class BenchmarkTestPlan(BasePytorchTestPlan):
     """
-    Inductor / dynamo benchmark tests, one TestStep per model.
+    Inductor / dynamo benchmark tests.
 
-    __post_init__ auto-generates one step per model plus a final _join_results
-    step. This lets a single failing model be reproduced in isolation:
+    Steps are generated lazily via get_steps(build_env), which resolves
+    env-conditional axes (device, modes, dtype) and expands the cartesian
+    product of (models × modes × dtypes) into individual TestSteps.
 
-        python -m cli.run test pytorch-core \\
-            --group-id pytorch_inductor_smoketest --test-id BERT_pytorch
+    Each step carries a params dict so --filter can select any subset:
+        --filter model=BERT_pytorch
+        --filter mode=training
+        --filter model=BERT_pytorch --filter dtype=float16
+
+    device / modes / dtype accept:
+        - a plain value  ("cuda", ["training"], "float16")
+        - a list         (["float16", "amp"])
+        - an EnvMap dict ({is_cuda: "cuda", is_rocm: "cuda", is_xpu: "xpu"})
     """
 
-    device: str = "cuda"
+    device: DeviceSpec = "cuda"
     backend: str = "inductor"
-    modes: list[str] = field(default_factory=list)  # e.g. ["training", "inference"]
-    dtype: str = "amp"
+    modes: ModeSpec = field(default_factory=list)
+    dtype: DtypeSpec = "amp"
     suite: str = "torchbench"  # torchbench | huggingface | timm_models
     models: list[str] = field(default_factory=list)
     output_dir: str = "test/test-reports"
     extra_benchmark_flags: list[str] = field(default_factory=list)
-    # Called once after all per-model CSVs exist; receives per-model output paths.
+    # Called once after all per-combo CSVs exist; receives per-combo output paths.
     join_results_fn: Callable[[list[str]], None] | None = None
 
-    def __post_init__(self) -> None:
-        if self.models:
-            self.steps = self._build_steps()
+    def output_path(self, model: str, mode: str, dtype: str, device: str) -> str:
+        """
+        Return the CSV output path for a single (model, mode, dtype, device) combo.
 
-    def _per_model_output_path(self, model: str) -> str:
-        mode_tag = "_".join(self.modes) if self.modes else "default"
+        Override to customise the output file naming convention.
+        Called by get_steps() and join_results(); both use the same path so
+        the join step can locate every per-combo file.
+        """
         return os.path.join(
             self.output_dir,
-            f"{self.backend}_{self.suite}_{model}_{mode_tag}_{self.device}.csv",
+            f"{self.backend}_{self.suite}_{model}_{mode}_{dtype}_{device}.csv",
         )
 
-    def _run_model(self, model: str) -> None:
+    def run_one(self, model: str, mode: str, dtype: str, device: str) -> None:
+        """
+        Run the benchmark script for a single (model, mode, dtype, device) combo.
+
+        Override to change the invocation — e.g. different script, extra flags,
+        or a completely different runner. All args are already resolved from the
+        plan's EnvMap fields before this is called.
+        """
         from cli.lib.core.pytorch.run_test_helper import run_command_checked
 
         flags = [
-            f"--device {self.device}",
+            f"--device {device}",
             f"--backend {self.backend}",
             f"--only {model}",
-            f"--output {self._per_model_output_path(model)}",
+            f"--output {self.output_path(model, mode, dtype, device)}",
         ] + self.extra_benchmark_flags
 
-        for mode in self.modes or []:
-            run_command_checked(
-                f"python benchmarks/dynamo/{self.suite}.py "
-                + " ".join(flags)
-                + f" --{mode} --{self.dtype}"
-            )
+        run_command_checked(
+            f"python benchmarks/dynamo/{self.suite}.py "
+            + " ".join(flags)
+            + f" --{mode} --{dtype}"
+        )
 
-    def _join_results(self) -> None:
+    def join_results(self, output_paths: list[str]) -> None:
+        """
+        Called once after all per-combo steps finish, with the list of CSV paths.
+
+        Delegates to join_results_fn if provided; no-op otherwise.
+        Override for custom post-processing (e.g. upload, comparison, alerting).
+        """
         if self.join_results_fn is None:
             return
-        self.join_results_fn([self._per_model_output_path(m) for m in self.models])
+        self.join_results_fn(output_paths)
 
-    def _build_steps(self) -> list[TestStep]:
-        steps = [
-            TestStep(test_id=model, fn=functools.partial(self._run_model, model))
-            for model in self.models
-        ]
-        steps.append(TestStep(test_id="_join_results", fn=self._join_results))
+    def get_steps(self, build_env: str) -> list[TestStep]:
+        """
+        Resolve env-conditional axes and expand into one TestStep per
+        (model × mode × dtype) combo, plus a final join_results step.
+
+        Each step's params dict carries {"model", "mode", "dtype"} so that
+        --filter can reproduce any subset without re-running the whole plan:
+            --test-id BERT_pytorch                          # all combos for that model
+            --test-id BERT_pytorch --filter mode=training  # specific combo
+
+        Override entirely for custom step generation (e.g. subclass XYBenchmarkPlan).
+        To change only the per-combo invocation, override run_one instead.
+        To change only the output path format, override output_path instead.
+        """
+        device = resolve(self.device, build_env)
+        modes  = resolve_to_list(self.modes, build_env)
+        dtypes = resolve_to_list(self.dtype, build_env)
+
+        output_paths = []
+        steps = []
+        for model in self.models:
+            for mode in modes:
+                for dtype in dtypes:
+                    path = self.output_path(model, mode, dtype, device)
+                    output_paths.append(path)
+                    steps.append(TestStep(
+                        test_id=model,
+                        fn=functools.partial(self.run_one, model, mode, dtype, device),
+                        params={"model": model, "mode": mode, "dtype": dtype},
+                    ))
+
+        steps.append(TestStep(
+            test_id="join_results",
+            fn=functools.partial(self.join_results, output_paths),
+        ))
         return steps

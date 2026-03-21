@@ -106,6 +106,19 @@ def _register_pytorch_core_commands(subparsers: argparse._SubParsersAction) -> N
         default=1,
         help="total number of shards",
     )
+    parser.add_argument(
+        "--filter",
+        metavar="KEY=VALUE",
+        action="append",
+        default=[],
+        help="filter steps by params, e.g. --filter mode=training --filter dtype=float16",
+    )
+    parser.add_argument(
+        "--no-upload",
+        action="store_true",
+        default=False,
+        help="strip artifact-upload flags (e.g. --upload-artifacts-while-running) from test invocations",
+    )
     parser.set_defaults(func=lambda args: PytorchTestRunner(args).run())
 
 
