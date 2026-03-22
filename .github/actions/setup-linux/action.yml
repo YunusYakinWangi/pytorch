@@ -172,8 +172,6 @@ runs:
             echo "ERROR: unsupported clang version '${CLANG_VERSION}', available: 15, 18, 20"
             exit 1
           fi
-
-          clang --version
         else
           # On AlmaLinux 9, GCC 11 is the system default at /usr/bin/gcc.
           # Only install gcc-toolset for newer versions that aren't already available.
@@ -194,8 +192,6 @@ runs:
             echo "PATH=${TOOLSET_ROOT}/bin:${PATH}" >> "${GITHUB_ENV}"
             echo "LD_LIBRARY_PATH=${TOOLSET_ROOT}/lib64:${TOOLSET_ROOT}/lib:${LD_LIBRARY_PATH}" >> "${GITHUB_ENV}"
           fi
-
-          gcc --version
         fi
 
     - name: Switch CUDA version
