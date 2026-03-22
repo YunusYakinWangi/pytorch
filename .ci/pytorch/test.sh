@@ -1764,6 +1764,7 @@ test_vec256() {
 }
 
 test_docs_test() {
+  pip install -r .ci/docker/requirements-docs.txt
   .ci/pytorch/docs-test.sh
 }
 
