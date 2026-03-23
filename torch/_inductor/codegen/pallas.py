@@ -3659,7 +3659,7 @@ from torch.utils._ordered_set import OrderedSet
 from torch._inductor.runtime.runtime_utils import (
     pallas_compute_tiling, pallas_make_block_spec, pallas_permute,
     pallas_gpu_align_output_specs, pallas_gpu_pad_inputs,
-    pallas_gpu_unpad_results,
+    pallas_gpu_unpad_results, pallas_ensure_nonzero_rank,
     torch_dtype_to_jax_runtime,
 )
 """
@@ -4156,7 +4156,10 @@ from torch._inductor.runtime.runtime_utils import (
         )
         code.writeline(")(")
         if ctx.kernel_input_params:
-            code.writeline(f"    {', '.join(ctx.kernel_input_params)},")
+            kernel_input_params_nonzero_rank = [
+                f"pallas_ensure_nonzero_rank({p})" for p in ctx.kernel_input_params
+            ]
+            code.writeline(f"    {', '.join(kernel_input_params_nonzero_rank)},")
         code.writeline(")")
         # Reshape results back to original shapes (restores 0-d from promoted (1,))
         code.writeline("if isinstance(_result, tuple):")
