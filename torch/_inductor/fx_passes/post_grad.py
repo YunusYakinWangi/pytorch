@@ -247,12 +247,12 @@ def post_grad_passes(gm: torch.fx.GraphModule, is_inference: bool):
 
     # SPMD verification — before collective reordering passes.
     if (
-        config.aten_distributed_optimizations.verify_spmd_graph
+        config.aten_distributed_optimizations.spmd_check
         and _needs_spmd_graph_preservation()
     ):
-        from torch._inductor.fx_passes.overlap_scheduling import _verify_spmd_graph
+        from torch._inductor.fx_passes.spmd_check import spmd_check
 
-        _verify_spmd_graph(gm)
+        spmd_check(gm)
 
     collectives_bucketing: bool = False
 
@@ -1056,6 +1056,10 @@ def _needs_spmd_graph_preservation() -> bool:
 
 @register_noop_decomp(aten.slice)
 def slice_noop(self, dim=0, start=None, end=None, step=1):
+    if _needs_spmd_graph_preservation():
+        # Keep no-op slices so all ranks produce identical FX graphs (SPMD)
+        # with matching op counts and runtime estimations.
+        return False
     if start is None or end is None:
         return False
 
@@ -1099,6 +1103,10 @@ def repeat_noop(self, repeats):
 
 @register_noop_decomp(aten.constant_pad_nd)
 def constant_pad_nd(x, padding, fill_value=0):
+    if _needs_spmd_graph_preservation():
+        # Keep no-op pads so all ranks produce identical FX graphs (SPMD)
+        # with matching op counts and runtime estimations.
+        return False
     return all(p == 0 for p in padding)
 
 

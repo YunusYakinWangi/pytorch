@@ -1126,11 +1126,12 @@ class aten_distributed_optimizations:
     # Verify FX graphs are identical across ranks before overlap scheduling.
     # Detects non-SPMD graphs that would cause NCCL collective ordering
     # mismatches and hangs.
-    verify_spmd_graph: bool = True
+    spmd_check: bool = True
 
     # When True, crash with RuntimeError on SPMD mismatch instead of warning.
     # Fails fast instead of risking silent NCCL hang.
-    spmd_verify_crash_on_mismatch: bool = False
+    # TODO(ivankobzarev): enable by default after real-world testing.
+    spmd_check_crash_on_mismatch: bool = False
 
 
 def parallel_compile_enabled_internally() -> bool:
@@ -1819,8 +1820,9 @@ class triton:
     # Whether to upcast float16 / bfloat16 to float32 in triton codegen (Experimental)
     codegen_upcast_to_fp32 = True
 
-    # Whether persistent matmul kernels should be enabled this flag only has effect when on h100
-    # with a version of triton new enough to support TMA
+    # Whether persistent matmul kernels should be enabled. On NVIDIA H100+ with TMA support,
+    # this enables TMA persistent kernels. On AMD GPUs without TMA, this enables
+    # non-TMA persistent kernels as a fallback.
     enable_persistent_tma_matmul = (
         os.environ.get("ENABLE_PERSISTENT_TMA_MATMUL", "0") == "1"
     )
