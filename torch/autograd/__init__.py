@@ -521,11 +521,11 @@ def grad(
     t_inputs = tuple(i for i in inputs_tuple if is_tensor_like(i))
     overridable_args = t_outputs + t_inputs
     if has_torch_function(overridable_args):
-        return handle_torch_function(
+        result_tuple = handle_torch_function(
             grad,
             overridable_args,
             outputs,
-            inputs,  # pyrefly: ignore [bad-argument-type]
+            cast(Sequence[torch.Tensor] | Sequence[graph.GradientEdge], inputs_tuple),
             grad_outputs=grad_outputs,
             retain_graph=retain_graph,
             create_graph=create_graph,
@@ -534,6 +534,11 @@ def grad(
             is_grads_batched=is_grads_batched,
             materialize_grads=materialize_grads,
         )
+        if isinstance(inputs, Mapping):
+            if isinstance(inputs, OrderedDict):
+                return OrderedDict(zip(inputs.keys(), result_tuple, strict=True))
+            return dict(zip(inputs.keys(), result_tuple, strict=True))
+        return result_tuple
 
     if not only_inputs:
         warnings.warn(
