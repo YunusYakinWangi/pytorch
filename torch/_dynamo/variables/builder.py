@@ -3306,6 +3306,11 @@ def is_dynamic_source(source_name: str) -> bool:
                 source_name,
                 pattern,
             )
+            symbolic_shape_log.info(
+                "%s was marked dynamic due to dynamic source allowlist pattern: %s",
+                source_name,
+                pattern,
+            )
             return True
     return False
 
