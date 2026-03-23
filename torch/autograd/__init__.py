@@ -592,16 +592,17 @@ def grad(
         result = tuple(
             output
             if output is not None
-            else torch.zeros_like(
-                input,  # pyrefly: ignore [bad-argument-type]
-                requires_grad=create_graph,
+            else torch.zeros_like(input, requires_grad=create_graph)
+            for (output, input) in zip(
+                result,
+                cast(tuple[torch.Tensor, ...], inputs_tuple),
+                strict=True,
             )
-            for (output, input) in zip(result, inputs_tuple)
         )
     if isinstance(inputs, Mapping):
         if isinstance(inputs, OrderedDict):
-            return OrderedDict(zip(inputs.keys(), result))
-        return dict(zip(inputs.keys(), result))
+            return OrderedDict(zip(inputs.keys(), result, strict=True))
+        return dict(zip(inputs.keys(), result, strict=True))
     return result
 
 
