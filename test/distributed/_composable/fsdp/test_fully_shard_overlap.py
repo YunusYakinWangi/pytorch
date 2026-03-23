@@ -291,12 +291,87 @@ class TestFullyShardPerParamMeshOverlap(FSDPTest):
     def world_size(self) -> int:
         return min(4, torch.get_device_module(device_type).device_count())
 
+    @staticmethod
+    @contextlib.contextmanager
+    def _delayed_foreach_reduce(sleep_ms: int):
+        """Inject a CUDA sleep after each reduce-scatter / all-reduce.
+
+        Each process group gets its own delay stream so that delays for
+        different groups run concurrently (just like real NCCL ops on
+        separate communicators).  The event returned to FSDP is replaced
+        with a delayed event on this per-group stream.
+
+        This amplifies the difference between per-group and shared RS
+        state:
+        - Per-group RS state: the compute stream waits only on its own
+          group's delayed event, so dp and efsdp delays overlap.
+        - Shared RS state: the compute stream waits on *all* groups'
+          delayed events, serializing the dp and efsdp delays.
+        """
+        import torch.distributed.fsdp._fully_shard._fsdp_param_group as _pg_mod
+
+        orig = _pg_mod.foreach_reduce
+        # One delay stream per process group so that sleeps for different
+        # groups (e.g. dp vs efsdp reduce-scatter) execute in parallel,
+        # mirroring how real NCCL ops on separate communicators overlap.
+        delay_streams: dict[dist.ProcessGroup, torch.cuda.Stream] = {}
+
+        def wrapped(
+            fsdp_params,
+            unsharded_grads,
+            reduce_scatter_group,
+            reduce_scatter_stream,
+            *args,
+            **kwargs,
+        ):
+            result = orig(
+                fsdp_params,
+                unsharded_grads,
+                reduce_scatter_group,
+                reduce_scatter_stream,
+                *args,
+                **kwargs,
+            )
+            rs_input, rs_event, *rest = result
+            if reduce_scatter_group not in delay_streams:
+                delay_streams[reduce_scatter_group] = device_module.Stream()
+            ds = delay_streams[reduce_scatter_group]
+            ds.wait_event(rs_event)
+            with device_module.stream(ds):
+                device_module._sleep(int(sleep_ms * get_cycles_per_ms()))
+                delayed_event = ds.record_event()
+            return (rs_input, delayed_event, *rest)
+
+        dist.barrier()
+        _pg_mod.foreach_reduce = wrapped
+        try:
+            yield
+        finally:
+            dist.barrier()
+            _pg_mod.foreach_reduce = orig
+
     @skip_if_rocm_arch_multiprocess(MI200_ARCH)
     @skip_if_lt_x_gpu(4)
     @unittest.skipIf(TEST_HPU, "Sleep is not supported on HPU")
     def test_fully_shard_per_param_mesh_training_overlap(self):
+        self._test_per_param_mesh_overlap(simulate_no_grad_input=False)
+
+    @skip_if_rocm_arch_multiprocess(MI200_ARCH)
+    @skip_if_lt_x_gpu(4)
+    @unittest.skipIf(TEST_HPU, "Sleep is not supported on HPU")
+    def test_fully_shard_per_param_mesh_no_grad_input_overlap(self):
+        self._test_per_param_mesh_overlap(simulate_no_grad_input=True)
+
+    def _test_per_param_mesh_overlap(self, simulate_no_grad_input: bool):
         """Verify per-param-group reduce-scatter state avoids cross-group
-        serialization in per-param-mesh FSDP with expert parallelism."""
+        serialization in per-param-mesh FSDP with expert parallelism.
+
+        When ``simulate_no_grad_input`` is True, block inputs are detached so
+        that autograd's RegisterPostBackwardFunction nodes are never inserted,
+        exercising the safety-net path in _root_post_backward_final_callback.
+        """
+        import types
+
         from torch.distributed._composable.replicate_with_fsdp import replicate
 
         ep_degree = 2
@@ -373,68 +448,10 @@ class TestFullyShardPerParamMeshOverlap(FSDPTest):
             replicate(model, mesh=dp_mesh)
             return model
 
-        @contextlib.contextmanager
-        def _delayed_foreach_reduce(sleep_ms: int):
-            """Inject a CUDA sleep after each reduce-scatter / all-reduce.
-
-            Each process group gets its own delay stream so that delays for
-            different groups run concurrently (just like real NCCL ops on
-            separate communicators).  The event returned to FSDP is replaced
-            with a delayed event on this per-group stream.
-
-            This amplifies the difference between per-group and shared RS
-            state:
-            - Per-group RS state: the compute stream waits only on its own
-              group's delayed event, so dp and efsdp delays overlap.
-            - Shared RS state: the compute stream waits on *all* groups'
-              delayed events, serializing the dp and efsdp delays.
-            """
-            import torch.distributed.fsdp._fully_shard._fsdp_param_group as _pg_mod
-
-            orig = _pg_mod.foreach_reduce
-            # One delay stream per process group so that sleeps for different
-            # groups (e.g. dp vs efsdp reduce-scatter) execute in parallel,
-            # mirroring how real NCCL ops on separate communicators overlap.
-            delay_streams: dict[dist.ProcessGroup, torch.cuda.Stream] = {}
-
-            def wrapped(
-                fsdp_params,
-                unsharded_grads,
-                reduce_scatter_group,
-                reduce_scatter_stream,
-                *args,
-                **kwargs,
-            ):
-                result = orig(
-                    fsdp_params,
-                    unsharded_grads,
-                    reduce_scatter_group,
-                    reduce_scatter_stream,
-                    *args,
-                    **kwargs,
-                )
-                rs_input, rs_event, *rest = result
-                if reduce_scatter_group not in delay_streams:
-                    delay_streams[reduce_scatter_group] = device_module.Stream()
-                ds = delay_streams[reduce_scatter_group]
-                ds.wait_event(rs_event)
-                with device_module.stream(ds):
-                    device_module._sleep(int(sleep_ms * get_cycles_per_ms()))
-                    delayed_event = ds.record_event()
-                return (rs_input, delayed_event, *rest)
-
-            dist.barrier()
-            _pg_mod.foreach_reduce = wrapped
-            try:
-                yield
-            finally:
-                dist.barrier()
-                _pg_mod.foreach_reduce = orig
-
         # Both models measured under _delayed_foreach_reduce so the delay
         # applies uniformly to foreach_reduce (all-reduce for replicate,
         # reduce-scatter for FSDP).
-        with _delayed_foreach_reduce(comm_sleep_ms):
+        with self._delayed_foreach_reduce(comm_sleep_ms):
             # --- replicate + EP (baseline) ---
             rep_model = _build_replicate_model()
 
@@ -449,6 +466,25 @@ class TestFullyShardPerParamMeshOverlap(FSDPTest):
             del rep_model
             # --- FSDP + EP ---
             fsdp_model = _build_fsdp_model()
+
+            if simulate_no_grad_input:
+                # Detach inputs to each block so that autograd's
+                # RegisterPostBackwardFunction nodes are never inserted,
+                # forcing the safety-net path in
+                # _root_post_backward_final_callback.
+                def _no_grad_input_forward(self, tokens):
+                    h = self.tok_embeddings(tokens)
+                    h = h + self.pos_embeddings(
+                        torch.arange(tokens.size(1), device=tokens.device)
+                    )
+                    for layer in self.layers:
+                        h = h + layer(h.detach())
+                    h = self.norm(h)
+                    return self.output(h).float()
+
+                fsdp_model.forward = types.MethodType(
+                    _no_grad_input_forward, fsdp_model
+                )
 
             def fsdp_fwd_bwd():
                 fsdp_model(inp).sum().backward()  # noqa: F821
