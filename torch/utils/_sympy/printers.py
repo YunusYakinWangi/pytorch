@@ -259,6 +259,12 @@ class PythonPrinter(ExprPrinter):
         # pyrefly: ignore [missing-attribute]
         return f"max({', '.join(map(self._print, expr.args))})"
 
+    def _print_Min(self, expr: sympy.Expr) -> str:
+        if len(expr.args) < 2:
+            raise AssertionError("Min expects at least two arguments")
+        # pyrefly: ignore [missing-attribute]
+        return f"min({', '.join(map(self._print, expr.args))})"
+
     def _print_OpaqueUnaryFn_cos(self, expr: sympy.Expr) -> str:
         if len(expr.args) != 1:
             raise AssertionError("cos expects exactly one argument")
