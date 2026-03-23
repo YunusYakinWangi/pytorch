@@ -7934,6 +7934,14 @@ class TestMPS(TestCaseMPS):
         mps_x = torch.randn(5, device='mps')
         self.assertEqual(mps_x, mps_y)
 
+    def test_get_device_capability(self):
+        cap = torch.accelerator.get_device_capability()
+        supported_dtypes = cap["supported_dtypes"]
+        for dtype in MPS_DTYPES:
+            self.assertIn(dtype, supported_dtypes)
+        self.assertNotIn(torch.double, supported_dtypes)
+        self.assertNotIn(torch.cdouble, supported_dtypes)
+
     def test_device_synchronize(self):
         # just running some ops each followed by a synchronize to wait for
         # MPS stream to finish running each of them
