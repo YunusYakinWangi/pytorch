@@ -524,22 +524,17 @@ class FSDPParamGroup:
                     fsdp_param.unsharded_param.grad = None
             if self.reshard_after_backward:
                 self.reshard()
+        if (
+            self._param_group_index == self._num_param_groups - 1
+            and self.comm_ctx.reduce_scatter_states
+        ):
+            for rs_state in self.comm_ctx.reduce_scatter_states:
+                if rs_state.event is not None:
+                    self.device_handle.current_stream().wait_event(rs_state.event)
+            self.comm_ctx.reduce_scatter_states.clear()
         if len(fsdp_params_with_grad) == 0:
-            # If the highest-indexed param group (index N-1, first in
-            # backward order) has no grads, reduce_scatter_states won't
-            # be cleared here; the fallback in
-            # _root_post_backward_final_callback will wait on and clear
-            # them, losing per-group RS overlap for this iteration.
             return
         with record_function(self._with_fqn("FSDP::post_backward_reduce")):
-            if (
-                self._param_group_index == self._num_param_groups - 1
-                and self.comm_ctx.reduce_scatter_states
-            ):
-                for rs_state in self.comm_ctx.reduce_scatter_states:
-                    if rs_state.event is not None:
-                        self.device_handle.current_stream().wait_event(rs_state.event)
-                self.comm_ctx.reduce_scatter_states.clear()
             all_reduce_pg = (
                 self._all_reduce_process_group
                 if isinstance(self.mesh_info, DDPMeshInfo)
@@ -640,17 +635,27 @@ class FSDPParamGroup:
             curr_index = self._post_forward_indices.pop()
             if self._num_param_groups > 1:
                 # Backward fires groups in reverse forward order:
-                # N-1, N-2, ..., 1, 0. Prefetch from group 1 (2nd to
-                # last) so the AG overlaps with group 0's RS without
-                # starting too early.
+                # N-1, N-2, ..., 1, 0.  Index 1 is always the
+                # penultimate group regardless of N.  Prefetching here
+                # lets the next module's AG overlap with group 0's RS
+                # without holding unsharded params too long (as would
+                # happen if we prefetched from N-1).
                 if self._param_group_index != 1:
                     return
                 curr_modules = self.modules
+                target_modules: tuple[nn.Module, ...] | None = None
                 for step in range(1, curr_index + 1):
                     target = self.comm_ctx.post_forward_order[curr_index - step]
-                    if target.modules is not curr_modules:
-                        self._prefetch_unshard(target, "backward")
+                    if target.modules is curr_modules:
+                        continue
+                    if target_modules is None:
+                        target_modules = target.modules
+                    elif target.modules is not target_modules:
                         break
+                    # Prefetch all groups of the target module in
+                    # reverse forward order (highest index first),
+                    # matching the explicit path in _pre_backward.
+                    self._prefetch_unshard(target, "backward")
             elif curr_index > 0:
                 target = self.comm_ctx.post_forward_order[curr_index - 1]
                 self._prefetch_unshard(target, "backward")
