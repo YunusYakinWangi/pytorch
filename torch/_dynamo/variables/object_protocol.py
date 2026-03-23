@@ -68,6 +68,24 @@ def python_constant_richcompare_impl(
     return ConstantVariable.create(result)
 
 
+def object_richcompare(
+    self: "VariableTracker",
+    tx: "InstructionTranslator",
+    other: "VariableTracker",
+    op: str,
+) -> "VariableTracker":
+    """richcompare_impl for VTs whose CPython type's tp_richcompare is object_richcompare.
+
+    Mirrors PyBaseObject_Type.tp_richcompare (Objects/typeobject.c): identity
+    for __eq__/__ne__, NotImplemented for ordering ops. Used for types where
+    tp_richcompare is NULL/0 (inheriting object_richcompare), e.g., PyType_Type,
+    PyModule_Type. Delegates to python_constant_richcompare_impl, which uses
+    the backing Python object's __eq__/__ne__ (identity-based for these types)
+    and returns NotImplemented for ordering, matching object_richcompare behavior.
+    """
+    return python_constant_richcompare_impl(self, tx, other, op)
+
+
 def vt_identity_compare(
     tx: "InstructionTranslator",
     left: "VariableTracker",

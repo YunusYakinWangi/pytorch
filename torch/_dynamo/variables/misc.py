@@ -1650,10 +1650,11 @@ class PythonModuleVariable(VariableTracker):
         other: VariableTracker,
         op: str,
     ) -> VariableTracker:
-        from .constant import ConstantVariable
+        from .object_protocol import object_richcompare
 
-        # CPython: modules use identity comparison (object_richcompare)
-        return ConstantVariable.create(NotImplemented)
+        # CPython: PyModule_Type (PyModuleObject / PyModuleDef) has tp_richcompare = 0,
+        # inheriting object_richcompare — identity for __eq__/__ne__, NotImplemented for ordering.
+        return object_richcompare(self, tx, other, op)
 
     def call_obj_hasattr(
         self, tx: "InstructionTranslator", name: str

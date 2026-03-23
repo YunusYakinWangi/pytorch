@@ -1064,8 +1064,11 @@ class UserDefinedClassVariable(UserDefinedVariable):
         other: "VariableTracker",
         op: str,
     ) -> "VariableTracker":
-        # CPython: type objects use identity comparison (object_richcompare)
-        return variables.ConstantVariable.create(NotImplemented)
+        from .object_protocol import object_richcompare
+
+        # CPython: PyType_Type.tp_richcompare = 0, so it inherits object_richcompare
+        # from PyBaseObject_Type — identity for __eq__/__ne__, NotImplemented for ordering.
+        return object_richcompare(self, tx, other, op)
 
 
 class UserDefinedExceptionClassVariable(UserDefinedClassVariable):

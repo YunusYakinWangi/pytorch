@@ -525,18 +525,12 @@ class TorchScriptObjectVariable(UserDefinedObjectVariable):
         other: VariableTracker,
         op: str,
     ) -> VariableTracker:
-        from ..utils import richcmp_op
-        from .constant import ConstantVariable
+        from .object_protocol import python_constant_richcompare_impl
 
         # Evaluate comparison using real Python objects rather than tracing
         # into FakeScriptObject.__eq__ (which accesses .real_obj, an unregistered
         # opaque member).
-        try:
-            return ConstantVariable.create(
-                richcmp_op[op](self.as_python_constant(), other.as_python_constant())
-            )
-        except Exception:
-            return ConstantVariable.create(NotImplemented)
+        return python_constant_richcompare_impl(self, tx, other, op)
 
     def get_real_value(self) -> Any:
         return self.as_python_constant()
