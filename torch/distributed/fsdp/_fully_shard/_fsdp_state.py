@@ -214,8 +214,8 @@ class FSDPState(_State):
             num_groups = len(state._fsdp_param_groups)
             for i, fsdp_param_group in enumerate(state._fsdp_param_groups):
                 fsdp_param_group.comm_ctx = self._comm_ctx
-                fsdp_param_group._peer_param_group_index = i
-                fsdp_param_group._num_peer_param_groups = num_groups
+                fsdp_param_group._param_group_index = i
+                fsdp_param_group._num_param_groups = num_groups
 
     def _init_fqns(self) -> None:
         """Sets module and parameter FQN attributes for debugging."""

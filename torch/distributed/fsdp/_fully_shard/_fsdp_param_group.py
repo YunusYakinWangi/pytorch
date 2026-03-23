@@ -187,8 +187,8 @@ class FSDPParamGroup:
 
         # - Communication and communication/computation overlap
         self.comm_ctx = FSDPCommContext()
-        self._peer_param_group_index: int = 0
-        self._num_peer_param_groups: int = 1
+        self._param_group_index: int = 0
+        self._num_param_groups: int = 1
         # Group's indices in the shared post-forward order
         self._post_forward_indices: list[int] = []
         # Whether to reduce gradients at all (whether for FSDP or HSDP)
@@ -528,7 +528,7 @@ class FSDPParamGroup:
             return
         with record_function(self._with_fqn("FSDP::post_backward_reduce")):
             if (
-                self._peer_param_group_index == self._num_peer_param_groups - 1
+                self._param_group_index == self._num_param_groups - 1
                 and self.comm_ctx.reduce_scatter_states
             ):
                 for rs_state in self.comm_ctx.reduce_scatter_states:
@@ -634,10 +634,11 @@ class FSDPParamGroup:
                 return
             curr_index = self._post_forward_indices.pop()
             # Prefetch using the reverse post-forward order. Walk back
-            # num_peers steps so that each peer skips past same-block
-            # peers (already unsharded) and prefetches peers in the
-            # previous block. Redundant prefetches are no-ops.
-            for step in range(1, self._num_peer_param_groups + 1):
+            # num_param_groups steps so that each group skips past
+            # same-block groups (already unsharded) and prefetches
+            # groups in the previous block. Redundant prefetches are
+            # no-ops.
+            for step in range(1, self._num_param_groups + 1):
                 target_index = curr_index - step
                 if target_index < 0:
                     break
@@ -793,7 +794,7 @@ class FSDPParamGroup:
     def _with_fqn(self, label: str) -> str:
         if self._module_fqn:
             label = f"{label} ({self._module_fqn})"
-        if self._num_peer_param_groups > 1 and isinstance(self.mesh_info, FSDPMeshInfo):
+        if self._num_param_groups > 1 and isinstance(self.mesh_info, FSDPMeshInfo):
             label = f"{label} [pg={self.mesh_info.shard_mesh_size}]"
         return label
 
