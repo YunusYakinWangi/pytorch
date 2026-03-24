@@ -216,19 +216,15 @@ class GraphBackendRouter(_GraphRouterBase[Any]):
 
     def _match_rules(self, graph_id: int) -> Any | None:
         """Match rules with conflict detection for overlapping filters."""
-        result = None
-        result_name = None
-        for f, backend in self._rules:
-            if graph_id in f:
-                name = self._backend_names[id(backend)]
-                if result is not None and result is not backend:
-                    raise ValueError(
-                        f"Conflicting backend override for graph {graph_id}: "
-                        f"matched both '{result_name}' and '{name}'"
-                    )
-                result = backend
-                result_name = name
-        return result
+        matches = {id(backend): backend for f, backend in self._rules if graph_id in f}
+        if len(matches) > 1:
+            names = [self._backend_names[bid] for bid in matches]
+            raise ValueError(
+                f"Conflicting backend override for graph {graph_id}: matched {names}"
+            )
+        if matches:
+            return next(iter(matches.values()))
+        return None
 
     def __repr__(self) -> str:
         if not self._rules:
