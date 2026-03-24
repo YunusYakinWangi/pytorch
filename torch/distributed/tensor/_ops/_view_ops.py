@@ -91,7 +91,9 @@ class NewDim(DimSpec):
 
     @classmethod
     def new(cls, size: int) -> DimSpec:
-        return Singleton() if size == 1 else NewDim(size)
+        from torch.fx.experimental.symbolic_shapes import guard_or_false
+
+        return Singleton() if guard_or_false(size == 1) else NewDim(size)
 
 
 @dataclass
@@ -103,7 +105,9 @@ class Repeat(DimSpec):
 
     @classmethod
     def new(cls, dim: DimSpec, times: int) -> DimSpec:
-        if times == 1:
+        from torch.fx.experimental.symbolic_shapes import guard_or_false
+
+        if guard_or_false(times == 1):
             return dim
         elif isinstance(dim, Singleton):
             # repeating a singleton is the same as broadcasting it
@@ -150,6 +154,8 @@ class Split(DimSpec):
 
     @classmethod
     def new(cls, dim: DimSpec, group_shape: tuple[int, ...], idx: int) -> DimSpec:
+        from torch.fx.experimental.symbolic_shapes import guard_or_false, guard_or_true
+
         if not len(group_shape) > 0:
             raise AssertionError(
                 f"Expected group_shape length > 0, got {len(group_shape)}"
@@ -159,13 +165,15 @@ class Split(DimSpec):
             if not idx == 0:
                 raise AssertionError(f"Expected idx == 0, got {idx}")
             return dim
-        elif group_shape[idx] == 1:
+        elif guard_or_false(group_shape[idx] == 1):
             return Singleton()
         else:
             # remove singletons from group
             # group_mapping = [(new_index, (shape, old_index)) ...]
             group_mapping = list(
-                enumerate((s, i) for i, s in enumerate(group_shape) if s != 1)
+                enumerate(
+                    (s, i) for i, s in enumerate(group_shape) if guard_or_true(s != 1)
+                )
             )
             new_group_shape = tuple(m[1][0] for m in group_mapping)
             new_idx = next(filter(lambda x: x[1][1] == idx, group_mapping))[0]
@@ -194,6 +202,8 @@ def dim_atleast_3d(ndim: int) -> DimMap:
 
 def expand(input_shape: Shape, shape: Shape) -> DimMap:
     """Implement broadcast on multiple dimensions."""
+    from torch.fx.experimental.symbolic_shapes import guard_or_false
+
     if not len(shape) >= len(input_shape):
         raise AssertionError(
             f"Expected len(shape) >= len(input_shape), got {len(shape)} < {len(input_shape)}"
@@ -212,14 +222,22 @@ def expand(input_shape: Shape, shape: Shape) -> DimMap:
             if not isinstance(p, InputDim):
                 raise AssertionError(f"DimSpec not supported in expand: {p}")
             actual_s = input_shape[p.input_dim]
-            if not (actual_s == 1 or desired_s == -1 or desired_s == actual_s):
+            if not (
+                guard_or_false(actual_s == 1)
+                or guard_or_false(desired_s == -1)
+                or guard_or_false(desired_s == actual_s)
+            ):
                 raise AssertionError(
                     f"Expected actual_s == 1 or desired_s == -1 or "
                     f"desired_s == actual_s, got actual_s={actual_s}, desired_s={desired_s}"
                 )
         mapping.append(
             p
-            if desired_s in (1, -1) or desired_s == actual_s
+            if (
+                guard_or_false(desired_s == 1)
+                or guard_or_false(desired_s == -1)
+                or guard_or_false(desired_s == actual_s)
+            )
             else Broadcast.new(p, desired_s)
         )
     return tuple(mapping)
@@ -306,7 +324,9 @@ def infer_size(total_size: int, sizes: Shape) -> Shape:
 
     Infer the size of this dimension given the total_size.
     """
-    infers = [i for i, s in enumerate(sizes) if s == -1]
+    from torch.fx.experimental.symbolic_shapes import guard_or_false
+
+    infers = [i for i, s in enumerate(sizes) if guard_or_false(s == -1)]
     size = prod(sizes)
     if not len(infers) <= 1:
         raise AssertionError("can only infer one size")
@@ -317,7 +337,7 @@ def infer_size(total_size: int, sizes: Shape) -> Shape:
             raise AssertionError(
                 f"size inferred for -1 is not integral {sizes} should have {total_size} elements."
             )
-        return tuple(s if s != -1 else missing_size for s in sizes)
+        return tuple(s if not guard_or_false(s == -1) else missing_size for s in sizes)
     if not size == total_size:
         raise AssertionError(f"sizes do not match {total_size} vs {size}")
     return sizes
@@ -352,6 +372,8 @@ def view_groups(from_size: Shape, to_size: Shape) -> DimMap:
     - in the above, input is flattened into a single dimension and then split
       into two separate dimensions with different sizes from the input.
     """
+    from torch.fx.experimental.symbolic_shapes import guard_or_false, guard_or_true
+
     from_nelem = prod(from_size)
     to_size = infer_size(from_nelem, normalize_sizes(to_size))
 
@@ -383,17 +405,17 @@ def view_groups(from_size: Shape, to_size: Shape) -> DimMap:
             to_idx += 1
 
         # if any of the groups is singleton, great, we need to backtrack though
-        if f == 1 and t != 1:
+        if guard_or_false(f == 1) and guard_or_true(t != 1):
             # produces ([1], [])
             to_idx -= 1
             to_group_shape = []
-        elif f != 1 and t == 1:
+        elif guard_or_true(f != 1) and guard_or_false(t == 1):
             # produces ([], [1])
             from_idx -= 1
             from_group_dim = []
         else:
             # produces ([1], [1]),  ([2], [2]), ([2,3], [6])
-            while f != t:
+            while guard_or_true(f != t):
                 if f < t:
                     nf = from_size[from_idx]
                     from_group_dim.append(from_idx)
@@ -407,7 +429,11 @@ def view_groups(from_size: Shape, to_size: Shape) -> DimMap:
 
         if len(to_group_shape) > 0:
             flattened = Flatten.new(
-                tuple(InputDim(fi) for fi in from_group_dim if from_size[fi] >= 1)
+                tuple(
+                    InputDim(fi)
+                    for fi in from_group_dim
+                    if guard_or_true(from_size[fi] >= 1)
+                )
             )
             result_pp += [
                 Split.new(flattened, tuple(to_group_shape), i)
@@ -442,10 +468,13 @@ def dim_squeeze(shape: Shape, dim: int | None = None) -> DimMap:
     # equals size of the mesh. For example squeeze(DTensor(tensor(4), Shard[0])) could
     # end up as squeeze(tensor(1)) if we have 4 devices; this would lead to
     # removal of a dimension that is not actually a singleton.
+    from torch.fx.experimental.symbolic_shapes import guard_or_true
+
     return tuple(
         InputDim(i)
         for i, s in enumerate(shape)
-        if s > 1 or (dim is not None and i != normalize_dim(dim, len(shape)))
+        if guard_or_true(s > 1)
+        or (dim is not None and i != normalize_dim(dim, len(shape)))
     )
 
 
