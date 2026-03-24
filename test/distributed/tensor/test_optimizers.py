@@ -1,7 +1,5 @@
 # Owner(s): ["oncall: distributed"]
 
-import gc
-from collections import Counter
 from copy import deepcopy
 
 import torch
@@ -753,37 +751,21 @@ class TestDTensorOptimizer(DTensorTestBase):
         for _ in range(3):
             run_step()
 
-        gc.collect()
-        gc.disable()
-        try:
-            before = Counter(type(o).__qualname__ for o in gc.get_objects())
+        _, misses_after_warmup = torch._C._get_DTensor_sharding_propagator_cache_stats()
 
-            for _ in range(10):
-                run_step()
+        for _ in range(10):
+            run_step()
 
-            gc.collect()
-            after = Counter(type(o).__qualname__ for o in gc.get_objects())
-
-            strategy_growth = after["OpStrategy"] - before.get("OpStrategy", 0)
-            cache_growth = after["_DispatchCacheKey"] - before.get(
-                "_DispatchCacheKey", 0
-            )
-            # After warmup the caches should be stable: no per-step growth
-            # of sharding strategy objects or dispatch cache entries.
-            self.assertEqual(
-                strategy_growth,
-                0,
-                f"OpStrategy objects grew by {strategy_growth} in 10 steps "
-                "(expected 0 after warmup)",
-            )
-            self.assertEqual(
-                cache_growth,
-                0,
-                f"_DispatchCacheKey objects grew by {cache_growth} in 10 steps "
-                "(expected 0 after warmup)",
-            )
-        finally:
-            gc.enable()
+        # After warmup, the cache should be fully populated: no new
+        # misses across subsequent training steps.
+        _, misses_after_steps = torch._C._get_DTensor_sharding_propagator_cache_stats()
+        self.assertEqual(
+            misses_after_warmup,
+            misses_after_steps,
+            f"Cache misses increased from {misses_after_warmup} to "
+            f"{misses_after_steps} over 10 steps (expected 0 new misses "
+            "after warmup)",
+        )
 
 
 TestDTensorOptimizerWithLocalTensor = create_local_tensor_test_class(
