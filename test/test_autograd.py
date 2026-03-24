@@ -2680,6 +2680,7 @@ class TestAutograd(TestCase):
             lambda: torch.autograd.backward(z, gradient, inputs={}),
         )
 
+    @skipIfTorchDynamo("compiled autograd does not support is_grads_batched with vmap")
     def test_grad_dict_inputs_batched_grads(self):
         x = torch.randn(2, 2, dtype=torch.double, requires_grad=True)
         y = torch.randn(2, 2, dtype=torch.double, requires_grad=True)

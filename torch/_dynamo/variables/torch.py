@@ -281,11 +281,14 @@ def _check_for_gradient_edge(var: VariableTracker, arg_name: str) -> None:
             _check_for_gradient_edge(item, f"{arg_name}[{i}]")
     elif isinstance(var, ConstDictVariable):
         for hash_key, item in var.items.items():
-            key_repr = (
-                hash_key.vt.as_python_constant()
-                if hash_key.vt.is_python_constant()
-                else "?"
-            )
+            if not hash_key.vt.is_python_constant():
+                unimplemented(
+                    gb_type="autograd.grad with non-constant dict key",
+                    context=f"non-constant key in {arg_name}",
+                    explanation="autograd.grad/backward dict inputs must have constant keys.",
+                    hints=[*graph_break_hints.SUPPORTABLE],
+                )
+            key_repr = hash_key.vt.as_python_constant()
             _check_for_gradient_edge(item, f"{arg_name}[{key_repr!r}]")
 
 
