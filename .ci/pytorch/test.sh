@@ -1893,15 +1893,17 @@ test_openreg() {
   assert_git_not_dirty
 }
 
+echo "installing lumen_cli"
+(cd .ci/lumen_cli && python -m pip install -e .)
+echo "installed lumen_cli"
+
 if ! [[ "${BUILD_ENVIRONMENT}" == *libtorch* || "${BUILD_ENVIRONMENT}" == *-bazel-* ]]; then
   (cd test && python -c "import torch; print(torch.__config__.show())")
   (cd test && python -c "import torch; print(torch.__config__.parallel_info())")
 fi
 if [[ "${TEST_CONFIG}" == *numpy_2* ]]; then
-  (cd .ci/lumen_cli && python -m pip install -e .)
   lumen test pytorch-core --group-id pytorch_numpy_2 --build-env "$BUILD_ENVIRONMENT"
  elif [[ "${BUILD_ENVIRONMENT}" == *aarch64* && "${TEST_CONFIG}" == 'default' ]]; then
-  (cd .ci/lumen_cli && python -m pip install -e .)
   lumen test pytorch-core --group-id pytorch_linux_aarch64 --build-env "$BUILD_ENVIRONMENT" --shard-id "$SHARD_NUMBER" --num-shards "$NUM_TEST_SHARDS"
 elif [[ "${TEST_CONFIG}" == *backward* ]]; then
   test_forward_backward_compatibility
@@ -1914,15 +1916,12 @@ elif [[ "${TEST_CONFIG}" == *xla* ]]; then
   test_xla
 elif [[ "$TEST_CONFIG" == *vllm* ]]; then
     echo "vLLM CI uses TORCH_CUDA_ARCH_LIST: $TORCH_CUDA_ARCH_LIST"
-    (cd .ci/lumen_cli && python -m pip install -e .)
     python -m cli.run test external vllm --test-plan "$TEST_CONFIG" --shard-id "$SHARD_NUMBER" --num-shards "$NUM_TEST_SHARDS"
 elif [[ "$TEST_CONFIG" == *torchtitan* ]]; then
-    (cd .ci/lumen_cli && python -m pip install -e .)
     python -m cli.run test external torchtitan --test-plan "$TEST_CONFIG" --shard-id "$SHARD_NUMBER" --num-shards "$NUM_TEST_SHARDS"
 elif [[ "${TEST_CONFIG}" == *executorch* ]]; then
   test_executorch
 elif [[ "$TEST_CONFIG" == 'jit_legacy' ]]; then
-  (cd .ci/lumen_cli && python -m pip install -e .)
   echo "===== test_python_legacy_jit uses lumen_cli ====="
   python -m cli.run test pytorch-core  --build-env "$BUILD_ENVIRONMENT" --group-id pytorch_jit_legacy
   assert_git_not_dirty
