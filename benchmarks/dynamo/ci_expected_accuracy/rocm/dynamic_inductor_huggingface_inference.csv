@@ -6,7 +6,7 @@ AlbertForMaskedLM,pass,0
 
 
 
-AllenaiLongformerBase,fail_to_run,4
+AllenaiLongformerBase,pass,4
 
 
 
