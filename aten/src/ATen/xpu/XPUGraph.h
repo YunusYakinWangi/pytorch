@@ -59,7 +59,7 @@ struct TORCH_XPU_API XPUGraphImpl : public at::GraphImplInterface {
   c10::DeviceIndex capture_dev_{UNDEFINED_DEVICE};
 
   bool keep_graph_;
-}
+};
 
 struct TORCH_XPU_API XPUGraph {
   XPUGraph(bool keep_graph = false) {
