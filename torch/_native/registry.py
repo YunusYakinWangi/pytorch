@@ -31,6 +31,9 @@ class _OverrideNode:
     active: bool = True
 
 
+UserOrderingFn = Callable[[str, str, list[_OverrideNode]], list[_OverrideNode]]
+
+
 @dataclass
 class _FilterState:
     _dsl_names: set[str] = field(default_factory=set)
@@ -170,6 +173,19 @@ def _get_or_create_library(op_symbol: str, dispatch_key: str) -> torch.library.L
     return _libs[key]
 
 
+def _register_node_impl(
+    lib: torch.library.Library, node: _OverrideNode, dispatch_key: str
+) -> None:
+    """Helper function to register a single node implementation with proper parameters."""
+    lib.impl(
+        "aten",
+        node.override_fn,
+        dispatch_key,
+        with_keyset=not node.unconditional_override,
+        allow_override=True,
+    )
+
+
 def _resolve_iterable(iterable: str | Iterable[str] | None) -> Iterable[str]:
     if not iterable:
         return ()
@@ -244,25 +260,9 @@ def reenable_op_overrides(
 
     for key in key_set:
         op_symbol, dispatch_key = key
-
-        # get the appropriate graph
-        lib = _get_or_create_library(*key)
-
-        # Re-register
-        for node in _graphs[key]:
-            node_enabled = _filter_state.check_enabled(node)
-            # if not filter_node:
-            if node_enabled:
-                lib.impl(
-                    "aten",
-                    node.override_fn,
-                    dispatch_key,
-                    with_keyset=True,
-                    allow_override=True,
-                )
-                node.active = True
-            else:
-                node.active = False
+        _register_overrides_from_graph(
+            op_symbol, dispatch_key, _graphs[key], filter_state=_filter_state
+        )
 
 
 def deregister_op_overrides(
@@ -299,24 +299,13 @@ def deregister_op_overrides(
         op_symbol, dispatch_key = key
         # Remove the old graph
         del _libs[key]
-        # create a new graph
-        lib = _get_or_create_library(*key)
 
-        # Re-register
-        for node in _graphs[key]:
-            node_enabled = _filter_state.check_enabled(node)
-            # if not filter_node:
-            if node_enabled:
-                lib.impl(
-                    "aten",
-                    node.override_fn,
-                    dispatch_key,
-                    with_keyset=True,
-                    allow_override=True,
-                )
-                node.active = True
-            else:
-                node.active = False
+        _register_overrides_from_graph(
+            op_symbol,
+            dispatch_key,
+            _graphs[key],
+            filter_state=_filter_state,
+        )
 
 
 def _update_registration_maps(
@@ -359,6 +348,9 @@ def register_op_override(
     Register a passed override function to the dispatcher, based on the
     passed lib and op symbols, and the dispatch key.
 
+    Actually a just graph-building op, will perform the real registration
+    in a later step (still user-invisible).
+
     lib_symbol: str - library yourve overriding symbols in (generally "aten")
     op_symbol: str - name of the op you're overriding
     dispatch_key: str - dispatch key to override
@@ -368,7 +360,6 @@ def register_op_override(
                                    torch.DispatchKeySet as the first argument.
     """
     key = (op_symbol, dispatch_key)
-    lib = _get_or_create_library(*key)
 
     global _graphs
     op_graph = _graphs.get(key, [])
@@ -386,10 +377,74 @@ def register_op_override(
     # Build additional maps helpful for de-registration
     _update_registration_maps(backend, op_symbol, dispatch_key, key=key)
 
-    lib.impl(
-        op_symbol,
-        impl,
-        dispatch_key,
-        with_keyset=(not unconditional_override),
-        allow_override=allow_multiple_override,
-    )
+
+def _register_overrides_from_graph(
+    op_symbol: str,
+    dispatch_key: str,
+    graph: list[_OverrideNode],
+    *,
+    filter_state: _FilterState = None,
+) -> None:
+    """
+    Register all overrides in a single graph
+    """
+    key = (op_symbol, dispatch_key)
+    lib = _get_or_create_library(*key)
+
+    for node in graph:
+        enable = True
+        if filter_state:
+            enable = filter_state.check_enabled(node)
+
+        if enable:
+            _register_node_impl(lib, node, dispatch_key)
+            node.active = True
+        else:
+            node.active = False
+
+
+def _register_all_overrides() -> None:
+    """
+    Perform all registration calls from previously-built
+    override graphs
+    """
+    for key, graph in _graphs.items():
+        op_symbol, dispatch_key = key
+
+        _register_overrides_from_graph(
+            op_symbol,
+            dispatch_key,
+            graph,
+        )
+
+
+def reorder_graphs_from_user_fn(
+    fn: UserOrderingFn,
+    *,
+    reregister_overrides: bool = False,
+) -> None:
+    global _graphs
+    global _libs
+
+    for (op_symbol, dispatch_key), graph in _graphs.items():
+        # Update the ordering of each graph
+        _graphs[(op_symbol, dispatch_key)] = fn(op_symbol, dispatch_key, graph)
+
+        # if we don't need to register things, don't.
+        if not reregister_overrides:
+            continue
+
+        # If a graph has been modified
+        if graph != _graphs[(op_symbol, dispatch_key)]:
+            # if a lib already exists
+            if (op_symbol, dispatch_key) in _libs:
+                del _libs[(op_symbol, dispatch_key)]
+
+            # Only create a library if the new graph has nodes
+            # Empty graphs (disabled operations) shouldn't get libraries
+            if _graphs[(op_symbol, dispatch_key)]:
+                _register_overrides_from_graph(
+                    op_symbol,
+                    dispatch_key,
+                    _graphs[(op_symbol, dispatch_key)],
+                )
