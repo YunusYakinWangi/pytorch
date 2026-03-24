@@ -23,6 +23,7 @@ from torch.distributed.fsdp._common_utils import clean_tensor_name
 from torch.distributed.fsdp._flat_param import (
     _FSDP_SKIP_WRITEBACK_CHECK,
     _FSDP_USE_FULL_PREC_IN_EVAL,
+    FlatParamHandle,
 )
 from torch.distributed.fsdp._init_utils import NO_RESHARD_AFTER_FORWARD_STRATEGIES
 from torch.distributed.fsdp.wrap import always_wrap_policy, ModuleWrapPolicy
@@ -1374,6 +1375,74 @@ class TestFSDPUseOrigParamsNoSync(FSDPTest):
         for param in fsdp_model.parameters():
             if param.grad is not None:
                 self.assertEqual(param.grad.dtype, torch.float32)
+
+
+class TestFSDPUseOrigParamsPrefetchWriteback(FSDPTest):
+    @property
+    def world_size(self):
+        return 2
+
+    @skip_if_lt_x_gpu(2)
+    def test_prefetch_writeback_sync(self):
+        device = torch.device(device_type, self.rank)
+        compute_done = torch.ones(1, device=device, dtype=torch.int32)
+        writeback_reads: list[torch.Tensor] = []
+
+        class SlowLinear(nn.Module):
+            def __init__(self, in_features, out_features):
+                super().__init__()
+                self.linear = nn.Linear(in_features, out_features, device=device)
+
+            def forward(self, x):
+                out = self.linear(x)
+                compute_done.fill_(0)
+                # Stall compute stream so prefetch writeback overlaps
+                torch.cuda._sleep(int(1e8))
+                compute_done.fill_(1)
+                return out
+
+        orig_writeback = FlatParamHandle._writeback_orig_params
+
+        def _writeback_with_check(self_handle):
+            if self_handle._use_orig_params:
+                writeback_reads.append(compute_done.clone())
+            return orig_writeback(self_handle)
+
+        FlatParamHandle._writeback_orig_params = _writeback_with_check
+        try:
+            torch.manual_seed(42)
+            model = nn.Sequential(
+                SlowLinear(4096, 4096),
+                SlowLinear(4096, 4096),
+            )
+            model = FSDP(
+                model,
+                cpu_offload=CPUOffload(offload_params=True),
+                use_orig_params=True,
+                forward_prefetch=True,
+                backward_prefetch=BackwardPrefetch.BACKWARD_POST,
+                auto_wrap_policy=always_wrap_policy,
+            )
+            inp = torch.randn(4096, 4096, device=device)
+            for _ in range(3):
+                loss = model(inp).sum()
+                loss.backward()
+                with torch.no_grad():
+                    for p in model.parameters():
+                        if p.grad is not None:
+                            p -= 0.01 * p.grad
+                            p.grad = None
+        finally:
+            FlatParamHandle._writeback_orig_params = orig_writeback
+
+        torch.cuda.synchronize()
+        for i, val in enumerate(writeback_reads):
+            self.assertEqual(
+                val.item(),
+                1,
+                f"_writeback_orig_params read stale data (call {i}): "
+                "pre_unshard_stream was not synchronized with compute stream",
+            )
 
 
 class TestFSDPUseOrigParamsInit(FSDPTest):

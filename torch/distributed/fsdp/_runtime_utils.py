@@ -290,6 +290,11 @@ def _unshard(
     """
     if not handle:
         return
+    # During prefetch, pre_unshard() -> _writeback_orig_params() runs on
+    # pre_unshard_stream while the compute stream may still be using the
+    # parameters. Synchronize to avoid the race condition.
+    if handle._use_orig_params:
+        pre_unshard_stream.wait_stream(state._device_handle.current_stream())
     with state._device_handle.stream(pre_unshard_stream):
         ran_pre_unshard = handle.pre_unshard()
     if ran_pre_unshard:
