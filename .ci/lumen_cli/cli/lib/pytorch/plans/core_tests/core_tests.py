@@ -1,15 +1,18 @@
 """
 Core PyTorch tests — python test/run_test.py based.
-Corresponds to jit_legacy / numpy_2 TEST_CONFIG in test.sh.
+Corresponds to jit_legacy / numpy_2 / default TEST_CONFIG in test.sh.
 """
 
 from __future__ import annotations
 
+import functools
+import os
 import subprocess
 import sys
 
-from cli.lib.pytorch.base import CoreTestPlan, run_test, TestStep
-from cli.lib.pytorch.plans.core_tests.pytorch_linux_aarch64 import AARCH64_PLANS
+from collections.abc import Callable
+
+from cli.lib.pytorch.base import CoreTestPlan, is_xpu, resolve_extra_arg_list, run_test, TestStep
 
 
 def _legacy_jit() -> None:
@@ -47,8 +50,45 @@ def _numpy_2() -> None:
     )
 
 
+def _python_shard(
+    shard_id: int, num_shards: int, build_env: str, extra_args: list
+) -> None:
+    run_test(
+        "--exclude-jit-executor",
+        "--exclude-distributed-tests",
+        "--exclude-quantization-tests",
+        f"--shard {shard_id} {num_shards}",
+        "--verbose",
+        *resolve_extra_arg_list(extra_args, build_env),
+    )
+
+
+def make_python_shard_steps(
+    extra_args: list,
+) -> Callable[[str, int, int], list[TestStep]]:
+    def _steps(build_env: str, shard_id: int, num_shards: int) -> list[TestStep]:
+        return [
+            TestStep(
+                test_id="python_shard",
+                fn=functools.partial(_python_shard, shard_id, num_shards, build_env, extra_args),
+            )
+        ]
+    return _steps
+
+
 CORE_TEST_PLANS: dict[str, CoreTestPlan] = {
-    **AARCH64_PLANS,
+    "pytorch_default_test": CoreTestPlan(
+        group_id="pytorch_default_test",
+        title="PyTorch Default Tests (test_python_shard)",
+        # test.sh: default config → test_python_shard
+        test_configs=["default"],
+        # test.sh: if [[ "$TEST_CONFIG" == 'default' ]]; then export CUDA_VISIBLE_DEVICES=0; export HIP_VISIBLE_DEVICES=0
+        env_vars={"CUDA_VISIBLE_DEVICES": "0", "HIP_VISIBLE_DEVICES": "0"},
+        get_steps_fn=make_python_shard_steps([
+            lambda env: "--xpu" if is_xpu(env) else None,
+            lambda _: f"--include {os.environ['TESTS_TO_INCLUDE']}" if os.environ.get("TESTS_TO_INCLUDE") else None,
+        ]),
+    ),
     "pytorch_jit_legacy": CoreTestPlan(
         group_id="pytorch_jit_legacy",
         title="PyTorch JIT Legacy Tests",

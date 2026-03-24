@@ -15,6 +15,7 @@ from cli.lib.common.utils import run_command
 
 EnvCondition = Union[str, Callable[[str], bool]]
 EnvVarsSpec = Union[dict[str, str], Callable[[str], dict[str, str]]]
+ExtraArg = Union[str, Callable[[str], "str | None"]]
 
 
 def matches_env(condition: EnvCondition, build_env: str) -> bool:
@@ -25,6 +26,15 @@ def matches_env(condition: EnvCondition, build_env: str) -> bool:
 
 def resolve_env_vars(spec: EnvVarsSpec, build_env: str) -> dict[str, str]:
     return spec(build_env) if callable(spec) else spec
+
+
+def resolve_extra_arg_list(extra_args: list[ExtraArg], build_env: str) -> list[str]:
+    result = []
+    for arg in extra_args:
+        val = arg(build_env) if callable(arg) else arg
+        if val:
+            result.append(val)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +98,9 @@ def run_test(*args: str) -> None:
     if os.environ.get("LUMEN_NO_UPLOAD"):
         args = tuple(a for a in args if a not in _UPLOAD_FLAGS)
     cmd = f"{sys.executable} test/run_test.py " + " ".join(args)
+    if os.environ.get("LUMEN_DRY_RUN"):
+        print(f"[dry-run] {cmd}")
+        return
     run_command(cmd)
 
 
@@ -143,6 +156,7 @@ class BasePytorchTestPlan:
     setup_fn: Callable[[], None] | None = None
     run_on: list[EnvCondition] = field(default_factory=list)
     test_configs: list[EnvCondition] = field(default_factory=list)
+    extra_args: list[ExtraArg] = field(default_factory=list)
 
     def is_eligible(self, build_env: str, test_config: str = "") -> bool:
         env_ok = not self.run_on or any(

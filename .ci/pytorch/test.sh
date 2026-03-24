@@ -1925,8 +1925,7 @@ elif [[ "$TEST_CONFIG" == 'jit_legacy' ]]; then
   (cd .ci/lumen_cli && python -m pip install -e .)
   echo "===== test_python_legacy_jit uses lumen_cli ====="
   python -m cli.run test pytorch-core  --build-env "$BUILD_ENVIRONMENT" --group-id pytorch_jit_legacy
-  echo "===== test_python_legacy_jit uses legacy ====="
-  test_python_legacy_jit
+  assert_git_not_dirty
 elif [[ "$TEST_CONFIG" == 'quantization' ]]; then
   test_quantization
 elif [[ "${BUILD_ENVIRONMENT}" == *libtorch* ]]; then
@@ -2032,13 +2031,16 @@ elif [[ "${TEST_CONFIG}" == *dynamo_wrapped* ]]; then
   fi
 elif [[ "${BUILD_ENVIRONMENT}" == *rocm* && -n "$TESTS_TO_INCLUDE" ]]; then
   install_torchvision
-  test_python_shard "$SHARD_NUMBER"
+  echo "Print execute default command"
+  LUMEN_DRY_RUN=1 lumen test pytorch-core --group-id pytorch_default_test --build-env $BUILD_ENVIRONMENT --shard-id 1 --num-shards $NUM_TEST_SHARDS
+  lumen test pytorch-core --group-id pytorch_default_test --build-env $BUILD_ENVIRONMENT --shard-id 1 --num-shards $NUM_TEST_SHARDS
+  assert_git_not_dirty
   test_aten
 elif [[ "${SHARD_NUMBER}" == 1 && $NUM_TEST_SHARDS -gt 1 ]]; then
   test_lazy_tensor_meta_reference_disabled
   test_without_numpy
   install_torchvision
-  test_python_shard 1
+  lumen test pytorch-core --test-config default --build-env $BUILD_ENVIRONMENT --shard-id 1 --num-shards $NUM_TEST_SHARDS
   test_aten
   test_libtorch 1
   if [[ "${BUILD_ENVIRONMENT}" == *xpu* ]]; then
@@ -2046,7 +2048,9 @@ elif [[ "${SHARD_NUMBER}" == 1 && $NUM_TEST_SHARDS -gt 1 ]]; then
   fi
 elif [[ "${SHARD_NUMBER}" == 2 && $NUM_TEST_SHARDS -gt 1 ]]; then
   install_torchvision
-  test_python_shard 2
+  echo "Print execute default command"
+  LUMEN_DRY_RUN=1 lumen test pytorch-core --group-id pytorch_default_test --build-env $BUILD_ENVIRONMENT --shard-id 2 --num-shards $NUM_TEST_SHARDS
+  lumen test pytorch-core --group-id pytorch_default_test --build-env $BUILD_ENVIRONMENT --shard-id 2 --num-shards $NUM_TEST_SHARDS
   test_libtorch 2
   test_aot_compilation
   test_custom_script_ops
@@ -2056,7 +2060,8 @@ elif [[ "${SHARD_NUMBER}" == 2 && $NUM_TEST_SHARDS -gt 1 ]]; then
 elif [[ "${SHARD_NUMBER}" -gt 2 ]]; then
   # Handle arbitrary number of shards
   install_torchvision
-  test_python_shard "$SHARD_NUMBER"
+  LUMEN_DRY_RUN=1 lumen test pytorch-core --group-id pytorch_default_test --build-env $BUILD_ENVIRONMENT --shard-id $SHARD_NUMBER --num-shards $NUM_TEST_SHARDS
+  lumen test pytorch-core --group-id pytorch_default_test --build-env $BUILD_ENVIRONMENT --shard-id $SHARD_NUMBER --num-shards $NUM_TEST_SHARDS
 elif [[ "${BUILD_ENVIRONMENT}" == *vulkan* ]]; then
   test_vulkan
 elif [[ "${BUILD_ENVIRONMENT}" == *-bazel-* ]]; then
