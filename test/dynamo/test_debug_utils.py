@@ -468,6 +468,18 @@ class TestInductorConfigOverrideIntegration(TestCase):
         self.assertEqual(router.get_value_for_graph(1), {"b": 2, "c": 3})
         self.assertEqual(router.get_value_for_graph(2), {"c": 3})
 
+    def test_backend_router_conflict_raises(self, device):
+        from torch._dynamo.graph_id_filter import GraphBackendRouter
+
+        with self.assertRaisesRegex(ValueError, "Conflicting backend override"):
+            GraphBackendRouter("0-5:eager;3-10:inductor")
+
+    def test_backend_router_same_backend_no_conflict(self, device):
+        from torch._dynamo.graph_id_filter import GraphBackendRouter
+
+        router = GraphBackendRouter("0:eager;>=0:eager")
+        self.assertIsNotNone(router.get_value_for_graph(0))
+
     def test_get_inductor_config_override_empty(self, device):
         from torch._dynamo.graph_id_filter import (
             get_inductor_config_override_for_compile_id,
