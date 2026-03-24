@@ -182,9 +182,7 @@ class RingAttentionTest(DTensorTestBase):
             # context_parallel() scope.
             attention = F.scaled_dot_product_attention
             if compiled:
-                attention = torch.compile(
-                    attention, fullgraph=True, backend="aot_eager"
-                )
+                attention = torch.compile(attention, backend="aot_eager")
 
         for target in [cp_q, cp_k, cp_v]:
             target.requires_grad = True

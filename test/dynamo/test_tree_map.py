@@ -234,6 +234,7 @@ class TreeMapCompileTests(TestCase):
             raise AssertionError("unexpected node passed to mapper")
 
         def fn(arg):
+            _ = torch.randn(1) + 0
             return python_pytree.tree_map_only((int, tuple), mapper, arg)
 
         compiled = torch.compile(fn, backend="eager", fullgraph=True)
@@ -354,6 +355,8 @@ class TreeMapCompileTests(TestCase):
         }
 
         def fn(arg):
+            _ = torch.randn(1) + 0
+
             def mapper(node):
                 if isinstance(node, int):
                     return node + 1
@@ -436,6 +439,7 @@ class TreeMapCompileTests(TestCase):
             return a + b
 
         def fn(t1, t2):
+            _ = torch.randn(1) + 0
             return pytree.tree_map(mapper, t1, t2)
 
         compiled = torch.compile(fn, backend="eager", fullgraph=True)
@@ -466,6 +470,7 @@ class TreeMapCompileTests(TestCase):
             return node
 
         def fn(arg):
+            _ = torch.randn(1) + 0
             return pytree.tree_map(mapper, arg)
 
         compiled = torch.compile(fn, backend="eager", fullgraph=True)
@@ -497,6 +502,7 @@ class TreeMapCompileTests(TestCase):
             return node
 
         def fn(arg):
+            _ = torch.randn(1) + 0
             return pytree.tree_map(mapper, arg)
 
         compiled = torch.compile(fn, backend="eager", fullgraph=True)
@@ -526,6 +532,7 @@ class TreeMapCompileTests(TestCase):
             return node
 
         def fn(arg):
+            _ = torch.randn(1) + 0
             return pytree.tree_map(mapper, arg)
 
         compiled = torch.compile(fn, backend="eager", fullgraph=True)
@@ -558,6 +565,7 @@ class TreeMapCompileTests(TestCase):
             return node
 
         def fn(arg):
+            _ = torch.randn(1) + 0
             return pytree.tree_map(mapper, arg)
 
         compiled = torch.compile(fn, backend="eager", fullgraph=True)
@@ -592,6 +600,7 @@ class TreeMapCompileTests(TestCase):
             return node
 
         def fn(arg):
+            _ = torch.randn(1) + 0
             return pytree.tree_map(mapper, arg, is_leaf=is_leaf_fn)
 
         compiled = torch.compile(fn, backend="eager", fullgraph=True)
@@ -848,6 +857,7 @@ class TreeMapCompileTests(TestCase):
             return node + 10
 
         def fn(arg):
+            _ = torch.randn(1) + 0
             return pytree.tree_map(mapper, arg)
 
         compiled = torch.compile(fn, backend="eager", fullgraph=True)
@@ -905,6 +915,7 @@ class TreeMapCompileTests(TestCase):
             return node + 1
 
         def fn(arg):
+            _ = torch.randn(1) + 0
             return pytree.tree_map(mapper, arg)
 
         # Capture debug logs to ensure no fallback is triggered

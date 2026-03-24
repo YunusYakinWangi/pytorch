@@ -382,6 +382,7 @@ class FunctionTests(torch._dynamo.test_case.TestCaseWithNestedGraphBreaks):
         # Test cases taken from the CPython test TestBasicOps.test_islice. That test has a lot of
         # cases that we can't realistically support, whence we copy the sensible cases here.
         def fn():
+            _ = torch.randn(1) + 0
             for args in [  # islice(args) should agree with range(args)
                 (10, 20, 3),
                 (10, 3, 20),
@@ -3732,6 +3733,7 @@ class GraphModule(torch.nn.Module):
             with self.subTest(attrs=attrs):
 
                 def fn(x, y):
+                    _ = x + 0
                     getter = operator.attrgetter(*attrs)
                     return getter(x), getter(y)
 
@@ -3770,6 +3772,7 @@ class GraphModule(torch.nn.Module):
             with self.subTest(name=name, args=args, kwargs=kwargs):
 
                 def fn(x, y):
+                    _ = x + 0
                     caller = operator.methodcaller(name, *args, **kwargs)
                     return caller(x), caller(y)
 
@@ -4928,6 +4931,7 @@ class DefaultsTests(torch._dynamo.test_case.TestCaseWithNestedGraphBreaks):
 
     def test_frozenset_construction(self):
         def fn(x):
+            _ = x + 0
             s = frozenset({x})
             t = frozenset(s)
             return len(t)
@@ -5345,6 +5349,7 @@ class DefaultsTests(torch._dynamo.test_case.TestCaseWithNestedGraphBreaks):
                 return "ok"
 
         def foo_custom_str(x):
+            _ = x + 0
             a = CustomStr()
             return x, str(a)
 
@@ -5360,6 +5365,7 @@ class DefaultsTests(torch._dynamo.test_case.TestCaseWithNestedGraphBreaks):
             pass
 
         def foo_default_str(x):
+            _ = x + 0
             a = DefaultStr()
             return x, str(a)
 
