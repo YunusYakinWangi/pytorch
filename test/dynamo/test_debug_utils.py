@@ -325,9 +325,12 @@ class TestBackendOverrideIntegration(TestCase):
         result = self._run_with_override(device, "0:aot_eager;1:inductor;3:eager")
         self.assertEqual(result, ["aot_eager", "inductor", "eager"])
 
-    def test_first_rule_wins(self, device):
-        result = self._run_with_override(device, ">=0:aot_eager;>=1:inductor")
-        self.assertEqual(result, ["aot_eager", "aot_eager", "aot_eager", "aot_eager"])
+    def test_conflicting_rules_raise(self, device):
+        with self.assertRaisesRegex(
+            torch._dynamo.exc.InternalTorchDynamoError,
+            "Conflicting backend override",
+        ):
+            self._run_with_override(device, ">=0:aot_eager;>=1:inductor")
 
     def test_complex_config(self, device):
         result = self._run_with_override(device, "0:aot_eager;>=2:inductor")
