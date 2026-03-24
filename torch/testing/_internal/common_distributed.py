@@ -46,6 +46,7 @@ from torch.testing._internal.common_utils import (
     skip_but_pass_in_sandcastle_if,
     TEST_CUDA,
     TEST_HPU,
+    TEST_PRIVATEUSE1,
     TEST_WITH_ROCM,
     TEST_WITH_TSAN,
     TEST_XPU,
@@ -209,7 +210,7 @@ def at_least_x_gpu(x):
         return True
     if TEST_XPU and torch.xpu.device_count() >= x:
         return True
-    return False
+    return torch.accelerator.is_available() and torch.accelerator.device_count() >= x
 
 
 def _maybe_handle_skip_if_lt_x_gpu(args, msg) -> bool:
