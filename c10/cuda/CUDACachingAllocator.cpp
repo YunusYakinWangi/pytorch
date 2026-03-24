@@ -2290,6 +2290,7 @@ class DeviceCachingAllocator {
       stats.inactive_split[statType].reset_accumulated();
       stats.allocated_bytes[statType].reset_accumulated();
       stats.reserved_bytes[statType].reset_accumulated();
+      stats.private_pool_reserved_bytes[statType].reset_accumulated();
       stats.active_bytes[statType].reset_accumulated();
       stats.inactive_split_bytes[statType].reset_accumulated();
       stats.requested_bytes[statType].reset_accumulated();
@@ -2316,6 +2317,7 @@ class DeviceCachingAllocator {
       stats.inactive_split[statType].reset_peak();
       stats.allocated_bytes[statType].reset_peak();
       stats.reserved_bytes[statType].reset_peak();
+      stats.private_pool_reserved_bytes[statType].reset_peak();
       stats.active_bytes[statType].reset_peak();
       stats.inactive_split_bytes[statType].reset_peak();
       stats.requested_bytes[statType].reset_peak();
@@ -3068,6 +3070,10 @@ class DeviceCachingAllocator {
     StatTypes stat_types = get_stat_types_for_pool(*to_map->pool);
     for_each_selected_stat_type(stat_types, [&](size_t stat_type) {
       stats.reserved_bytes[stat_type].increase(mapped_range.size);
+      if (to_map->pool->owner_PrivatePool) {
+        stats.private_pool_reserved_bytes[stat_type].increase(
+            mapped_range.size);
+      }
     });
     auto reserved_bytes_gauge =
         STATIC_GAUGE(pytorch.CUDACachingAllocator.reserved_bytes);
@@ -3520,6 +3526,9 @@ class DeviceCachingAllocator {
     for_each_selected_stat_type(p.stat_types, [&](size_t stat_type) {
       stats.segment[stat_type].increase(1);
       stats.reserved_bytes[stat_type].increase(size);
+      if (p.pool->owner_PrivatePool) {
+        stats.private_pool_reserved_bytes[stat_type].increase(size);
+      }
     });
     if (size >= AcceleratorAllocatorConfig::max_split_size())
       stats.oversize_segments.increase(1);
@@ -3699,6 +3708,9 @@ class DeviceCachingAllocator {
     for_each_selected_stat_type(stat_types, [&](size_t stat_type) {
       stats.segment[stat_type].decrease(1);
       stats.reserved_bytes[stat_type].decrease(block->size);
+      if (pool->owner_PrivatePool) {
+        stats.private_pool_reserved_bytes[stat_type].decrease(block->size);
+      }
     });
     auto reserved_bytes_gauge =
         STATIC_GAUGE(pytorch.CUDACachingAllocator.reserved_bytes);
@@ -3759,6 +3771,9 @@ class DeviceCachingAllocator {
     StatTypes stat_types = get_stat_types_for_pool(*block->pool);
     for_each_selected_stat_type(stat_types, [&](size_t stat_type) {
       stats.reserved_bytes[stat_type].decrease(unmapped.size);
+      if (block->pool->owner_PrivatePool) {
+        stats.private_pool_reserved_bytes[stat_type].decrease(unmapped.size);
+      }
     });
     auto reserved_bytes_gauge =
         STATIC_GAUGE(pytorch.CUDACachingAllocator.reserved_bytes);
