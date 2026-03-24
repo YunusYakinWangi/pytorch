@@ -6,35 +6,6 @@
 
 namespace {
 
-static bool has_python_key_arg(torch::jit::Stack* stack, size_t num_arguments) {
-  auto arguments = torch::jit::last(*stack, num_arguments);
-  for (size_t idx = 0; idx < num_arguments; ++idx) {
-    const auto& ivalue = arguments[idx];
-    if (ivalue.isTensor()) {
-      const auto& t = ivalue.toTensor();
-      if (t.defined() && t.key_set().has(c10::DispatchKey::Python)) {
-        return true;
-      }
-    } else if (ivalue.isTensorList()) {
-      for (const auto& elem : ivalue.toTensorList()) {
-        at::Tensor t = elem;
-        if (t.defined() && t.key_set().has(c10::DispatchKey::Python)) {
-          return true;
-        }
-      }
-    } else if (ivalue.isOptionalTensorList()) {
-      for (const auto& elem : ivalue.toOptionalTensorList()) {
-        std::optional<at::Tensor> ot = elem;
-        if (ot.has_value() && ot->defined() &&
-            ot->key_set().has(c10::DispatchKey::Python)) {
-          return true;
-        }
-      }
-    }
-  }
-  return false;
-}
-
 static std::optional<c10::Device> get_common_device(
     torch::jit::Stack* stack,
     size_t num_arguments) {
@@ -185,11 +156,6 @@ void fakeFallback(
   const auto& schema = op.schema();
   const auto num_arguments = schema.arguments().size();
   const auto arguments_begin = stack->size() - num_arguments;
-
-  if (has_python_key_arg(stack, num_arguments)) {
-    op.redispatchBoxed(dispatchKeySet.remove(c10::DispatchKey::Fake), stack);
-    return;
-  }
 
   auto fake_device = get_common_device(stack, num_arguments);
   auto mode = c10::impl::FakeTensorModeTLS::get_state();
