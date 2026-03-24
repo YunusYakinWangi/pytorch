@@ -193,7 +193,9 @@ class TestCoreTestPlanSteps:
 
     def test_get_steps_fn_valid(self):
         s = _step()
-        plan = CoreTestPlan(group_id="p", title="T", get_steps_fn=lambda e, si, ns: [s])
+        plan = CoreTestPlan(
+            group_id="p", title="T", get_steps_fn=lambda e, si, ns, ea: [s]
+        )
         assert plan.get_steps("env") == [s]
 
     def test_neither_raises(self):
@@ -204,13 +206,16 @@ class TestCoreTestPlanSteps:
         s = _step()
         with pytest.raises(ValueError, match="exactly one"):
             CoreTestPlan(
-                group_id="p", title="T", steps=[s], get_steps_fn=lambda e, si, ns: [s]
+                group_id="p",
+                title="T",
+                steps=[s],
+                get_steps_fn=lambda e, si, ns, ea: [s],
             )
 
     def test_shard_args_passed_to_fn(self):
         received = {}
 
-        def fn(build_env, shard_id, num_shards):
+        def fn(build_env, shard_id, num_shards, extra_args):
             received.update(shard_id=shard_id, num_shards=num_shards)
             return [_step()]
 
@@ -221,7 +226,7 @@ class TestCoreTestPlanSteps:
     def test_shard_passed_through_run_test_plan(self, patch_lib):
         received = {}
 
-        def fn(build_env, shard_id, num_shards):
+        def fn(build_env, shard_id, num_shards, extra_args):
             received.update(shard_id=shard_id, num_shards=num_shards)
             return [_step()]
 

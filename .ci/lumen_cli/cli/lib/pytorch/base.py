@@ -189,7 +189,7 @@ class CoreTestPlan(BasePytorchTestPlan):
     shard_id / num_shards (or build_env) and must be generated at runtime.
     """
 
-    get_steps_fn: Callable[[str, int, int], list[TestStep]] | None = None
+    get_steps_fn: Callable[[str, int, int, list[str]], list[TestStep]] | None = None
 
     def __post_init__(self) -> None:
         if bool(self.get_steps_fn) == bool(self.steps):
@@ -201,5 +201,6 @@ class CoreTestPlan(BasePytorchTestPlan):
         self, build_env: str, shard_id: int = 1, num_shards: int = 1
     ) -> list[TestStep]:
         if self.get_steps_fn:
-            return self.get_steps_fn(build_env, shard_id, num_shards)
+            extra_args = resolve_extra_arg_list(self.extra_args, build_env)
+            return self.get_steps_fn(build_env, shard_id, num_shards, extra_args)
         return self.steps
