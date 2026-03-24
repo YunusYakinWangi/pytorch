@@ -2540,7 +2540,7 @@ class SourcelessGraphModuleVariable(UserDefinedObjectVariable):
 class UserDefinedExceptionObjectVariable(UserDefinedObjectVariable):
     def __init__(self, value: object, **kwargs: Any) -> None:
         super().__init__(value, **kwargs)
-        init_args = kwargs.get("init_args", ())
+        init_args = kwargs.get("init_args", [])
         self.exc_vt = variables.ExceptionVariable(self.value_type, init_args)
 
     @property
@@ -2573,7 +2573,7 @@ class UserDefinedExceptionObjectVariable(UserDefinedObjectVariable):
             return self.exc_vt.call_method(tx, name, args, kwargs)
         return super().call_method(tx, name, args, kwargs)
 
-    def var_getattr(self, tx, name):
+    def var_getattr(self, tx: "InstructionTranslator", name: str):
         if name in (
             "args",
             "__cause__",
