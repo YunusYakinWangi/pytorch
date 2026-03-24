@@ -85,32 +85,12 @@ class CacheSizeRelevantForFrame:
     # Number of CacheEntry objects having same ID_MATCH'd objects as given frame.
     num_cache_entries_with_same_id_matched_objs: int = 0
 
-    # Per-region recompile limit set via torch.compile(region_recompile_limit=N).
-    # None means use global config limits only.
-    #
-    # Unlike the global config.recompile_limit (which checks each code object
-    # independently), region_recompile_limit uses max semantics across all code
-    # objects in the region: once ANY code object (the original function or any
-    # of its resume functions from graph breaks) reaches N compilations, ALL
-    # compilation in the region stops. This prevents the total compilations
-    # from growing unboundedly when resume functions recompile independently.
-    #
-    # Each torch.compile() call gets its own independent budget tracked via
-    # ConvertFrameAssert._region_compilation_counts, so two torch.compile()
-    # calls on the same function don't interfere with each other's limits.
-    region_recompile_limit: int | None = None
+    # Whether this compile region has isolated cache (via region_id)
+    isolated_cache: bool = False
 
-    # The max number of compilations across all code objects in this compile
-    # region. Set by ConvertFrameAssert from max(_region_compilation_counts).
-    # This is the value checked against region_recompile_limit.
+    # Max compilations across all code objects in this region.
+    # Used for the per-region limit check when isolated_cache=True.
     region_num_compilations: int = 0
-
-    @property
-    def exceeds_region_recompile_limit(self) -> bool:
-        return (
-            self.region_recompile_limit is not None
-            and self.region_num_compilations >= self.region_recompile_limit
-        )
 
     def will_compilation_exceed(self, limit: int) -> bool:
         # Checks if a compilation will exceed the given limit (that's why >=).
