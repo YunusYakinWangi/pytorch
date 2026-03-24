@@ -8,11 +8,7 @@ from __future__ import annotations
 import subprocess
 import sys
 
-from cli.lib.pytorch.base import (
-    CoreTestPlan,
-    TestStep,
-)
-from cli.lib.pytorch.base import run_test
+from cli.lib.pytorch.base import CoreTestPlan, run_test, TestStep
 from cli.lib.pytorch.plans.core_tests.pytorch_linux_aarch64 import AARCH64_PLANS
 
 
@@ -27,7 +23,8 @@ def _setup_numpy_2() -> None:
     # test.sh: if [[ "${TEST_CONFIG}" == *numpy_2* ]]
     pandas_ver = subprocess.run(
         [sys.executable, "-c", "import pandas; print(pandas.__version__)"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     ).stdout.strip()
     pkgs = ["--pre", "numpy==2.0.2", "scipy==1.13.1", "numba==0.60.0"]
     if pandas_ver:
@@ -65,7 +62,7 @@ CORE_TEST_PLANS: dict[str, CoreTestPlan] = {
         group_id="pytorch_numpy_2",
         title="PyTorch NumPy 2 Tests",
         # test.sh: if [[ "${TEST_CONFIG}" == *numpy_2* ]]
-        test_configs=["numpy_2"],
+        test_configs=["numpy_2_x"],
         setup_fn=_setup_numpy_2,
         steps=[
             TestStep(test_id="numpy_2", fn=_numpy_2),

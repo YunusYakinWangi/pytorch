@@ -62,7 +62,7 @@ def _register_pytorch_core_commands(subparsers: argparse._SubParsersAction) -> N
     )
 
     # Mutually exclusive: either name the plan directly, or let TEST_CONFIG drive it.
-    dispatch = parser.add_mutually_exclusive_group(required=True)
+    dispatch = parser.add_mutually_exclusive_group(required=False)
     dispatch.add_argument(
         "--group-id",
         metavar="GROUP_ID",
@@ -75,8 +75,15 @@ def _register_pytorch_core_commands(subparsers: argparse._SubParsersAction) -> N
     )
 
     parser.add_argument(
+        "--workflow",
+        metavar="NAME",
+        default=None,
+        help="show all combos for --test-config/--group-id in this workflow (e.g. 'pull')",
+    )
+
+    parser.add_argument(
         "--build-env",
-        required=True,
+        required=False,
         metavar="BUILD_ENVIRONMENT",
         help="build environment string for plan resolution and env_vars",
     )
@@ -123,6 +130,12 @@ def _register_pytorch_core_commands(subparsers: argparse._SubParsersAction) -> N
         action="store_true",
         default=False,
         help="print resolved test plan and steps without running anything",
+    )
+    parser.add_argument(
+        "--runner-filter",
+        metavar="RUNNER",
+        default="linux.2xlarge",
+        help="filter test matrix entries by runner substring (default: linux.2xlarge)",
     )
     parser.set_defaults(func=lambda args: PytorchTestRunner(args).run())
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import os
 from typing import Any
@@ -236,12 +237,52 @@ def run_test_plan(
                         step.fn()
                     logger.info("[%s/%s] passed", group_id, step.test_id)
                 except Exception as e:
-                    logger.error("[%s/%s] FAILED: %s", group_id, step.test_id, e)
+                    logger.error("[%s/%s] FAILED: %s", group_id, step.test_id, str(e))
                     _print_repro(group_id, step, build_env, ctx, cmd=cmd)
                     failures.append(step.test_id)
 
     if failures:
         raise RuntimeError(f"[{group_id}] {len(failures)} step(s) failed: {failures}")
+
+
+# ---------------------------------------------------------------------------
+# Workflow dry-run
+# ---------------------------------------------------------------------------
+
+
+def dry_run_from_workflow(
+    yaml_path: str,
+    runner_filter: str = "linux.2xlarge",
+) -> None:
+    """Parse a GitHub Actions workflow YAML and print lumen commands (dry-run)."""
+    from cli.lib.pytorch.workflow_parser import parse_workflow
+
+    entries = parse_workflow(yaml_path, runner_filter)
+
+    if not entries:
+        print(f"No entries found matching runner_filter={runner_filter!r}")
+        return
+
+    # Group by build_env
+    by_build_env: dict[str, list[dict]] = {}
+    for entry in entries:
+        by_build_env.setdefault(entry["build_env"], []).append(entry)
+
+    for build_env, group in by_build_env.items():
+        build_runner = group[0]["build_runner"]
+        print(f"{build_env}  (build: {build_runner})")
+        for entry in group:
+            config = entry["config"]
+            test_runner = entry["test_runner"]
+            lumen_cmd = (
+                f"lumen test pytorch-core"
+                f" --test-config {config}"
+                f" --build-env {build_env}"
+                f" --no-upload"
+            )
+            print(f"  {config:<30} {test_runner}")
+            print(f"    {lumen_cmd}")
+        print()
 
 
 # ---------------------------------------------------------------------------
@@ -264,6 +305,8 @@ class PytorchTestRunner(BaseRunner):
         )
         self.no_upload = getattr(args, "no_upload", False)
         self.print_plan = getattr(args, "print_plan", False)
+        self.from_workflow = getattr(args, "workflow", None)
+        self.runner_filter = getattr(args, "runner_filter", "linux.2xlarge")
         raw_filters = getattr(args, "filter", []) or []
         self.filters = (
             dict(f.split("=", 1) for f in raw_filters) if raw_filters else None
@@ -280,6 +323,56 @@ class PytorchTestRunner(BaseRunner):
                 print(f"    • {step.test_id}")
 
     def run(self) -> None:
+        if self.from_workflow:
+            from cli.lib.pytorch.workflow_parser import (
+                parse_workflow,
+                resolve_workflow_path,
+            )
+
+            path = resolve_workflow_path(self.from_workflow)
+            if not self.test_config and not self.group_id:
+                raise RuntimeError("--workflow requires --test-config or --group-id")
+            entries = parse_workflow(str(path), runner_filter="")
+            # filter by test_config
+            config_filter = self.test_config
+            if self.group_id:
+                registry = PYTORCH_TEST_LIBRARY
+                if self.group_id not in registry:
+                    raise RuntimeError(f"group '{self.group_id}' not found")
+                plan = registry[self.group_id]
+                # use plan's test_configs as filter (string conditions only)
+                config_filter = next(
+                    (c for c in plan.test_configs if isinstance(c, str)), None
+                )
+            matched = [
+                e for e in entries if config_filter and config_filter in e["config"]
+            ]
+            if not matched:
+                print(f"No combos found for config={config_filter!r} in {path}")
+                return
+            output = []
+            for e in matched:
+                lumen_cmd = (
+                    f"lumen test pytorch-core"
+                    f" --test-config {e['config']}"
+                    f" --build-env {e['build_env']}"
+                )
+                output.append(
+                    {
+                        "build_env": e["build_env"],
+                        "build_runner": e["build_runner"],
+                        "build_image": e.get("build_image", ""),
+                        "config": e["config"],
+                        "test_runner": e["test_runner"],
+                        "lumen_cmd": lumen_cmd,
+                    }
+                )
+            print(json.dumps(output, indent=2))
+            return
+        if not self.build_env:
+            raise RuntimeError("--build-env is required")
+        if not self.group_id and not self.test_config:
+            raise RuntimeError("--group-id or --test-config is required")
         if self.group_id:
             # Explicit group_id: run exactly this plan (hardware mismatch → warning).
             group_ids = [self.group_id]
