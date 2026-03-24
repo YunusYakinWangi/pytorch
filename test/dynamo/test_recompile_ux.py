@@ -321,268 +321,44 @@ class RecompileUxTests(torch._dynamo.test_case.TestCase):
         self.assertEqual(res, inp + 3)
 
 
-class RegionRecompileLimitTests(torch._dynamo.test_case.TestCase):
+class IsolatedCacheTests(torch._dynamo.test_case.TestCase):
+    """Tests for isolated_cache=True on torch.compile(). Each compile region
+    gets its own isolated cache via C++ region_id filtering."""
+
     @staticmethod
     def _num_cache_entries(code):
         return len(torch._dynamo.eval_frame._debug_get_cache_entry_list(code))
 
-    def test_region_recompile_limit_basic(self):
-        cnt = torch._dynamo.testing.CompileCounter()
-
-        def f(x, y):
-            return x + y
-
-        opt_f = torch.compile(f, backend=cnt, region_recompile_limit=2)
-
-        opt_f(torch.randn(3), torch.randn(3))
-        self.assertEqual(self._num_cache_entries(f), 1)
-
-        opt_f(torch.randn(3, dtype=torch.float64), torch.randn(3, dtype=torch.float64))
-        self.assertEqual(self._num_cache_entries(f), 2)
-
-        # Third dtype should NOT trigger recompilation (region_recompile_limit=2 reached)
-        opt_f(torch.randn(3, dtype=torch.float16), torch.randn(3, dtype=torch.float16))
-        self.assertEqual(self._num_cache_entries(f), 2)
-
-    def test_region_recompile_limit_independent_per_function(self):
-        cnt_f = torch._dynamo.testing.CompileCounter()
-        cnt_g = torch._dynamo.testing.CompileCounter()
-
-        def f(x):
-            return x + 1
-
-        def g(x):
-            return x * 2
-
-        opt_f = torch.compile(f, backend=cnt_f, region_recompile_limit=1)
-        opt_g = torch.compile(g, backend=cnt_g, region_recompile_limit=3)
-
-        opt_f(torch.randn(3))
-        self.assertEqual(self._num_cache_entries(f), 1)
-
-        # f should stop recompiling after 1
-        opt_f(torch.randn(3, dtype=torch.float64))
-        self.assertEqual(self._num_cache_entries(f), 1)
-
-        # g should allow up to 3
-        opt_g(torch.randn(3))
-        opt_g(torch.randn(3, dtype=torch.float64))
-        opt_g(torch.randn(3, dtype=torch.float16))
-        self.assertEqual(self._num_cache_entries(g), 3)
-
-        # g should stop at 3
-        opt_g(torch.randn(3, dtype=torch.bfloat16))
-        self.assertEqual(self._num_cache_entries(g), 3)
-
-    def test_region_recompile_limit_none_uses_global(self):
-        cnt = torch._dynamo.testing.CompileCounter()
-
-        def f(x, y):
-            return x + y
-
-        opt_f = torch.compile(f, backend=cnt)
-
-        # Without region_recompile_limit, should use global recompile_limit (default 8)
-        for i in range(10):
-            dtype = [
-                torch.float32,
-                torch.float64,
-                torch.float16,
-                torch.bfloat16,
-                torch.int32,
-                torch.int64,
-                torch.int16,
-                torch.int8,
-                torch.uint8,
-                torch.complex64,
-            ][i]
-            opt_f(torch.ones(3, dtype=dtype), torch.ones(3, dtype=dtype))
-
-        self.assertEqual(
-            self._num_cache_entries(f), torch._dynamo.config.recompile_limit
-        )
-
-    def test_region_recompile_limit_multi_function(self):
-        cnt = torch._dynamo.testing.CompileCounter()
-
-        def helper(x):
-            return x.sin()
-
-        def f(x):
-            y = helper(x)
-            return y.cos()
-
-        opt_f = torch.compile(f, backend=cnt, region_recompile_limit=2)
-
-        opt_f(torch.randn(3))
-        self.assertEqual(self._num_cache_entries(f), 1)
-
-        opt_f(torch.randn(3, dtype=torch.float64))
-        self.assertEqual(self._num_cache_entries(f), 2)
-
-        # Third dtype hits the limit for the whole region
-        opt_f(torch.randn(3, dtype=torch.float16))
-        self.assertEqual(self._num_cache_entries(f), 2)
-
-    def test_region_recompile_limit_same_function_different_regions(self):
+    def test_isolated_cache_same_function_different_regions(self):
+        """Two torch.compile() calls on the same function with isolated_cache
+        get fully independent caches."""
         cnt1 = torch._dynamo.testing.CompileCounter()
         cnt2 = torch._dynamo.testing.CompileCounter()
 
         def f(x, y):
             return x + y
 
-        opt_f = torch.compile(f, backend=cnt1, region_recompile_limit=2)
-        opt_g = torch.compile(f, backend=cnt2, region_recompile_limit=1)
+        opt_f = torch.compile(f, backend=cnt1, isolated_cache=True)
+        opt_g = torch.compile(f, backend=cnt2, isolated_cache=True)
 
-        # opt_f: first compilation
         opt_f(torch.randn(3), torch.randn(3))
         self.assertEqual(cnt1.frame_count, 1)
 
-        # opt_f: second compilation (different dtype)
         opt_f(
             torch.randn(3, dtype=torch.float64),
             torch.randn(3, dtype=torch.float64),
         )
         self.assertEqual(cnt1.frame_count, 2)
 
-        # opt_g: should still be able to compile once despite f already having
-        # 2 cache entries from opt_f, because opt_g is a separate region
+        # opt_g can compile despite f.__code__ having 2 entries from opt_f
         opt_g(torch.randn(3, dtype=torch.float16), torch.randn(3, dtype=torch.float16))
         self.assertEqual(cnt2.frame_count, 1)
 
-        # opt_g: second call with new dtype should NOT compile (limit=1 reached)
-        opt_g(
-            torch.randn(3, dtype=torch.bfloat16),
-            torch.randn(3, dtype=torch.bfloat16),
-        )
-        self.assertEqual(cnt2.frame_count, 1)
-
-        # opt_f: third dtype should NOT compile (limit=2 reached for opt_f)
-        opt_f(
-            torch.randn(3, dtype=torch.float16),
-            torch.randn(3, dtype=torch.float16),
-        )
-        self.assertEqual(cnt1.frame_count, 2)
-
-    def test_region_recompile_limit_graph_break(self):
-        cnt = torch._dynamo.testing.CompileCounter()
-
-        def f(x):
-            a = x.sin()
-            # graph break
-            print("graph break")
-            b = a.cos()
-            return b
-
-        opt_f = torch.compile(f, backend=cnt, region_recompile_limit=2)
-
-        # First dtype: compiles two subgraphs (before and after graph break)
-        opt_f(torch.randn(3))
-        self.assertEqual(self._num_cache_entries(f), 1)
-        self.assertEqual(cnt.frame_count, 2)
-
-        # Second dtype: f recompiles (f=2, max=2 hits limit),
-        # resume function can't recompile because max already at limit
-        opt_f(torch.randn(3, dtype=torch.float64))
-        self.assertEqual(self._num_cache_entries(f), 2)
-        frame_count_after_2 = cnt.frame_count
-
-        # Third dtype: both subgraphs should hit the limit
-        opt_f(torch.randn(3, dtype=torch.float16))
-        self.assertEqual(self._num_cache_entries(f), 2)
-        self.assertEqual(cnt.frame_count, frame_count_after_2)
-
-        # Verify no code object exceeds the limit
-        all_entries = torch._dynamo.eval_frame._debug_get_all_cache_entry_lists(f)
-        for code, entries in all_entries.items():
-            self.assertLessEqual(
-                len(entries),
-                2,
-                f"{code.co_name} has {len(entries)} entries, exceeds limit of 2",
-            )
-
-    @torch._dynamo.config.patch(automatic_dynamic_shapes=True)
-    def test_region_recompile_limit_graph_break_automatic_dynamic(self):
-        cnt = torch._dynamo.testing.CompileCounter()
-
-        def f(x):
-            a = x.sin()
-            print("graph break")
-            b = a.cos()
-            return b
-
-        opt_f = torch.compile(f, backend=cnt, region_recompile_limit=2)
-
-        # Call 1: compiles both subgraphs (static shapes)
-        opt_f(torch.randn(4, 8))
-        self.assertEqual(self._num_cache_entries(f), 1)
-        frame_count_after_1 = cnt.frame_count
-
-        # Call 2: dim0 changes -> both f and resume function recompile
-        # with automatic dynamic (dim0 becomes dynamic)
-        opt_f(torch.randn(5, 8))
-        self.assertEqual(self._num_cache_entries(f), 2)
-        frame_count_after_2 = cnt.frame_count
-        self.assertGreater(frame_count_after_2, frame_count_after_1)
-
-        # Call 3: dim1 changes -> region_recompile_limit=2 reached,
-        # neither f nor resume function should recompile
-        opt_f(torch.randn(5, 9))
-        self.assertEqual(cnt.frame_count, frame_count_after_2)
-
-        # Verify ALL code objects (f + resume functions) respect the limit
-        all_entries = torch._dynamo.eval_frame._debug_get_all_cache_entry_lists(f)
-        for code, entries in all_entries.items():
-            self.assertLessEqual(
-                len(entries),
-                2,
-                f"{code.co_name} has {len(entries)} entries, exceeds limit of 2",
-            )
-
-    @torch._dynamo.config.patch(recompile_limit=1)
-    def test_region_recompile_limit_overrides_global(self):
-        """region_recompile_limit overrides config.recompile_limit. Multiple
-        torch.compile() calls on the same function can each compile
-        independently even when the shared code object's total entries
-        exceed config.recompile_limit. This is the factory pattern fix."""
-        cnt1 = torch._dynamo.testing.CompileCounter()
-        cnt2 = torch._dynamo.testing.CompileCounter()
-
-        def f(x):
-            return x.sin()
-
-        opt_f = torch.compile(f, backend=cnt1, region_recompile_limit=2)
-        opt_g = torch.compile(f, backend=cnt2, region_recompile_limit=2)
-
-        # opt_f compiles twice (under region limit of 2, over global limit of 1)
-        opt_f(torch.randn(3))
-        opt_f(torch.randn(3, dtype=torch.float64))
-        self.assertEqual(cnt1.frame_count, 2)
-
-        # opt_g can still compile despite f.__code__ having 2+ entries
-        # (global recompile_limit=1 would block this without the override)
-        opt_g(torch.randn(4))
-        self.assertEqual(cnt2.frame_count, 1)
-
-        # opt_f hits its own region limit
-        opt_f(torch.randn(3, dtype=torch.float16))
-        self.assertEqual(cnt1.frame_count, 2)
-
-        # opt_g can compile once more (under its region limit of 2)
-        opt_g(torch.randn(4, dtype=torch.float64))
-        self.assertEqual(cnt2.frame_count, 2)
-
-        # opt_g hits its own region limit
-        opt_g(torch.randn(4, dtype=torch.float16))
-        self.assertEqual(cnt2.frame_count, 2)
-
     @torch._dynamo.config.patch(recompile_limit=1, fail_on_recompile_limit_hit=True)
-    def test_region_recompile_limit_factory_pattern(self):
-        """Reproduces the factory pattern from the workplace post: a cached
-        factory creates torch.compile wrappers around the same inner function.
-        Without region_recompile_limit, the third factory instance hits the
-        global recompile_limit. With region_recompile_limit, each instance
-        gets its own budget."""
+    def test_isolated_cache_factory_pattern(self):
+        """Factory creates multiple torch.compile wrappers around the same
+        inner function. Each gets its own isolated cache, so the global
+        recompile_limit doesn't block them."""
         from functools import cache
 
         def core(x):
@@ -590,92 +366,98 @@ class RegionRecompileLimitTests(torch._dynamo.test_case.TestCase):
 
         @cache
         def factory(key):
-            @torch.compile(
-                fullgraph=True,
-                dynamic=False,
-                region_recompile_limit=1,
-            )
+            @torch.compile(fullgraph=True, dynamic=False, isolated_cache=True)
             def frontend(x, n):
                 return core(x) + n
 
             return frontend
 
-        # Each factory instance can compile once with its own budget,
-        # even though global recompile_limit=1 and fail_on_recompile_limit_hit=True
         factory("foo")(torch.ones(3), 3)
         factory("bar")(torch.ones(4), 3)
         factory("baz")(torch.ones(5), 3)
 
-    @torch._dynamo.config.patch(accumulated_recompile_limit=3)
-    def test_region_recompile_limit_accumulated_still_applies(self):
-        """accumulated_recompile_limit still applies as a hard safety cap
-        even when region_recompile_limit is set."""
+    def test_isolated_cache_static_and_dynamic(self):
+        """Two compile regions on the same function: one static, one dynamic.
+        Their cache entries don't interfere."""
+        cnt_static = torch._dynamo.testing.CompileCounter()
+        cnt_dynamic = torch._dynamo.testing.CompileCounter()
+
+        def magic(x, y):
+            return x.sum() - y.sum()
+
+        magic_static = torch.compile(
+            magic, backend=cnt_static, dynamic=False, isolated_cache=True
+        )
+        magic_dynamic = torch.compile(
+            magic, backend=cnt_dynamic, dynamic=True, isolated_cache=True
+        )
+
+        magic_static(torch.randn(128, 32), torch.randn(128, 32))
+        self.assertEqual(cnt_static.frame_count, 1)
+
+        magic_dynamic(torch.randn(64, 16), torch.randn(64, 16))
+        self.assertEqual(cnt_dynamic.frame_count, 1)
+
+        # Static: same shape -> cache hit
+        magic_static(torch.randn(128, 32), torch.randn(128, 32))
+        self.assertEqual(cnt_static.frame_count, 1)
+
+        # Dynamic: different shape -> cache hit (dynamic graph)
+        magic_dynamic(torch.randn(32, 8), torch.randn(32, 8))
+        self.assertEqual(cnt_dynamic.frame_count, 1)
+
+    @torch._dynamo.config.patch(recompile_limit=1)
+    def test_isolated_cache_fullgraph_raises(self):
+        """With fullgraph=True, hitting the recompile limit raises
+        FailOnRecompileLimitHit."""
         cnt = torch._dynamo.testing.CompileCounter()
 
         def f(x):
             return x.sin()
 
-        # region limit is high, but accumulated limit is low
-        opt_f = torch.compile(f, backend=cnt, region_recompile_limit=10)
+        opt_f = torch.compile(f, backend=cnt, fullgraph=True, isolated_cache=True)
 
         opt_f(torch.randn(3))
-        opt_f(torch.randn(3, dtype=torch.float64))
-        opt_f(torch.randn(3, dtype=torch.float16))
-        # accumulated_recompile_limit=3 should cap here
-        opt_f(torch.randn(3, dtype=torch.bfloat16))
-        self.assertLessEqual(cnt.frame_count, 3)
+        self.assertEqual(cnt.frame_count, 1)
 
-    def test_region_recompile_limit_resume_exceeds_max_budget(self):
-        """Resume function recompiles independently via global changes.
-        With region_recompile_limit=3, f compiles once but the resume function
-        recompiles up to 3 times. Once any code object in the region hits the
-        limit, all code objects in the region stop compiling."""
-        cnt = torch._dynamo.testing.CompileCounter()
+        with self.assertRaisesRegex(
+            FailOnRecompileLimitHit,
+            "reached with fullgraph=True",
+        ):
+            opt_f(torch.randn(3, dtype=torch.float64))
 
-        mode = {"value": "a"}
+    def test_isolated_cache_two_models_independent(self):
+        """Two compile regions wrapping the same model. Recompilations in
+        one region don't affect the other."""
+        cnt1 = torch._dynamo.testing.CompileCounter()
+        cnt2 = torch._dynamo.testing.CompileCounter()
 
-        def f(x):
-            a = x.sin()
-            print("graph break")
-            if mode["value"] == "a":
-                return a.cos()
-            elif mode["value"] == "b":
-                return a.tan()
-            elif mode["value"] == "c":
-                return a.exp()
-            else:
-                return a + 1
+        def helper(x):
+            return x.sin()
 
-        opt_f = torch.compile(f, backend=cnt, region_recompile_limit=3)
+        def model(x):
+            return helper(x).cos()
 
-        # Call 1: f compiles, resume compiles. max=1
-        opt_f(torch.randn(4, 8))
-        frame_count_after_1 = cnt.frame_count
+        opt_a = torch.compile(model, backend=cnt1, isolated_cache=True)
+        opt_b = torch.compile(model, backend=cnt2, isolated_cache=True)
 
-        # Call 2: mode changes, f cache hit, resume recompiles. max=2
-        mode["value"] = "b"
-        opt_f(torch.randn(4, 8))
-        frame_count_after_2 = cnt.frame_count
-        self.assertGreater(frame_count_after_2, frame_count_after_1)
+        opt_a(torch.randn(3))
+        frame_count_a = cnt1.frame_count
 
-        # Call 3: mode changes, f cache hit, resume recompiles. max=3
-        mode["value"] = "c"
-        opt_f(torch.randn(4, 8))
-        frame_count_after_3 = cnt.frame_count
-        self.assertGreater(frame_count_after_3, frame_count_after_2)
+        opt_b(torch.randn(4))
+        frame_count_b = cnt2.frame_count
 
-        # Call 4: mode changes again. max=3, 3 >= 3 -> stop.
-        # Resume function should NOT recompile.
-        mode["value"] = "d"
-        opt_f(torch.randn(4, 8))
-        self.assertEqual(cnt.frame_count, frame_count_after_3)
+        # Region A recompiles, doesn't affect region B
+        opt_a(torch.randn(3, dtype=torch.float64))
+        self.assertGreater(cnt1.frame_count, frame_count_a)
+
+        opt_b(torch.randn(4))
+        self.assertEqual(cnt2.frame_count, frame_count_b)
 
     @torch._dynamo.config.patch(recompile_limit=3, accumulated_recompile_limit=64)
-    def test_global_recompile_limit_resume_exceeds(self):
-        """With global recompile_limit=3, the resume function recompiles
-        independently via global changes while f gets cache hits. The global
-        limit is per-code-object, so the resume function can reach 3 entries
-        even though f only has 1. This test documents the current behavior."""
+    def test_global_recompile_limit_resume_function(self):
+        """Documents existing behavior: global recompile_limit is per-code-object.
+        Resume functions independently accumulate entries."""
         cnt = torch._dynamo.testing.CompileCounter()
 
         mode = {"value": "a"}
@@ -694,120 +476,133 @@ class RegionRecompileLimitTests(torch._dynamo.test_case.TestCase):
 
         opt_f = torch.compile(f, backend=cnt)
 
-        # Call 1: f compiles, resume compiles
         opt_f(torch.randn(4, 8))
         frame_count_after_1 = cnt.frame_count
 
-        # Call 2: mode changes, f cache hit, resume recompiles
         mode["value"] = "b"
         opt_f(torch.randn(4, 8))
-        frame_count_after_2 = cnt.frame_count
-        self.assertGreater(frame_count_after_2, frame_count_after_1)
+        self.assertGreater(cnt.frame_count, frame_count_after_1)
 
-        # Call 3: mode changes, f cache hit, resume recompiles
         mode["value"] = "c"
         opt_f(torch.randn(4, 8))
         frame_count_after_3 = cnt.frame_count
-        self.assertGreater(frame_count_after_3, frame_count_after_2)
 
-        # Call 4: mode changes. Global limit is per-code-object, so resume
-        # has 3 entries and should stop. But f only has 1, so if the limit
-        # were checked across all code objects, this would have stopped earlier.
+        # Resume hits limit=3, stops
         mode["value"] = "d"
         opt_f(torch.randn(4, 8))
-
-        # With per-code-object global limit: resume hits limit=3, stops.
-        # This PASSES because the resume function individually reaches the limit.
         self.assertEqual(cnt.frame_count, frame_count_after_3)
 
-    def test_region_recompile_limit_resume_function_independent(self):
-        """Resume function recompiles independently when a global used only
-        after the graph break changes, while the main function gets cache hits."""
-        cnt = torch._dynamo.testing.CompileCounter()
-
-        mode = {"value": "a"}
+    def test_isolated_cache_mark_dynamic_vs_static(self):
+        """Two regions on the same function: one with mark_static, one with
+        mark_dynamic. Their guards don't interfere."""
+        cnt_static = torch._dynamo.testing.CompileCounter()
+        cnt_dynamic = torch._dynamo.testing.CompileCounter()
 
         def f(x):
-            a = x.sin()
-            print("graph break")
-            if mode["value"] == "a":
-                return a.cos()
-            else:
-                return a.tan()
+            return x.sin()
 
-        opt_f = torch.compile(f, backend=cnt, region_recompile_limit=2)
+        opt_static = torch.compile(f, backend=cnt_static, isolated_cache=True)
+        opt_dynamic = torch.compile(f, backend=cnt_dynamic, isolated_cache=True)
 
-        # Call 1: compiles f + resume function
-        opt_f(torch.randn(4, 8))
-        f_entries_after_1 = self._num_cache_entries(f)
-        frame_count_after_1 = cnt.frame_count
+        # Static region: mark dim0 as static
+        x_static = torch.randn(4, 8)
+        torch._dynamo.mark_static(x_static, 0)
+        opt_static(x_static)
+        self.assertEqual(cnt_static.frame_count, 1)
 
-        # Call 2: change mode -> f cache hit, resume function recompiles
-        mode["value"] = "b"
-        opt_f(torch.randn(4, 8))
-        frame_count_after_2 = cnt.frame_count
-        # f should NOT have recompiled
-        self.assertEqual(self._num_cache_entries(f), f_entries_after_1)
-        # but resume function should have recompiled
-        self.assertGreater(frame_count_after_2, frame_count_after_1)
+        # Dynamic region: mark dim0 as dynamic
+        x_dynamic = torch.randn(4, 8)
+        torch._dynamo.mark_dynamic(x_dynamic, 0)
+        opt_dynamic(x_dynamic)
+        self.assertEqual(cnt_dynamic.frame_count, 1)
 
-        # Call 3: change mode again -> resume function should NOT recompile
-        # (region_recompile_limit=2 reached for the resume function)
-        mode["value"] = "c"
-        opt_f(torch.randn(4, 8))
-        self.assertEqual(cnt.frame_count, frame_count_after_2)
+        # Static region: same shape -> cache hit
+        x_static2 = torch.randn(4, 8)
+        torch._dynamo.mark_static(x_static2, 0)
+        opt_static(x_static2)
+        self.assertEqual(cnt_static.frame_count, 1)
 
-        # Verify via _debug_get_all_cache_entry_lists
-        all_entries = torch._dynamo.eval_frame._debug_get_all_cache_entry_lists(f)
-        for code, entries in all_entries.items():
-            self.assertLessEqual(
-                len(entries),
-                2,
-                f"{code.co_name} has {len(entries)} entries, exceeds limit of 2",
-            )
+        # Dynamic region: different shape -> cache hit (dynamic graph)
+        x_dynamic2 = torch.randn(7, 8)
+        opt_dynamic(x_dynamic2)
+        self.assertEqual(cnt_dynamic.frame_count, 1)
 
-    def test_region_recompile_limit_graph_break_asymmetric(self):
-        cnt = torch._dynamo.testing.CompileCounter()
+        # Static region: different shape -> recompile (static guard fails)
+        x_static3 = torch.randn(7, 8)
+        torch._dynamo.mark_static(x_static3, 0)
+        opt_static(x_static3)
+        self.assertEqual(cnt_static.frame_count, 2)
 
-        results = []
+    @torch._dynamo.config.patch(automatic_dynamic_shapes=True)
+    def test_isolated_cache_auto_dynamic_shared_pgo(self):
+        """With isolated_cache, PGO (frame_state) is shared. Region B
+        benefits from region A's shape observations — goes directly to
+        dynamic compilation instead of starting static."""
+        cnt_a = torch._dynamo.testing.CompileCounter()
+        cnt_b = torch._dynamo.testing.CompileCounter()
 
-        def f(x, y):
-            a = x.sin()
-            results.append(a)
-            # graph break
-            print("graph break")
-            # Second subgraph only depends on y, not a or x
-            b = y.cos()
-            return b
+        def f(x):
+            return x.sin()
 
-        opt_f = torch.compile(f, backend=cnt, region_recompile_limit=4)
+        opt_a = torch.compile(f, backend=cnt_a, isolated_cache=True)
+        opt_b = torch.compile(f, backend=cnt_b, isolated_cache=True)
 
-        # Call 1: x=(4,8), y=(4,8) -> compiles both subgraphs
-        opt_f(torch.randn(4, 8), torch.randn(4, 8))
-        self.assertEqual(self._num_cache_entries(f), 1)
-        self.assertEqual(cnt.frame_count, 2)
+        # Region A: two calls with different shapes -> PGO marks dim0 dynamic
+        opt_a(torch.randn(3, 4))
+        opt_a(torch.randn(5, 4))
+        self.assertEqual(cnt_a.frame_count, 2)
 
-        # Call 2: x=(7,8), y=(4,8) -> subgraph1 recompiles (x shape changed),
-        # subgraph2 cache hit (y unchanged, a not used after break)
-        opt_f(torch.randn(7, 8), torch.randn(4, 8))
-        self.assertEqual(self._num_cache_entries(f), 2)
-        self.assertEqual(cnt.frame_count, 3)
+        # Region B: first call. PGO already knows dim0 is dynamic (shared).
+        # Should compile once with dynamic dim0.
+        opt_b(torch.randn(7, 4))
+        self.assertEqual(cnt_b.frame_count, 1)
 
-        # Call 3: x=(5,8), y=(4,8) -> subgraph1 recompiles again, subgraph2 still hit
-        opt_f(torch.randn(5, 8), torch.randn(4, 8))
-        self.assertEqual(self._num_cache_entries(f), 3)
-        self.assertEqual(cnt.frame_count, 4)
+        # Region B: different dim0 -> cache hit (dynamic graph)
+        opt_b(torch.randn(9, 4))
+        self.assertEqual(cnt_b.frame_count, 1)
 
-        # f has 3 cache entries, resume function should have only 1
-        all_entries = torch._dynamo.eval_frame._debug_get_all_cache_entry_lists(f)
-        counts = {c.co_name: len(entries) for c, entries in all_entries.items()}
-        self.assertEqual(counts["f"], 3)
-        resume_counts = {
-            k: v for k, v in counts.items() if k.startswith("torch_dynamo_resume")
-        }
-        self.assertTrue(len(resume_counts) > 0, f"No resume functions found: {counts}")
-        for name, count in resume_counts.items():
-            self.assertEqual(count, 1, f"{name} has {count} entries, expected 1")
+    def test_isolated_cache_explicit_dispatch_static_vs_dynamic(self):
+        """With isolated_cache, users can explicitly dispatch to static or
+        dynamic compiled regions without relying on automatic dynamic
+        transitions or exclusion guards. Each region has its own compilation
+        strategy set once at compile time."""
+        cnt_static = torch._dynamo.testing.CompileCounter()
+        cnt_dynamic = torch._dynamo.testing.CompileCounter()
+
+        def magic(x, y):
+            return x.sum() - y.sum()
+
+        # Set strategy once at compile time — no per-call mark_dynamic needed
+        magic_static = torch.compile(
+            magic, backend=cnt_static, dynamic=False, isolated_cache=True
+        )
+        magic_dynamic = torch.compile(
+            magic, backend=cnt_dynamic, dynamic=True, isolated_cache=True
+        )
+
+        # Static region: always uses fixed shapes, no recompilation
+        static_shape = (128, 32)
+        magic_static(torch.randn(*static_shape), torch.randn(*static_shape))
+        magic_static(torch.randn(*static_shape), torch.randn(*static_shape))
+        self.assertEqual(cnt_static.frame_count, 1)
+
+        # Dynamic region: varying shapes, single dynamic graph handles all
+        magic_dynamic(torch.randn(64, 16), torch.randn(64, 16))
+        magic_dynamic(torch.randn(32, 8), torch.randn(32, 8))
+        magic_dynamic(torch.randn(128, 64), torch.randn(128, 64))
+        self.assertEqual(cnt_dynamic.frame_count, 1)
+
+        # Static region still works — not polluted by dynamic region
+        magic_static(torch.randn(*static_shape), torch.randn(*static_shape))
+        self.assertEqual(cnt_static.frame_count, 1)
+
+        # Static region with DIFFERENT shape -> recompiles (static = specialized)
+        magic_static(torch.randn(64, 16), torch.randn(64, 16))
+        self.assertEqual(cnt_static.frame_count, 2)
+
+        # Dynamic region still serves any shape without recompilation
+        magic_dynamic(torch.randn(256, 128), torch.randn(256, 128))
+        self.assertEqual(cnt_dynamic.frame_count, 1)
 
 
 if __name__ == "__main__":

@@ -587,7 +587,7 @@ class ConvertFrameAssert:
         export: bool = False,
         export_constraints: Any | None = None,
         package: CompilePackage | None = None,
-        region_recompile_limit: int | None = None,
+        isolated_cache: bool = False,
     ) -> None:
         # assert export_constraints is None
         reset_graph_break_dup_checker()
@@ -596,9 +596,9 @@ class ConvertFrameAssert:
         self._export = export
         self._export_constraints = export_constraints
         self._package = package
-        self._region_recompile_limit = region_recompile_limit
+        self._isolated_cache = isolated_cache
         self._region_compilation_counts: dict[CodeType, int] = {}
-        if region_recompile_limit is not None:
+        if isolated_cache:
             global _next_region_id
             self._region_id = _next_region_id
             _next_region_id += 1
@@ -613,7 +613,7 @@ class ConvertFrameAssert:
             self._one_graph,
             self._export,
             self._export_constraints,
-            region_recompile_limit=self._region_recompile_limit,
+            isolated_cache=self._isolated_cache,
         )
 
     def __call__(
@@ -629,7 +629,7 @@ class ConvertFrameAssert:
         code = frame.f_code
 
         cache_size = compute_cache_size(frame, cache_entry)
-        cache_size.region_recompile_limit = self._region_recompile_limit
+        cache_size.isolated_cache = self._isolated_cache
         cache_size.region_num_compilations = max(
             self._region_compilation_counts.values(), default=0
         )
@@ -781,7 +781,7 @@ def convert_frame_assert(
     export: bool = False,
     export_constraints: Any | None = None,
     package: CompilePackage | None = None,
-    region_recompile_limit: int | None = None,
+    isolated_cache: bool = False,
 ) -> ConvertFrameAssert:
     """Fully convert a frame into an FX graph, raising an exception if we fail."""
     return ConvertFrameAssert(
@@ -790,7 +790,7 @@ def convert_frame_assert(
         export,
         export_constraints,
         package,
-        region_recompile_limit,
+        isolated_cache,
     )
 
 
@@ -1807,13 +1807,14 @@ def _compile(
             }
             metrics_context.set("recompile_user_contexts", user_contexts_msg)
 
-        if cache_size.exceeds_region_recompile_limit:
-            exceeded, limit_type = True, "region_recompile_limit"
-        elif cache_size.region_recompile_limit is not None:
-            # region_recompile_limit overrides config.recompile_limit, but
-            # accumulated_recompile_limit still applies as a hard safety cap.
+        if cache_size.isolated_cache:
+            # With isolated_cache, use per-region compilation count instead
+            # of global num_cache_entries. The C++ region_id isolates cache
+            # lookup; this isolates the limit check.
             if cache_size.will_compilation_exceed_accumulated_limit():
                 exceeded, limit_type = True, "accumulated_recompile_limit"
+            elif cache_size.region_num_compilations >= config.recompile_limit:
+                exceeded, limit_type = True, "recompile_limit"
             else:
                 exceeded, limit_type = False, ""
         else:
@@ -1823,14 +1824,9 @@ def _compile(
             def format_func_info(code: CodeType) -> str:
                 return f"'{code.co_name}' ({code.co_filename}:{code.co_firstlineno})"
 
-            if limit_type == "region_recompile_limit":
-                limit_value = cache_size.region_recompile_limit
-                limit_source = f"torch.compile(region_recompile_limit={limit_value})"
-                num_recompiles = cache_size.region_num_compilations
-            else:
-                limit_value = getattr(config, limit_type)
-                limit_source = f"config.{limit_type}"
-                num_recompiles = cache_size.num_cache_entries
+            limit_value = getattr(config, limit_type)
+            limit_source = f"config.{limit_type}"
+            num_recompiles = cache_size.num_cache_entries
 
             # NS: Don't add period at the end of string, as it'll be added to URL
             # rendering it incorrect
@@ -1873,7 +1869,7 @@ def _compile(
                     ) from e
                 elif one_graph:
                     raise FailOnRecompileLimitHit(
-                        "Hard failure due to fullgraph=True"
+                        f"{limit_type} reached with fullgraph=True"
                     ) from e
                 else:
                     # Set frame execution strategy to RUN_ONLY for this recompile limit case
@@ -2119,24 +2115,24 @@ class ConvertFrame:
         compiler_fn: CompilerFn,
         hooks: Hooks,
         package: CompilePackage | None = None,
-        region_recompile_limit: int | None = None,
+        isolated_cache: bool = False,
     ) -> None:
         self._torchdynamo_orig_backend = compiler_fn
         self._inner_convert = convert_frame_assert(
             compiler_fn,
             one_graph=False,
             package=package,
-            region_recompile_limit=region_recompile_limit,
+            isolated_cache=isolated_cache,
         )
         self._hooks = hooks
-        self._region_recompile_limit = region_recompile_limit
+        self._isolated_cache = isolated_cache
 
     @property
     def _clone_with_backend(self) -> Callable[[WrapBackendDebug], ConvertFrame]:
         return lambda backend: convert_frame(
             backend,
             self._hooks,
-            region_recompile_limit=self._region_recompile_limit,
+            isolated_cache=self._isolated_cache,
         )
 
     def __call__(
@@ -2255,9 +2251,9 @@ class ConvertFrame:
                 return ConvertFrameReturn(
                     frame_exec_strategy=e.frame_exec_strategy,
                     # Don't apply strategy to the code object when
-                    # region_recompile_limit is set — other regions sharing
+                    # isolated_cache is set — other regions sharing
                     # this code object should still be able to compile.
-                    apply_to_code=self._region_recompile_limit is None,
+                    apply_to_code=not self._isolated_cache,
                 )
 
         return ConvertFrameReturn()
@@ -2267,14 +2263,14 @@ def convert_frame(
     compiler_fn: CompilerFn,
     hooks: Hooks,
     package: CompilePackage | None = None,
-    region_recompile_limit: int | None = None,
+    isolated_cache: bool = False,
 ) -> ConvertFrame:
     """Try to convert a frame into an FX graph, if error leave frame unmodified"""
     return ConvertFrame(
         compiler_fn,
         hooks,
         package=package,
-        region_recompile_limit=region_recompile_limit,
+        isolated_cache=isolated_cache,
     )
 
 

@@ -2593,7 +2593,7 @@ def compile(
     mode: str | None = None,
     options: dict[str, str | builtins.int | builtins.bool | _Callable] | None = None,
     disable: builtins.bool = False,
-    region_recompile_limit: builtins.int | None = None,
+    isolated_cache: builtins.bool = False,
 ) -> (
     _Callable[[_Callable[_InputT, _RetT]], _Callable[_InputT, _RetT]]
     | _Callable[_InputT, _RetT]
@@ -2684,17 +2684,23 @@ def compile(
 
         - For inductor you can see the full list of configs that it supports by calling `torch._inductor.list_options()`
        disable (bool): Turn torch.compile() into a no-op for testing
-       region_recompile_limit (int or None): Maximum number of recompilations
-        for this specific compiled region. When the limit is reached, further
-        recompilations are suppressed and the function falls back to eager.
-        If None (default), the global ``torch._dynamo.config.recompile_limit``
-        is used instead.
+       isolated_cache (bool): If True, this compiled region gets its own
+        isolated cache. Cache entries from this region are invisible to other
+        regions, even if they compile the same function. Useful for the factory
+        pattern (multiple torch.compile wrappers around the same function) and
+        for using the same function with different compile configurations
+        (e.g., static vs dynamic shapes).
 
     Example::
 
         @torch.compile(options={"triton.cudagraphs": True}, fullgraph=True)
         def foo(x):
             return torch.sin(x) + torch.cos(x)
+
+
+        # Isolate cache for static and dynamic versions of the same function
+        magic_static = torch.compile(magic, dynamic=False, isolated_cache=True)
+        magic_dynamic = torch.compile(magic, dynamic=True, isolated_cache=True)
 
     """
     import sysconfig
@@ -2726,7 +2732,7 @@ def compile(
                 mode=mode,
                 options=options,
                 disable=disable,
-                region_recompile_limit=region_recompile_limit,
+                isolated_cache=isolated_cache,
             )
 
         return fn
@@ -2783,7 +2789,7 @@ def compile(
         dynamic=dynamic,
         disable=disable,
         guard_filter_fn=guard_filter_fn,
-        region_recompile_limit=region_recompile_limit,
+        isolated_cache=isolated_cache,
     )(model)  # type: ignore[return-value]
 
 
