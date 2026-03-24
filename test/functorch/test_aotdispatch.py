@@ -74,7 +74,10 @@ from torch.fx.experimental.symbolic_shapes import GuardOnDataDependentSymNode, S
 from torch.nn.attention.flex_attention import flex_attention
 from torch.nn.utils.rnn import PackedSequence
 from torch.testing import FileCheck
-from torch.testing._internal.common_cuda import SM80OrLater
+from torch.testing._internal.common_cuda import (
+    SM80OrLater,
+    xfailIfSM89OrLaterOnWindows,
+)
 from torch.testing._internal.common_device_type import (
     instantiate_device_type_tests,
     ops,
@@ -2599,6 +2602,7 @@ def forward(self, primals_1, primals_2):
             )
 
     # https://github.com/pytorch/pytorch/issues/106456
+    @xfailIfSM89OrLaterOnWindows("Sporadic failure on Windows")
     def test_input_mutation_noncontiguous(self):
         def f(a):
             a.mul_(2)

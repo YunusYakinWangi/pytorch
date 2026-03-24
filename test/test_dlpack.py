@@ -2,6 +2,7 @@
 
 import torch
 from torch.testing import make_tensor
+from torch.testing._internal.common_cuda import xfailIfSM89OrLaterOnWindows
 from torch.testing._internal.common_device_type import (
     deviceCountAtLeast,
     dtypes,
@@ -577,6 +578,7 @@ class TestTorchDlPack(TestCase):
         ):
             from_dlpack(inp)
 
+    @xfailIfSM89OrLaterOnWindows("Failing on Windows on sm89+")
     @skipMeta
     @onlyNativeDeviceTypes
     @skipXPUIf(True, "https://github.com/intel/torch-xpu-ops/issues/3074")
