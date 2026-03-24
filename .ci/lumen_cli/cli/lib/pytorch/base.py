@@ -62,25 +62,30 @@ def resolve_to_list(spec: Any, build_env: str) -> list[str]:
 
 
 DeviceSpec = Union[str, EnvMap]
-ModeSpec   = Union[list[str], EnvMap]
-DtypeSpec  = Union[str, list[str], EnvMap]
+ModeSpec = Union[list[str], EnvMap]
+DtypeSpec = Union[str, list[str], EnvMap]
 
 
 # ---------------------------------------------------------------------------
 # Common pre-built conditions
 # ---------------------------------------------------------------------------
 
+
 def is_cuda(env: str) -> bool:
     return "cuda" in env and "rocm" not in env
+
 
 def is_rocm(env: str) -> bool:
     return "rocm" in env
 
+
 def is_xpu(env: str) -> bool:
     return "xpu" in env
 
+
 def is_gpu(env: str) -> bool:
     return is_cuda(env) or is_rocm(env) or is_xpu(env)
+
 
 def is_cpu_only(env: str) -> bool:
     return not is_gpu(env)
@@ -159,15 +164,15 @@ class BasePytorchTestPlan:
     extra_args: list[ExtraArg] = field(default_factory=list)
 
     def is_eligible(self, build_env: str, test_config: str = "") -> bool:
-        env_ok = not self.run_on or any(
-            matches_env(c, build_env) for c in self.run_on
-        )
+        env_ok = not self.run_on or any(matches_env(c, build_env) for c in self.run_on)
         config_ok = not self.test_configs or any(
             matches_env(c, test_config) for c in self.test_configs
         )
         return env_ok and config_ok
 
-    def get_steps(self, build_env: str, shard_id: int = 1, num_shards: int = 1) -> list[TestStep]:
+    def get_steps(
+        self, build_env: str, shard_id: int = 1, num_shards: int = 1
+    ) -> list[TestStep]:
         return self.steps
 
 
@@ -183,6 +188,7 @@ class CoreTestPlan(BasePytorchTestPlan):
     Use `steps` for simple plans. Use `get_steps_fn` when steps depend on
     shard_id / num_shards (or build_env) and must be generated at runtime.
     """
+
     get_steps_fn: Callable[[str, int, int], list[TestStep]] | None = None
 
     def __post_init__(self) -> None:
@@ -191,9 +197,9 @@ class CoreTestPlan(BasePytorchTestPlan):
                 f"CoreTestPlan '{self.group_id}': provide exactly one of 'steps' or 'get_steps_fn'"
             )
 
-    def get_steps(self, build_env: str, shard_id: int = 1, num_shards: int = 1) -> list[TestStep]:
+    def get_steps(
+        self, build_env: str, shard_id: int = 1, num_shards: int = 1
+    ) -> list[TestStep]:
         if self.get_steps_fn:
             return self.get_steps_fn(build_env, shard_id, num_shards)
         return self.steps
-
-
