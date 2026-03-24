@@ -1,6 +1,6 @@
 # mypy: allow-untyped-defs
 # Copyright (c) Meta Platforms, Inc. and affiliates
-from collections.abc import Sequence, Sized
+from collections.abc import Callable, Sequence, Sized
 from typing import cast
 
 import torch
@@ -1345,3 +1345,291 @@ def fft_single_dim_strategy(
     raw_dims = cast(list[int], args_schema[1])
     active_dims = {normalize_dim(d, ndim) for d in raw_dims}
     return _shard_inactive_dims(ndim, active_dims) + _pass_through_partials()
+
+
+def _index_dim_strategy(
+    args_schema: ArgsType,
+    shard_row: Callable[[int], list[Placement | _ShardingPlaceholder]],
+    partial_rules: list[list[Placement | _ShardingPlaceholder]] | None = None,
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    """Common strategy for index ops that shard on all dims except the indexed dim.
+
+    Args:
+        shard_row: given a dim d, returns the strategy row for sharding on that dim.
+        partial_rules: additional Partial passthrough strategies.
+    """
+    self_meta = cast(TensorMeta, args_schema[0])
+    ndim = len(self_meta.shape)
+    dim = normalize_dim(cast(int, args_schema[1]), ndim)
+    strategies: list[list[Placement | _ShardingPlaceholder]] = []
+    for d in range(ndim):
+        if d != dim:
+            strategies.append(shard_row(d))
+    if partial_rules:
+        strategies.extend(partial_rules)
+    return strategies
+
+
+# Partial rules for index ops with signature (self, dim, index, source).
+# index is always Replicate; self/source/output share the same Partial type.
+def _index_partial_rules(
+    reduce_ops: tuple[str, ...],
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    return [[Partial(op), Partial(op), Replicate(), Partial(op)] for op in reduce_ops]
+
+
+def _self_index_source_row(d: int) -> list[Placement | _ShardingPlaceholder]:
+    """Shard row for ops with (self, dim, index, source): shard self/source, replicate index."""
+    return [
+        _ShardingPlaceholder(d),
+        _ShardingPlaceholder(d),
+        Replicate(),
+        _ShardingPlaceholder(d),
+    ]
+
+
+@register_single_dim_strategy(
+    [aten.index_add.default, aten.index_add_.default],
+    schema_info=RuntimeSchemaInfo(1),
+)
+def index_add_single_dim_strategy(
+    op: OpOverload, args_schema: ArgsType, kwargs_schema: KwargsType
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    # sum and avg distribute over addition; max/min do NOT.
+    return _index_dim_strategy(
+        args_schema, _self_index_source_row, _index_partial_rules(("sum", "avg"))
+    )
+
+
+@register_single_dim_strategy(
+    [aten.index_copy.default, aten.index_copy_.default],
+    schema_info=RuntimeSchemaInfo(1),
+)
+def index_copy_single_dim_strategy(
+    op: OpOverload, args_schema: ArgsType, kwargs_schema: KwargsType
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    # Replacement op: all reduce types are valid.
+    return _index_dim_strategy(
+        args_schema,
+        _self_index_source_row,
+        _index_partial_rules(("sum", "avg", "max", "min")),
+    )
+
+
+@register_single_dim_strategy(
+    aten.index_fill.int_Scalar,
+    schema_info=RuntimeSchemaInfo(1),
+)
+def index_fill_scalar_single_dim_strategy(
+    op: OpOverload, args_schema: ArgsType, kwargs_schema: KwargsType
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    # Scalar fill: avg/max/min work (reduce(v,v)=v), but sum does NOT (sum(v,v)=2v).
+    return _index_dim_strategy(
+        args_schema,
+        lambda d: [_ShardingPlaceholder(d), _ShardingPlaceholder(d), Replicate()],
+        [[Partial(op), Partial(op), Replicate()] for op in ("avg", "max", "min")],
+    )
+
+
+@register_single_dim_strategy(
+    aten.index_fill.int_Tensor,
+    schema_info=RuntimeSchemaInfo(1),
+)
+def index_fill_tensor_single_dim_strategy(
+    op: OpOverload, args_schema: ArgsType, kwargs_schema: KwargsType
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    # Tensor fill: replacement op, all reduce types valid. Value tensor is Replicate
+    # in shard strategies because it's a 0-dim tensor that can't be sharded.
+    return _index_dim_strategy(
+        args_schema,
+        lambda d: [
+            _ShardingPlaceholder(d),
+            _ShardingPlaceholder(d),
+            Replicate(),
+            Replicate(),
+        ],
+        _index_partial_rules(("sum", "avg", "max", "min")),
+    )
+
+
+@register_single_dim_strategy(
+    [aten.index_reduce.default, aten.index_reduce_.default],
+    schema_info=RuntimeSchemaInfo(1),
+)
+def index_reduce_single_dim_strategy(
+    op: OpOverload, args_schema: ArgsType, kwargs_schema: KwargsType
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    return _index_dim_strategy(args_schema, _self_index_source_row)
+
+
+@register_single_dim_strategy(
+    [aten.scatter_reduce.two, aten.scatter_reduce_.two],
+    schema_info=RuntimeSchemaInfo(1),
+)
+def scatter_reduce_single_dim_strategy(
+    op: OpOverload, args_schema: ArgsType, kwargs_schema: KwargsType
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    self_meta = cast(TensorMeta, args_schema[0])
+    index_meta = cast(TensorMeta, args_schema[2])
+    src_meta = cast(TensorMeta, args_schema[3])
+    ndim = len(self_meta.shape)
+    dim = normalize_dim(cast(int, args_schema[1]), ndim)
+    strategies: list[list[Placement | _ShardingPlaceholder]] = []
+    for d in range(ndim):
+        if d != dim and self_meta.shape[d] == index_meta.shape[d] == src_meta.shape[d]:
+            strategies.append(
+                [
+                    _ShardingPlaceholder(d),
+                    _ShardingPlaceholder(d),
+                    _ShardingPlaceholder(d),
+                    _ShardingPlaceholder(d),
+                ]
+            )
+    return strategies
+
+
+@register_single_dim_strategy(
+    aten.select_scatter.default,
+    schema_info=RuntimeSchemaInfo(2),
+)
+def select_scatter_single_dim_strategy(
+    op: OpOverload, args_schema: ArgsType, kwargs_schema: KwargsType
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    self_meta = cast(TensorMeta, args_schema[0])
+    ndim = len(self_meta.shape)
+    dim = normalize_dim(cast(int, args_schema[2]), ndim)
+    strategies: list[list[Placement | _ShardingPlaceholder]] = []
+    # src is (N-1)-dim (missing the selected dim), so its dims are shifted:
+    #   self dims: 0, 1, ..., dim-1, [dim=selected], dim+1, ..., N-1
+    #   src dims:  0, 1, ..., dim-1,                 dim,   ..., N-2
+    # Dims before the gap map 1:1 (src_d = d). Dims after shift down by 1
+    # (src_d = d - 1) because src doesn't have the gap.
+    for d in range(ndim):
+        if d != dim:
+            src_d = d if d < dim else d - 1
+            strategies.append(
+                [
+                    _ShardingPlaceholder(d),
+                    _ShardingPlaceholder(d),
+                    _ShardingPlaceholder(src_d),
+                ]
+            )
+    # Partial passthrough: select_scatter is a replacement op.
+    strategies += _pass_through_partials(num_inputs=2)
+    # Mixed partial: one tensor Partial, other Replicate. Valid for avg/max/min
+    # because reduce(v,v)=v, but NOT sum because sum(v,v)=2v.
+    for op in ("avg", "max", "min"):
+        strategies.append([Partial(op), Partial(op), Replicate()])
+        strategies.append([Partial(op), Replicate(), Partial(op)])
+    return strategies
+
+
+@register_single_dim_strategy(
+    aten.diagonal_scatter.default,
+    schema_info=RuntimeSchemaInfo(2, static_kwargkey=["dim1", "dim2"]),
+)
+def diagonal_scatter_single_dim_strategy(
+    op: OpOverload, args_schema: ArgsType, kwargs_schema: KwargsType
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    self_meta = cast(TensorMeta, args_schema[0])
+    ndim = len(self_meta.shape)
+    # offset=args[2], dim1=args[3], dim2=args[4]; may come as kwargs with defaults
+    dim1 = normalize_dim(
+        cast(
+            int,
+            args_schema[3] if len(args_schema) > 3 else kwargs_schema.get("dim1", 0),
+        ),
+        ndim,
+    )
+    dim2 = normalize_dim(
+        cast(
+            int,
+            args_schema[4] if len(args_schema) > 4 else kwargs_schema.get("dim2", 1),
+        ),
+        ndim,
+    )
+    diagonal_dims = {dim1, dim2}
+    non_diag_dims = sorted(d for d in range(ndim) if d not in diagonal_dims)
+    strategies: list[list[Placement | _ShardingPlaceholder]] = []
+    for i, d in enumerate(non_diag_dims):
+        strategies.append(
+            [_ShardingPlaceholder(d), _ShardingPlaceholder(d), _ShardingPlaceholder(i)]
+        )
+    # Partial passthrough: diagonal_scatter is a replacement op.
+    strategies += _pass_through_partials(num_inputs=2)
+    # Mixed partial: one tensor Partial, other Replicate.
+    for op in ("avg", "max", "min"):
+        strategies.append([Partial(op), Partial(op), Replicate()])
+        strategies.append([Partial(op), Replicate(), Partial(op)])
+    return strategies
+
+
+@register_single_dim_strategy(
+    [aten.masked_scatter.default, aten.masked_scatter_.default],
+)
+def masked_scatter_single_dim_strategy(
+    op: OpOverload, args_schema: ArgsType, kwargs_schema: KwargsType
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    return []
+
+
+@register_single_dim_strategy(
+    [aten.put.default, aten.put_.default],
+)
+def put_single_dim_strategy(
+    op: OpOverload, args_schema: ArgsType, kwargs_schema: KwargsType
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    return []
+
+
+@register_single_dim_strategy(aten.take.default)
+def take_single_dim_strategy(
+    op: OpOverload, args_schema: ArgsType, kwargs_schema: KwargsType
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    index_meta = cast(TensorMeta, args_schema[1])
+    strategies: list[list[Placement | _ShardingPlaceholder]] = []
+    for d in range(len(index_meta.shape)):
+        strategies.append(
+            [_ShardingPlaceholder(d), Replicate(), _ShardingPlaceholder(d)]
+        )
+    # Partial passthrough: take is element selection, so reduce(take(self_shard, index))
+    # = take(reduce(self_shard), index) for all reduce types when index is replicated.
+    for op in ("sum", "avg", "max", "min"):
+        strategies.append([Partial(op), Partial(op), Replicate()])
+    return strategies
+
+
+@register_single_dim_strategy(aten.searchsorted.Tensor)
+def searchsorted_single_dim_strategy(
+    op: OpOverload, args_schema: ArgsType, kwargs_schema: KwargsType
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    sorted_meta = cast(TensorMeta, args_schema[0])
+    self_meta = cast(TensorMeta, args_schema[1])
+    sorted_ndim = len(sorted_meta.shape)
+    self_ndim = len(self_meta.shape)
+    has_sorter = isinstance(kwargs_schema.get("sorter"), TensorMeta)
+    strategies: list[list[Placement | _ShardingPlaceholder]] = []
+    if sorted_ndim <= 1:
+        # 1D sorted_sequence: shard self (and output) on any dim
+        for d in range(self_ndim):
+            row: list[Placement | _ShardingPlaceholder] = [
+                _ShardingPlaceholder(d),
+                Replicate(),
+                _ShardingPlaceholder(d),
+            ]
+            if has_sorter:
+                row.append(Replicate())
+            strategies.append(row)
+    else:
+        # Multi-dim sorted_sequence: shard both on matching batch dims
+        for d in range(min(sorted_ndim - 1, self_ndim)):
+            row = [
+                _ShardingPlaceholder(d),
+                _ShardingPlaceholder(d),
+                _ShardingPlaceholder(d),
+            ]
+            if has_sorter:
+                # Sorter has same batch dims as sorted_sequence, so shard together.
+                row.append(_ShardingPlaceholder(d))
+            strategies.append(row)
+    return strategies

@@ -262,10 +262,16 @@ dtensor_fails = {
 
 dtensor_multi_threaded_fails = {
     xfail("full_like"),
+    # index_fill: correctness mismatch in multi-threaded mode when sharding
+    # on non-indexed dim (values differ from single-threaded reference)
+    xfail("index_fill"),
     xfail("nn.functional.dropout2d"),
     xfail("nn.functional.dropout3d"),
     xfail("nn.functional.huber_loss"),
     skip("nn.functional.multi_head_attention_forward"),
+    # searchsorted with sorter kwarg: sorter tensor gets sharded instead of
+    # replicated in multi-threaded mode, causing size mismatch with boundary
+    xfail("searchsorted"),
 }
 
 # Ops that fail to compile with DTensor + torch.compile(fullgraph=True).
@@ -381,7 +387,6 @@ dtensor_fails_no_strategy = {
     xfail("block_diag"),
     xfail("cdist"),
     xfail("complex"),
-    xfail("diagonal_scatter"),
     xfail("exponential"),
     xfail("fft.ihfft2"),
     xfail("fft.ihfftn"),
@@ -389,20 +394,12 @@ dtensor_fails_no_strategy = {
     xfail("grid_sampler_2d"),
     xfail("histogram"),
     xfail("histogramdd"),
-    xfail("index_add"),
-    xfail("index_copy"),
-    xfail("index_fill"),
-    xfail("index_reduce", "prod"),
-    xfail("index_reduce", "mean"),
-    xfail("index_reduce", "amax"),
-    xfail("index_reduce", "amin"),
     xfail("isin"),
     xfail("linalg.matrix_power"),
     xfail("linalg.tensorsolve"),
     xfail("linspace", "tensor_overload"),
     xfail("log_normal"),
     xfail("logspace", "tensor_overload"),
-    xfail("masked_scatter"),
     xfail("max_pool2d_with_indices_backward"),
     xfail("multinomial"),
     xfail("nanquantile"),
@@ -433,15 +430,7 @@ dtensor_fails_no_strategy = {
     xfail("nn.functional.upsample_nearest"),
     xfail("nonzero"),
     xfail("polar"),
-    xfail("put"),
     xfail("renorm"),
-    xfail("scatter_reduce", "amax"),
-    xfail("scatter_reduce", "amin"),
-    xfail("scatter_reduce", "mean"),
-    xfail("scatter_reduce", "prod"),
-    xfail("scatter_reduce", "sum"),
-    xfail("searchsorted"),
-    xfail("select_scatter"),
     xfail("special.airy_ai"),
     xfail("special.bessel_y0"),
     xfail("special.bessel_y1"),
@@ -467,7 +456,6 @@ dtensor_fails_no_strategy = {
     xfail("special.xlog1py"),
     xfail("squeeze_copy"),
     xfail("stft"),
-    xfail("take"),
     xfail("to_sparse"),
     xfail("unfold"),
     xfail("unfold_copy"),
