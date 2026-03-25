@@ -3839,6 +3839,8 @@ Tensor& linalg_solve_triangular_out(
   // Some definitions:
   // (A, B) := X denotes the solution to the system in question.
   // X* := X.conj().
+  // -X := X._neg_view().
+  // -X* := X.conj()._neg_view() <=> X._neg_view().conj().
 
   bool out_fully_owned = false;
   if (out.numel() == 0) {
@@ -3913,9 +3915,7 @@ Tensor& linalg_solve_triangular_out(
 
   // Owned out implies we are safe to alter strides and neg/conj flags.
   // B is copied into the resized out such that mem_layout(A) == mem_layout(out).
-  // Copying of B also resolves neg/conj flags in B.
-  // Then we solve the original problem if A is col-major, and a transposed one otherwise.
-  // The result will inherit neg/conj flags from A.
+  // We follow (-A*, B) = -(A*, B) = -(A, B*)*.
   // NO COPY of A is done.
   const auto solve_with_owned_out = [&solve](
     const Tensor& A,
