@@ -1545,12 +1545,9 @@ def _checkpoint_without_reentrant_generator(
             f"but got {determinism_check}"
         )
 
-    if _is_compiling(fn, args, kwargs):
-        # Under tracing (make_fx or AOT Autograd), skip the checkpoint machinery
-        # (saved_tensor_hooks, rng state save/restore, CheckpointFrame) and just
-        # run the body with the tagging context.  RNG determinism is handled later
-        # by Inductor's replace_random_passes and the partitioner's
-        # run_and_save_rng_state / run_with_rng_state.
+    if _is_compiling(fn, args, kwargs) and torch.is_grad_enabled():
+        # Under tracing, skip the checkpoint machinery (saved_tensor_hooks,
+        # rng state, CheckpointFrame) and just tag nodes via the dispatch mode.
         if context_fn is noop_context_fn:
             forward_context, _ = create_selective_checkpoint_contexts(
                 _always_prefer_recompute
@@ -1562,9 +1559,10 @@ def _checkpoint_without_reentrant_generator(
                     "In torch.compile mode, `context_fn` arg passed to `torch.utils.checkpoint` "
                     "must generate a tuple of two `TorchDispatchMode`s."
                 )
-        # Assign ac_graph_id so the partitioner can distinguish checkpoint regions.
-        if hasattr(forward_context, "ac_graph_id") and forward_context.ac_graph_id is None:
-            forward_context.ac_graph_id = next(_ac_graph_id_counter)
+        # For the make_fx path (no HOP), ac_graph_id isn't set yet.
+        # The HOP path sets it via context_fn_with_graph_id before we get here.
+        if getattr(forward_context, "ac_graph_id", None) is None:
+            forward_context.ac_graph_id = next(_ac_graph_id_counter)  # pyrefly: ignore[missing-attribute]
         with forward_context:
             yield
         return
