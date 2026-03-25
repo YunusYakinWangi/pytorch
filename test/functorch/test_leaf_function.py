@@ -905,70 +905,56 @@ class TestLeafFunctionRegisterHook(TestCase):
         self.assertEqual(captured["grad"], torch.full((3,), 5.0))
 
     def test_hook_multiple_tensor_inputs(self):
-        """Hook fires once per tensor input with requires_grad."""
+        """Hook fires exactly once with all gradients substituted."""
         hook_calls = []
 
         @leaf_function
         def my_fn(x, y):
-            return (x + y,)
+            return (x * 2 + y * 3,)
 
         @my_fn.register_fake
         def my_fn_fake(x, y):
             return (torch.empty_like(x),)
 
         @my_fn.register_hook
-        def my_fn_hook(x_or_grad, y_or_grad):
-            hook_calls.append((x_or_grad.clone(), y_or_grad.clone()))
+        def my_fn_hook(x_grad, y_grad):
+            hook_calls.append((x_grad.clone(), y_grad.clone()))
 
         x = torch.randn(3, requires_grad=True)
         y = torch.randn(3, requires_grad=True)
         out = my_fn(x, y)[0]
         out.sum().backward()
 
-        # Hook fires once per requires_grad tensor input.
-        # Each call replaces one tensor with its gradient while keeping
-        # the other as the original tensor value.
-        self.assertEqual(len(hook_calls), 2)
+        self.assertEqual(len(hook_calls), 1)
 
-        # d(x+y)/dx = 1, d(x+y)/dy = 1, grad_output = 1
-        grad = torch.ones(3)
-
-        # One call has (grad, y) and the other has (x, grad).
-        # Order depends on autograd engine scheduling, so check both exist.
-        has_x_hook = any(
-            torch.equal(a, grad) and torch.equal(b, y) for a, b in hook_calls
-        )
-        has_y_hook = any(
-            torch.equal(a, x) and torch.equal(b, grad) for a, b in hook_calls
-        )
-        self.assertTrue(has_x_hook)
-        self.assertTrue(has_y_hook)
+        # d(x*2+y*3)/dx = 2, d(x*2+y*3)/dy = 3 — distinct gradients per position
+        self.assertEqual(hook_calls[0][0], torch.full((3,), 2.0))
+        self.assertEqual(hook_calls[0][1], torch.full((3,), 3.0))
 
     def test_hook_only_fires_for_requires_grad_inputs(self):
-        """Hook does not fire for inputs without requires_grad."""
+        """Hook fires once; only requires_grad positions get gradients."""
         hook_calls = []
 
         @leaf_function
         def my_fn(x, y):
-            return (x + y,)
+            return (x * 5 + y,)
 
         @my_fn.register_fake
         def my_fn_fake(x, y):
             return (torch.empty_like(x),)
 
         @my_fn.register_hook
-        def my_fn_hook(x_or_grad, y_or_grad):
-            hook_calls.append((x_or_grad.clone(), y_or_grad.clone()))
+        def my_fn_hook(x_or_grad, y_val):
+            hook_calls.append((x_or_grad.clone(), y_val.clone()))
 
         x = torch.randn(3, requires_grad=True)
         y = torch.randn(3, requires_grad=False)
         out = my_fn(x, y)[0]
         out.sum().backward()
 
-        # Only x has requires_grad, so hook fires once
         self.assertEqual(len(hook_calls), 1)
-        # x position gets the gradient (ones), y position gets original y
-        self.assertEqual(hook_calls[0][0], torch.ones(3))
+        # x position gets gradient (d/dx of x*5+y = 5), y position keeps original value
+        self.assertEqual(hook_calls[0][0], torch.full((3,), 5.0))
         self.assertEqual(hook_calls[0][1], y)
 
     def test_hook_no_requires_grad_no_fire(self):

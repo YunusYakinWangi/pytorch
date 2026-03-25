@@ -5,8 +5,8 @@ gradients during backward. Both are leaf functions, so they are opaque to
 the compiler and work with eager, torch.compile with aot_eager backend, and make_fx.
 
 Backward logging is implemented via ``register_hook`` on the leaf function,
-which registers autograd hooks on the input tensors so the hook fires when
-their gradients are computed.
+which collects gradients from all requires_grad tensor inputs and fires
+exactly once when all gradients are available.
 
 Works with eager, torch.compile's aot_eager backend, and make_fx tracing.
 

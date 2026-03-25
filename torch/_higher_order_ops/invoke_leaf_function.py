@@ -699,10 +699,9 @@ class InvokeLeafFunctionAutogradOp(torch.autograd.Function):
             )
 
         # Register backward hooks if the leaf function has a hook registered.
-        # The hook info is stored as attributes on the _LeafCallable.
-        # We extract it and register tensor.register_hook() on the outer
-        # (pre-detach) flat_args so the hook fires when the tensor's gradient
-        # is computed in the outer autograd graph.
+        # The hook collects gradients from all requires_grad tensor inputs
+        # and fires exactly once when all gradients are available, with each
+        # tensor position replaced by its gradient.
         hook_real = getattr(real_fn_callable, "_leaf_hook_real_fn", None)
         hook_fake = getattr(real_fn_callable, "_leaf_hook_fake_fn", None)
         if hook_real is not None:
@@ -714,8 +713,16 @@ class InvokeLeafFunctionAutogradOp(torch.autograd.Function):
             hook_real_callable = _LeafCallable(wrapped_hook_real)
             hook_fake_callable = _LeafCallable(wrapped_hook_fake)
 
-            for i, arg in enumerate(flat_args):
-                if isinstance(arg, torch.Tensor) and arg.requires_grad:
+            grad_indices = [
+                i
+                for i, arg in enumerate(flat_args)
+                if isinstance(arg, torch.Tensor) and arg.requires_grad
+            ]
+            num_grad_tensors = len(grad_indices)
+            if num_grad_tensors > 0:
+                collected_grads: dict[int, torch.Tensor] = {}
+
+                for i in grad_indices:
 
                     def _make_hook(
                         tensor_idx: int,
@@ -723,27 +730,34 @@ class InvokeLeafFunctionAutogradOp(torch.autograd.Function):
                         h_real: Any,
                         h_fake: Any,
                         in_spec: Any,
+                        grads: dict[int, torch.Tensor],
+                        total: int,
                     ) -> Callable:
                         def hook(grad: torch.Tensor) -> None:
-                            new_flat_args = list(all_args)
-                            new_flat_args[tensor_idx] = grad
-                            invoke_leaf_function(
-                                h_real,
-                                h_fake,
-                                in_spec,
-                                "",
-                                *new_flat_args,
-                            )
+                            grads[tensor_idx] = grad
+                            if len(grads) == total:
+                                new_flat_args = list(all_args)
+                                for idx, g in grads.items():
+                                    new_flat_args[idx] = g
+                                invoke_leaf_function(
+                                    h_real,
+                                    h_fake,
+                                    in_spec,
+                                    "",
+                                    *new_flat_args,
+                                )
 
                         return hook
 
-                    arg.register_hook(
+                    flat_args[i].register_hook(
                         _make_hook(
                             i,
                             flat_args,
                             hook_real_callable,
                             hook_fake_callable,
                             input_spec,
+                            collected_grads,
+                            num_grad_tensors,
                         )
                     )
 

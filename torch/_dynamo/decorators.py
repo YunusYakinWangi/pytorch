@@ -515,11 +515,13 @@ def leaf_function(
 
         **register_hook (optional)**:
         You can register a backward hook via ``@fn.register_hook`` to run code when
-        the gradient of an input tensor is computed during backward. The hook function
-        has the same signature as the leaf function; each tensor argument receives the
-        corresponding gradient instead of the original tensor. Non-tensor arguments
-        are passed through unchanged. The hook must return ``None``. The hook is called
-        as a leaf function itself, so it is also opaque to the compiler.
+        gradients have been computed for all requires_grad tensor inputs during backward.
+        The hook fires exactly once per backward pass. The hook function has the same
+        signature as the leaf function; each requires_grad tensor argument receives the
+        corresponding gradient instead of the original tensor. Non-tensor arguments and
+        tensors without requires_grad are passed through unchanged. The hook must return
+        ``None``. The hook is called as a leaf function itself, so it is also opaque to
+        the compiler.
 
         Example::
 
