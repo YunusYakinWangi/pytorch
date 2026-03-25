@@ -224,7 +224,7 @@ class OpNamespace:
         result = Op(name, fn, is_custom_function)
         if is_traceable:
             # pyrefly: ignore [deprecated]
-            setattr(self, name, torch._dynamo.allow_in_graph(result))
+            setattr(self, name, torch._dynamo.nonstrict_trace(result))
         else:
             # C++ autograd function was not marked as traceable
             # Dynamo can't dry run it at compile time, so must fallback to eager
@@ -485,7 +485,7 @@ class AutogradCompilerInstance:
                         "torch.compile does not currently support higher order gradients."
                     )
 
-        @torch._dynamo.allow_in_graph  # type: ignore[misc]
+        @torch._dynamo.nonstrict_trace  # type: ignore[misc]
         def call_aot_bwd_prologue(
             ctx_saved_tensors: Sequence[torch.Tensor],
             ctx_symints: Sequence[IntLikeType],
@@ -626,7 +626,7 @@ class AutogradCompilerInstance:
         def proxy_subclass_constructor(
             subclass_meta: Any, is_runtime: bool, unwrapped_args: Sequence[Any]
         ) -> torch.Tensor:
-            @torch._dynamo.allow_in_graph  # type: ignore[misc]
+            @torch._dynamo.nonstrict_trace  # type: ignore[misc]
             def make_subclass(*unwrapped_args: Any) -> Any:
                 return subclass_meta.creation_fn(unwrapped_args, is_runtime=is_runtime)
 

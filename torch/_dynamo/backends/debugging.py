@@ -166,8 +166,7 @@ def invoke_subgraph_inner_compiler(
     from torch._higher_order_ops.invoke_subgraph import invoke_subgraph_infer
 
     @disable
-    # pyrefly: ignore [deprecated]
-    @torch._dynamo.allow_in_graph
+    @torch._dynamo.nonstrict_trace
     def invoke_subgraph_wrapper_unboxed(*operands: Any) -> Any:
         return invoke_subgraph_infer(subgraph, *operands)
 
@@ -212,7 +211,7 @@ def invoke_subgraph_inner_compiler_good(
     fx_g_is_boxed = getattr(fx_g, "_boxed_call", False)
 
     @disable
-    @torch._dynamo.allow_in_graph
+    @torch._dynamo.nonstrict_trace
     def invoke_subgraph_wrapper_unboxed(*args: Any) -> Any:
         proxy_mode = get_proxy_mode()
         if proxy_mode is not None:
