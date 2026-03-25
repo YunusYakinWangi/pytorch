@@ -143,12 +143,15 @@ fi
 echo "Environment variables"
 env
 
-# Install the pinned triton wheel from the PyTorch nightly channel if not already present.
-if ! python -c "import triton" 2>/dev/null; then
-  install_triton_wheel
-fi
-
 echo "Testing pytorch"
+
+# On k8s (ARC) pods, os.cpu_count() may return the host's CPU count rather than
+# the pod's cgroup limit. This causes PyTorch to spawn too many OMP threads per
+# process, leading to OOM when multiple test processes run in parallel (NUM_PROCS=3).
+# Use nproc (cgroup-aware) to set a sensible default if OMP_NUM_THREADS is unset.
+if [[ -z "${OMP_NUM_THREADS:-}" ]]; then
+  export OMP_NUM_THREADS=$(nproc)
+fi
 
 export LANG=C.UTF-8
 
@@ -299,6 +302,11 @@ if [[ "$BUILD_ENVIRONMENT" == *asan* ]]; then
         # so fall back to the new naming convention.
         LD_PRELOAD=$(clang --print-file-name=libclang_rt.asan.so)
     fi
+    # Workaround for glibc ASAN bug where dlopen of NSS libraries (e.g.
+    # libnss_dns.so) crashes with a null function pointer dereference.
+    # See https://sourceware.org/bugzilla/show_bug.cgi?id=27653#c9
+    echo 'char* dlerror(void) { return "";}'|gcc -fpic -shared -o "${HOME}/dlerror.so" -x c -
+    LD_PRELOAD=${LD_PRELOAD}:${HOME}/dlerror.so
     export LD_PRELOAD
     # Disable valgrind for asan
     export VALGRIND=OFF
@@ -1908,6 +1916,9 @@ test_attention_microbenchmark() {
 
 test_openreg() {
   git submodule update --init --depth 1 third_party/googletest
+  if [[ "$BUILD_ENVIRONMENT" == *asan* ]]; then
+    sleep 7200
+  fi
   python test/run_test.py --openreg --verbose
   assert_git_not_dirty
 }
