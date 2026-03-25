@@ -1,8 +1,8 @@
 # Owner(s): ["module: inductor"]
 
 import importlib.util
-import unittest
 import sympy
+import unittest
 
 from sympy import I, Max, Min, Symbol, sympify
 
@@ -14,9 +14,9 @@ from torch.testing._internal.common_device_type import (
     dtypes,
     instantiate_device_type_tests,
 )
+from torch._inductor.sizevars import SizeVarAllocator
 from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.utils._sympy.functions import Identity
-from torch._inductor.sizevars import SizeVarAllocator
 
 
 class TestUtils(TestCase):
