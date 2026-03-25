@@ -23,7 +23,6 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, cast, NamedTuple
 
-
 import torch
 import torch.distributed as dist
 from torch.multiprocessing import current_process, get_context
