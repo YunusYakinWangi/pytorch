@@ -4233,13 +4233,11 @@ class FlexAttentionBackwardHighOrderVariable(TorchHigherOrderOperatorVariable):
             return self._call_function_fallback(tx, args, kwargs)
 
         if self._is_graphmodule_variable(fw_graph):
-            fw_graph_node = self.install_graph_module(tx, fw_graph, "fw_graph")
-            fw_graph_lifted_args = ()
-            fw_graph_gm = self._graph_module_value(fw_graph)
-        else:
-            fw_graph_node, fw_graph_lifted_args, fw_graph_gm = self.create_wrapped_node(
-                tx, query, fw_graph, "score_mod", score_mod_other_buffers.items
-            )
+            return self._call_function_fallback(tx, args, kwargs)
+
+        fw_graph_node, fw_graph_lifted_args, fw_graph_gm = self.create_wrapped_node(
+            tx, query, fw_graph, "score_mod", score_mod_other_buffers.items
+        )
 
         joint_graph_is_none = (
             joint_graph.is_python_constant()

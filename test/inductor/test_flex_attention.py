@@ -178,6 +178,21 @@ def create_attention(score_mod, block_mask, enable_gqa=False, kernel_options=Non
     )
 
 
+def flex_attention_fwd(q, k, v, score_mod, block_mask, scale):
+    # Uses the HOP directly because flex_attention_backward expects lse in log2
+    # scale, but the public flex_attention API converts lse to natural log.
+    out, lse, _ = flex_attention_hop(
+        q,
+        k,
+        v,
+        score_mod,
+        block_mask.as_tuple(),
+        scale,
+        {},
+    )
+    return out, lse
+
+
 def create_block_mask_test(score_mod, query, key):
     block_mask = create_block_mask(
         score_mod,
@@ -4950,14 +4965,13 @@ class GraphModule(torch.nn.Module):
         golden_out.backward(backward_grad.to(torch.float64))
         ref_out.backward(backward_grad)
 
-        out, logsumexp, _ = flex_attention_hop(
+        out, logsumexp = flex_attention_fwd(
             q,
             k,
             v,
             score_mod,
-            block_mask.as_tuple(),
+            block_mask,
             scale,
-            {},
         )
 
         @torch.compile(fullgraph=True)
@@ -5018,15 +5032,13 @@ class GraphModule(torch.nn.Module):
         v = torch.randn((2, 2, 128, 16), dtype=dtype, device=device)
         backward_grad = torch.randn((2, 2, 128, 16), dtype=dtype, device=device)
 
-        out, logsumexp, _ = flex_attention_hop(
+        out, logsumexp = flex_attention_fwd(
             q,
             k,
             v,
-            score_mod,
-            block_mask.as_tuple(),
+            _identity,
+            block_mask,
             scale,
-            {},
-            (q.shape[-1],),
         )
         static_head_dim = q.shape[-1]
 
@@ -5084,113 +5096,6 @@ class GraphModule(torch.nn.Module):
                 out.detach(),
                 logsumexp.detach(),
                 backward_grad,
-            )
-
-        torch.testing.assert_close(compiled_dq, ref_dq)
-        torch.testing.assert_close(compiled_dk, ref_dk)
-        torch.testing.assert_close(compiled_dv, ref_dv)
-        self.assertEqual(compiled_buffer_grads, ref_buffer_grads)
-
-    @supported_platform
-    @skip_on_cpu
-    def test_direct_backward_supports_graphmodule_fw_graph(self, device):
-        from torch.fx.experimental.proxy_tensor import make_fx
-
-        def score_mod(score, b, h, m, n):
-            return score
-
-        def mask_mod(b, h, m, n):
-            return m >= n
-
-        block_mask = create_block_mask(
-            mask_mod,
-            B=2,
-            H=2,
-            Q_LEN=128,
-            KV_LEN=128,
-            device=device,
-        )
-        scale = 1.0 / 16**0.5
-        dtype = torch.float32
-        q = torch.randn((2, 2, 128, 16), dtype=dtype, device=device)
-        k = torch.randn((2, 2, 128, 16), dtype=dtype, device=device)
-        v = torch.randn((2, 2, 128, 16), dtype=dtype, device=device)
-        backward_grad = torch.randn((2, 2, 128, 16), dtype=dtype, device=device)
-        index_values = (
-            q.new_zeros((), requires_grad=True),
-            q.new_zeros((), dtype=torch.int),
-            q.new_zeros((), dtype=torch.int),
-            q.new_zeros((), dtype=torch.int),
-            q.new_zeros((), dtype=torch.int),
-        )
-        fw_graph = make_fx(score_mod)(*index_values)
-
-        out, logsumexp, _ = flex_attention_hop(
-            q,
-            k,
-            v,
-            score_mod,
-            block_mask.as_tuple(),
-            scale,
-            {},
-        )
-
-        @torch.compile(fullgraph=True)
-        def compiled_callable_bw(query, key, value, fwd_out, lse, grad_out):
-            return torch.ops.higher_order.flex_attention_backward(
-                query,
-                key,
-                value,
-                fwd_out,
-                lse,
-                grad_out,
-                None,
-                score_mod,
-                None,
-                block_mask.as_tuple(),
-                scale,
-                {},
-                (),
-                (),
-            )
-
-        @torch.compile(fullgraph=True)
-        def compiled_graph_bw(query, key, value, fwd_out, lse, grad_out):
-            return torch.ops.higher_order.flex_attention_backward(
-                query,
-                key,
-                value,
-                fwd_out,
-                lse,
-                grad_out,
-                None,
-                fw_graph,
-                None,
-                block_mask.as_tuple(),
-                scale,
-                {},
-                (),
-                (),
-            )
-
-        with torch.no_grad():
-            ref_dq, ref_dk, ref_dv, ref_buffer_grads = compiled_callable_bw(
-                q,
-                k,
-                v,
-                out.detach(),
-                logsumexp.detach(),
-                backward_grad,
-            )
-            compiled_dq, compiled_dk, compiled_dv, compiled_buffer_grads = (
-                compiled_graph_bw(
-                    q,
-                    k,
-                    v,
-                    out.detach(),
-                    logsumexp.detach(),
-                    backward_grad,
-                )
             )
 
         torch.testing.assert_close(compiled_dq, ref_dq)

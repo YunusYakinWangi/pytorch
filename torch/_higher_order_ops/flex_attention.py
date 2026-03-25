@@ -1023,7 +1023,9 @@ def sdpa_dense_backward(
     if grad_logsumexp is None:
         grad_logsumexp = torch.zeros_like(logsumexp)
 
-    # We're undoing the log -> log2 change of base in the forwards
+    # logsumexp is expected in log2 scale (as returned by the forward HOP).
+    # The public flex_attention API converts lse to natural log before returning,
+    # so callers using the public API must not pass that value here directly.
     logsumexp = logsumexp * math.log(2)
     # The backwards formula for the log -> log2 change of base in the forwards
     grad_logsumexp = grad_logsumexp / math.log(2)
