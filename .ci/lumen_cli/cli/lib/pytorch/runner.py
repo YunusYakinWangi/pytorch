@@ -202,8 +202,8 @@ def run_test_plan(
                 pip_install_packages(pip_args)
 
             lumen_msg = (
-                f"Or via lumen:\n"
-                f"    lumen test pytorch-core"
+                f"Or via lumen: "
+                f"lumen test pytorch-core"
                 f" --group-id {group_id}"
                 f" --build-env {build_env}"
                 f" --test-id {step.test_id}"
