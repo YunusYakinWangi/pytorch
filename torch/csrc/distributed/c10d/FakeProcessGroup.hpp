@@ -85,6 +85,10 @@ class FakeProcessGroup : public Backend {
   // All collectives copy input to output following single-rank semantics
   // (rank 0 communicating with itself). This avoids returning uninitialized
   // memory and enables single-process validation of distributed code paths.
+  //
+  // Limitation: scatter on non-root rank leaves output uninitialized because
+  // the root's data is unavailable in single-process simulation. This only
+  // triggers when explicitly calling scatter with src != rank.
   c10::intrusive_ptr<Work> allgather(
       std::vector<std::vector<at::Tensor>>& outputTensors,
       std::vector<at::Tensor>& inputTensors,
