@@ -2623,6 +2623,8 @@ class InstructionTranslatorBase(
         if inst.argval == "exception match":
             self.CHECK_EXC_MATCH(inst)
         elif dunder := richcompare_argval_to_dunder.get(inst.argval):
+            # Implements PyObject_RichCompare for the 6 comparison ops.
+            # https://github.com/python/cpython/blob/v3.13.0/Objects/object.c#L972
             from .variables.object_protocol import generic_richcompare
 
             lhs, rhs = self.popn(2)

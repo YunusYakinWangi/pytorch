@@ -272,6 +272,40 @@ class TensorVariable(VariableTracker):
     def is_tensor(self) -> bool:
         return True
 
+    def richcompare_impl(
+        self,
+        tx: "InstructionTranslator",
+        other: VariableTracker,
+        op: str,
+    ) -> VariableTracker:
+        from .builder import wrap_fx_proxy_cls
+
+        op_fn = richcmp_op.get(op)
+        if op_fn is None or op_fn not in supported_tensor_comparison_op_values:
+            return ConstantVariable.create(NotImplemented)
+
+        # Check broadcastability for tensor-tensor comparisons
+        if (
+            isinstance(other, TensorVariable)
+            and (self.size and other.size) is not None
+            and self.size != other.size
+        ):
+            try:
+                torch.broadcast_shapes(self.size, other.size)
+            except RuntimeError:
+                return ConstantVariable.create(NotImplemented)
+
+        if not other.is_tensor() and not other.is_symnode_like():
+            try:
+                other.as_proxy()
+            except NotImplementedError:
+                return ConstantVariable.create(NotImplemented)
+
+        proxy = tx.output.create_proxy(
+            "call_function", op_fn, (self.as_proxy(), other.as_proxy()), {}
+        )
+        return wrap_fx_proxy_cls(type(self), tx, proxy)
+
     @staticmethod
     def specialize(value: torch.Tensor) -> dict[str, Any]:
         props: dict[str, Any] = {
@@ -2080,7 +2114,9 @@ class SymNodeVariable(VariableTracker):
         if op_fn not in supported_tensor_comparison_op_values:
             return ConstantVariable.create(NotImplemented)
 
-        # Seen in inspect signature where we check if the value is a default value
+        # Seen in inspect signature where we check if the value is a default value.
+        # TODO: figure out what should go in the graph vs what can be returned
+        # as a constant right away.
         if isinstance(other, UserDefinedClassVariable):
             return VariableTracker.build(tx, op_fn(object(), None))  # type: ignore[arg-type]
 

@@ -553,11 +553,12 @@ class TracebackVariable(VariableTracker):
         other: VariableTracker,
         op: str,
     ) -> VariableTracker:
-        # CPython: tracebacks use identity-based comparison (object_richcompare)
-        # https://github.com/python/cpython/blob/main/Objects/typeobject.c
-        if op == "__eq__":
-            return VariableTracker.build(tx, self is other)
-        return ConstantVariable.create(NotImplemented)
+        # CPython: PyTraceBack_Type doesn't set tp_richcompare, inherits
+        # object_richcompare (identity-based).
+        # https://github.com/python/cpython/blob/v3.13.0/Python/traceback.c (PyTraceBack_Type)
+        from .object_protocol import object_richcompare
+
+        return object_richcompare(self, tx, other, op)
 
 
 class ExceptionVariable(VariableTracker):
@@ -604,8 +605,12 @@ class ExceptionVariable(VariableTracker):
         other: VariableTracker,
         op: str,
     ) -> VariableTracker:
-        # CPython: BaseException uses identity comparison (object_richcompare)
-        return ConstantVariable.create(NotImplemented)
+        # CPython: _PyExc_BaseException doesn't set tp_richcompare, inherits
+        # object_richcompare (identity-based).
+        # https://github.com/python/cpython/blob/v3.13.0/Objects/exceptions.c (_PyExc_BaseException)
+        from .object_protocol import object_richcompare
+
+        return object_richcompare(self, tx, other, op)
 
     def reconstruct(self, codegen: "PyCodegen") -> None:
         codegen.add_push_null(
@@ -1363,13 +1368,14 @@ class GetAttrVariable(VariableTracker):
         other: VariableTracker,
         op: str,
     ) -> VariableTracker:
-        from .constant import ConstantVariable
         from .object_protocol import generic_richcompare
 
+        # GetAttrVariable is not a real type — it's an unresolved obj.attr.
+        # Resolve it to a concrete VT and delegate to generic_richcompare.
         try:
             resolved = VariableTracker.build(tx, self.as_python_constant())
         except NotImplementedError:
-            return ConstantVariable.create(NotImplemented)
+            resolved = self.obj.var_getattr(tx, self.name)
         return generic_richcompare(tx, resolved, other, op)
 
     def call_method(
@@ -1652,8 +1658,9 @@ class PythonModuleVariable(VariableTracker):
     ) -> VariableTracker:
         from .object_protocol import object_richcompare
 
-        # CPython: PyModule_Type (PyModuleObject / PyModuleDef) has tp_richcompare = 0,
-        # inheriting object_richcompare — identity for __eq__/__ne__, NotImplemented for ordering.
+        # CPython: PyModule_Type doesn't set tp_richcompare, inherits
+        # object_richcompare (identity-based).
+        # https://github.com/python/cpython/blob/v3.13.0/Objects/moduleobject.c (PyModule_Type)
         return object_richcompare(self, tx, other, op)
 
     def call_obj_hasattr(

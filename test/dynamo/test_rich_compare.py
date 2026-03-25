@@ -666,6 +666,40 @@ class RichCompareTests(TestCase):
         result = self._compile(fn, torch.tensor(0))
         self.assertIn("not supported", result)
 
+    # --- FunctoolsPartialVariable ---
+
+    def test_functools_partial_eq_same(self):
+        import functools
+
+        a = functools.partial(int, 1)
+
+        def fn(x):
+            return a == a
+
+        self.assertTrue(self._compile(fn, torch.tensor(0)))
+
+    def test_functools_partial_eq_different(self):
+        import functools
+
+        a = functools.partial(int, 1)
+        b = functools.partial(int, 2)
+
+        def fn(x):
+            return a == b
+
+        self.assertFalse(self._compile(fn, torch.tensor(0)))
+
+    def test_functools_partial_ne(self):
+        import functools
+
+        a = functools.partial(int, 1)
+        b = functools.partial(int, 2)
+
+        def fn(x):
+            return a != b
+
+        self.assertTrue(self._compile(fn, torch.tensor(0)))
+
 
 if __name__ == "__main__":
     run_tests()

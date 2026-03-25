@@ -434,7 +434,13 @@ class BaseTorchVariable(VariableTracker):
     def get_real_python_backed_value(self) -> Any:
         return self.value
 
-    richcompare_impl = python_constant_richcompare_impl
+    def richcompare_impl(
+        self,
+        tx: "InstructionTranslator",
+        other: VariableTracker,
+        op: str,
+    ) -> VariableTracker:
+        return python_constant_richcompare_impl(self, tx, other, op)
 
     def call_obj_hasattr(
         self, tx: "InstructionTranslator", name: str

@@ -80,11 +80,17 @@ def object_richcompare(
     Mirrors PyBaseObject_Type.tp_richcompare (Objects/typeobject.c): identity
     for __eq__/__ne__, NotImplemented for ordering ops. Used for types where
     tp_richcompare is NULL/0 (inheriting object_richcompare), e.g., PyType_Type,
-    PyModule_Type. Delegates to python_constant_richcompare_impl, which uses
-    the backing Python object's __eq__/__ne__ (identity-based for these types)
-    and returns NotImplemented for ordering, matching object_richcompare behavior.
+    PyModule_Type, functools.partial.
     """
-    return python_constant_richcompare_impl(self, tx, other, op)
+    from .constant import ConstantVariable
+
+    if op not in ("__eq__", "__ne__"):
+        return ConstantVariable.create(NotImplemented)
+    identity = vt_identity_compare(self, other)
+    if identity is None:
+        return ConstantVariable.create(NotImplemented)
+    is_same = identity.as_python_constant()
+    return ConstantVariable.create(is_same if op == "__eq__" else not is_same)
 
 
 def vt_identity_compare(

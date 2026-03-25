@@ -224,10 +224,10 @@ class NNModuleVariable(VariableTracker):
         other: VariableTracker,
         op: str,
     ) -> VariableTracker:
-        # CPython: nn.Module uses identity comparison (object_richcompare)
-        from .constant import ConstantVariable
+        # nn.Module doesn't define __eq__, inherits object_richcompare (identity-based).
+        from .object_protocol import object_richcompare
 
-        return ConstantVariable.create(NotImplemented)
+        return object_richcompare(self, tx, other, op)
 
     def _wrap_submodule(
         self,

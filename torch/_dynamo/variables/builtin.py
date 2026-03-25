@@ -91,7 +91,6 @@ from .constant import (
     CONSTANT_VARIABLE_FALSE,
     CONSTANT_VARIABLE_NONE,
     ConstantVariable,
-    EnumVariable,
     FakeIdVariable,
 )
 from .dicts import (
@@ -725,15 +724,9 @@ class BuiltinVariable(VariableTracker):
         ]
         op_handlers[operator.mul].extend(list_like_expansion_handlers)
 
-        # NOTE: COMPARE_OP dispatches the 6 richcompare ops (==, !=, <, <=, >,
-        # >=) directly to generic_richcompare, bypassing BuiltinVariable. These
-        # handlers are still used when operator.eq etc. are called as functions
-        # (e.g. operator.eq(a, b)).
         def create_cmp_op_handlers(
             op: Callable[..., Any],
         ) -> list[tuple[tuple[_TrackersType, _TrackersType], _HandlerCallback]]:
-            # For constant-vs-constant we can compare values directly without
-            # going through the full richcompare protocol.
             def compare_by_value(
                 tx: "InstructionTranslator", a: VariableTracker, b: VariableTracker
             ) -> VariableTracker:
@@ -757,30 +750,10 @@ class BuiltinVariable(VariableTracker):
             ] = [((ConstantVariable, ConstantVariable), compare_by_value)]
 
             if op in polyfill_fn_mapping:
-                # For constants, speedup the comparison instead of using
-                # polyfill. Removing this line causes major regression for pr
-                # time benchmark - add_loop_eager.
-                result = [
-                    ((ConstantVariable, ConstantVariable), compare_by_value),
-                    ((EnumVariable, EnumVariable), compare_by_value),
-                ]
-
-                op_var = BuiltinVariable(op)
-                # Special handling of SymNode variable
-                result.extend(
-                    [
-                        (
-                            (SymNodeVariable, VariableTracker),
-                            op_var._comparison_with_symnode,
-                        ),
-                        (
-                            (VariableTracker, SymNodeVariable),
-                            op_var._comparison_with_symnode,
-                        ),
-                    ]
-                )
-
-                # Map operator function → dunder name (e.g. operator.eq → "__eq__")
+                # Richcompare ops (==, !=, <, <=, >, >=) dispatch to
+                # generic_richcompare which calls richcompare_impl on the
+                # appropriate VT subclass. This path handles operator.eq() etc.
+                # called as functions (not via COMPARE_OP bytecode).
                 op_to_dunder = {v: k for k, v in richcmp_op.items()}
                 dunder_op = op_to_dunder[op]
 
@@ -798,13 +771,12 @@ class BuiltinVariable(VariableTracker):
 
                     return handler
 
-                result.append(
+                return [
                     (
                         (VariableTracker, VariableTracker),
                         make_richcompare_handler(dunder_op),
                     )
-                )
-                return result
+                ]
 
             result = [((ConstantVariable, ConstantVariable), compare_by_value)]
 

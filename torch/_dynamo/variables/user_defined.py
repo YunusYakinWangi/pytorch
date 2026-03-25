@@ -1066,8 +1066,9 @@ class UserDefinedClassVariable(UserDefinedVariable):
     ) -> "VariableTracker":
         from .object_protocol import object_richcompare
 
-        # CPython: PyType_Type.tp_richcompare = 0, so it inherits object_richcompare
-        # from PyBaseObject_Type — identity for __eq__/__ne__, NotImplemented for ordering.
+        # CPython: PyType_Type doesn't set tp_richcompare, inherits
+        # object_richcompare (identity-based).
+        # https://github.com/python/cpython/blob/v3.13.0/Objects/typeobject.c (PyType_Type)
         return object_richcompare(self, tx, other, op)
 
 
@@ -1262,11 +1263,9 @@ class UserDefinedObjectVariable(UserDefinedVariable):
         other: "VariableTracker",
         op: str,
     ) -> "VariableTracker":
-        # CPython: object_richcompare — identity for EQ/NE, TypeError for ordering
         # If the type defines a pure-Python comparison method, trace into it
         method = getattr(type(self.value), op)
         if hasattr(method, "__code__"):
-            # Pure-Python comparison method: trace into it directly
             from .builder import SourcelessBuilder
 
             return SourcelessBuilder.create(tx, method).call_function(
@@ -1289,7 +1288,31 @@ class UserDefinedObjectVariable(UserDefinedVariable):
                         not result.as_python_constant()
                     )
 
-        return variables.ConstantVariable.create(NotImplemented)
+        # No pure-Python comparison method — inherits object_richcompare
+        from .object_protocol import object_richcompare
+
+        return object_richcompare(self, tx, other, op)
+
+    def richcompare_with_inner_vt(
+        self,
+        tx: "InstructionTranslator",
+        other: "VariableTracker",
+        op: str,
+        base_type: type,
+        inner_vt: "VariableTracker",
+        other_inner_vt: "VariableTracker",
+    ) -> "VariableTracker":
+        """Shared richcompare logic for UserDefined{Dict,Set,List}Variable.
+
+        If the user's subclass overrides the base type's comparison with a
+        pure-Python method, trace into it via the base class. Otherwise
+        delegate to the inner VT that models the base container.
+        """
+        method = getattr(type(self.value), op, None)
+        base_method = getattr(base_type, op, None)
+        if method is not base_method and hasattr(method, "__code__"):
+            return super().richcompare_impl(tx, other, op)
+        return inner_vt.richcompare_impl(tx, other_inner_vt, op)
 
     def as_python_constant(self) -> object:
         if self.is_pytree_constant_class and self.source:
@@ -2840,16 +2863,12 @@ class UserDefinedDictVariable(UserDefinedObjectVariable):
         other: "VariableTracker",
         op: str,
     ) -> "VariableTracker":
-        # If the subclass defines its own pure-Python comparison, trace into it
-        method = getattr(type(self.value), op, None)
-        base_method = getattr(dict, op, None)
-        if method is not base_method and hasattr(method, "__code__"):
-            return super().richcompare_impl(tx, other, op)
-        # Otherwise delegate to the underlying dict variable
-        other_dict_vt = (
+        other_inner = (
             other._dict_vt if isinstance(other, UserDefinedDictVariable) else other
         )
-        return self._dict_vt.richcompare_impl(tx, other_dict_vt, op)
+        return self.richcompare_with_inner_vt(
+            tx, other, op, dict, self._dict_vt, other_inner
+        )
 
     def is_python_hashable(self) -> Literal[False]:
         raise_on_overridden_hash(self.value, self)
@@ -2956,17 +2975,13 @@ class UserDefinedSetVariable(UserDefinedObjectVariable):
         other: "VariableTracker",
         op: str,
     ) -> "VariableTracker":
-        # If the subclass defines its own pure-Python comparison, trace into it
         base_type = set if isinstance(self.value, set) else frozenset
-        method = getattr(type(self.value), op, None)
-        base_method = getattr(base_type, op, None)
-        if method is not base_method and hasattr(method, "__code__"):
-            return super().richcompare_impl(tx, other, op)
-        # Otherwise delegate to the underlying set variable
-        other_set_vt = (
+        other_inner = (
             other._set_vt if isinstance(other, UserDefinedSetVariable) else other
         )
-        return self._set_vt.richcompare_impl(tx, other_set_vt, op)
+        return self.richcompare_with_inner_vt(
+            tx, other, op, base_type, self._set_vt, other_inner
+        )
 
 
 class UserDefinedListVariable(UserDefinedObjectVariable):
@@ -3024,16 +3039,12 @@ class UserDefinedListVariable(UserDefinedObjectVariable):
         other: "VariableTracker",
         op: str,
     ) -> "VariableTracker":
-        # If the subclass defines its own pure-Python comparison, trace into it
-        method = getattr(type(self.value), op, None)
-        base_method = getattr(list, op, None)
-        if method is not base_method and hasattr(method, "__code__"):
-            return super().richcompare_impl(tx, other, op)
-        # Otherwise delegate to the underlying list variable
-        other_list_vt = (
+        other_inner = (
             other._list_vt if isinstance(other, UserDefinedListVariable) else other
         )
-        return self._list_vt.richcompare_impl(tx, other_list_vt, op)
+        return self.richcompare_with_inner_vt(
+            tx, other, op, list, self._list_vt, other_inner
+        )
 
 
 class UserDefinedTupleVariable(UserDefinedObjectVariable):
