@@ -209,7 +209,7 @@ class FakeProcessGroup : public Backend {
   c10::intrusive_ptr<Work> alltoall(
       std::vector<at::Tensor>& outputTensors,
       std::vector<at::Tensor>& inputTensors,
-      const AllToAllOptions& opts = AllToAllOptions()) override {
+      const AllToAllOptions& /* opts */ = AllToAllOptions()) override {
     checkCollectiveError();
     for (size_t i = 0; i < outputTensors.size(); ++i) {
       outputTensors[i].copy_(inputTensors[i]);
