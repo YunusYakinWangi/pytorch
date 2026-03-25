@@ -65,7 +65,7 @@ class TestFakePG(TestCase):
         output_tensor = torch.empty(3, 3)
 
         dist.reduce_scatter(output_tensor, to_reduce_scatter)
-        self.assertEqual(output_tensor, to_reduce_scatter[1])
+        self.assertEqual(tuple(output_tensor.shape), (3, 3))
 
     @unittest.skipIf(not HAS_ACCELERATOR, "No accelerator")
     def test_construct_fsdp(self):
@@ -122,32 +122,38 @@ class TestFakePG(TestCase):
         store = FakeStore()
         dist.init_process_group(backend="fake", rank=0, world_size=2, store=store)
 
-        output = torch.empty(3, 3)
+        # src == rank
+        output = torch.ones(3, 3)
         to_scatter = [torch.ones(3, 3) * rank for rank in range(2)]
         dist.scatter(output, to_scatter)
-        self.assertEqual(output, to_scatter[0])
+        self.assertEqual(tuple(output.shape), (3, 3))
+
+        # src != rank
+        output = torch.ones(3, 3)
+        dist.scatter(output, None, src=1)
+        self.assertEqual(tuple(output.shape), (3, 3))
 
     def test_alltoall(self):
         store = FakeStore()
         dist.init_process_group(backend="fake", rank=0, world_size=2, store=store)
 
-        input_list = [torch.ones(3, 3) * i for i in range(2)]
-        output_list = [torch.empty(3, 3) for _ in range(2)]
+        output_list = [torch.ones(3, 3) for _ in range(2)]
+        input_list = [torch.ones(3, 3) for _ in range(2)]
         dist.all_to_all(output_list, input_list)
         self.assertEqual(len(output_list), 2)
-        for i, output in enumerate(output_list):
-            self.assertEqual(output, input_list[i])
+        for output in output_list:
+            self.assertEqual(tuple(output.shape), (3, 3))
 
     def test_alltoall_base(self):
         store = FakeStore()
         dist.init_process_group(backend="fake", rank=0, world_size=2, store=store)
 
-        in_tensor = torch.arange(6.0).reshape(3, 2)
-        out_tensor = torch.empty(3, 2)
-        output_split = [1, 2]
-        input_split = [2, 1]
+        out_tensor = torch.ones(3, 3)
+        in_tensor = torch.ones(3, 3)
+        output_split = [1, 1]
+        input_split = [1, 1]
         dist.all_to_all_single(out_tensor, in_tensor, output_split, input_split)
-        self.assertEqual(out_tensor, in_tensor)
+        self.assertEqual(tuple(out_tensor.shape), (3, 3))
 
     def test_send(self):
         store = FakeStore()
@@ -211,6 +217,43 @@ class TestFakePG(TestCase):
                 loss = x.sum()
                 loss.backward()
                 optim.step()
+
+    def test_collective_copy_semantics(self):
+        store = FakeStore()
+        dist.init_process_group(backend="fake", rank=0, world_size=2, store=store)
+
+        input_tensor = torch.ones(3, 3) * 42
+
+        # reduce_scatter: output gets input[rank]
+        to_reduce_scatter = [torch.ones(3, 3) * rank for rank in range(2)]
+        output = torch.empty(3, 3)
+        dist.reduce_scatter(output, to_reduce_scatter)
+        self.assertEqual(output, to_reduce_scatter[0])
+
+        # scatter: output gets input[rank]
+        to_scatter = [torch.ones(3, 3) * rank for rank in range(2)]
+        output = torch.empty(3, 3)
+        dist.scatter(output, to_scatter)
+        self.assertEqual(output, to_scatter[0])
+
+        # alltoall: output[i] gets input[i]
+        input_list = [torch.ones(3, 3) * i for i in range(2)]
+        output_list = [torch.empty(3, 3) for _ in range(2)]
+        dist.all_to_all(output_list, input_list)
+        for i in range(2):
+            self.assertEqual(output_list[i], input_list[i])
+
+        # alltoall_base: output buffer gets input buffer
+        in_tensor = torch.arange(6.0).reshape(3, 2)
+        out_tensor = torch.empty(3, 2)
+        dist.all_to_all_single(out_tensor, in_tensor, [1, 2], [2, 1])
+        self.assertEqual(out_tensor, in_tensor)
+
+        # allgather: all output slots get input
+        output_tensors = [torch.empty(3, 3) for _ in range(2)]
+        dist.all_gather(output_tensors, input_tensor)
+        for out in output_tensors:
+            self.assertEqual(out, input_tensor)
 
     def test_error_on_collective(self):
         from torch.testing._internal.distributed.fake_pg import FakeStore
