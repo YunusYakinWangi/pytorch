@@ -866,6 +866,38 @@ class {module_name}(torch.nn.Module):
             )
         return self._code
 
+    def _dump_codegen_to_disk(self) -> None:
+        """Write generated source to content-addressed file for debugging.
+
+        When ``codegen_dump_dir`` is set or ``profiler_codegen`` is enabled,
+        dump ``self._code`` to disk with a SHA-256-based filename.
+        """
+        dump_dir = fx_experimental_config.codegen_dump_dir
+        if not dump_dir and fx_experimental_config.profiler_codegen:
+            import tempfile
+
+            dump_dir = os.path.join(tempfile.gettempdir(), "torch_fx_codegen")
+        if not dump_dir:
+            return
+        code_hash = hashlib.sha256(self._code.encode("utf-8")).hexdigest()[:16]
+        dump_filename = f"fx_{code_hash}.py"
+        dump_path = os.path.join(dump_dir, dump_filename)
+        os.makedirs(dump_dir, exist_ok=True)
+        if not os.path.exists(dump_path):
+            with open(dump_path, "w") as f:
+                f.write(self._code)
+        self._codegen_dump_path = dump_path
+
+        trace_structured(
+            "fx_codegen_dump",
+            lambda: {
+                "filename": dump_filename,
+                "file_path": os.path.abspath(dump_path),
+            },
+            payload_fn=lambda: self._code,
+            expect_trace_id=False,
+        )
+
     @compatibility(is_backward_compatible=True)
     def recompile(self) -> PythonCode:
         """
@@ -889,12 +921,10 @@ class {module_name}(torch.nn.Module):
 
         # ProfilerCodeGen has its own dual-path profiler instrumentation,
         # skip the old record_func / enrich_profiler_metadata path.
-        use_record_func = fx_experimental_config.enrich_profiler_metadata
-        if use_record_func:
-            from torch.fx.profiler_codegen import ProfilerCodeGen
-
-            if isinstance(self._graph._codegen, ProfilerCodeGen):
-                use_record_func = False
+        use_record_func = (
+            fx_experimental_config.enrich_profiler_metadata
+            and not fx_experimental_config.profiler_codegen
+        )
         python_code = self._graph.python_code(
             root_module="self",
             record_func=use_record_func,
@@ -904,34 +934,7 @@ class {module_name}(torch.nn.Module):
         self._prologue_start = python_code._prologue_start
 
         # Disk dump: write generated source to content-addressed file for debugging.
-        # When codegen_dump_dir is set or profiler_codegen is enabled, dump code to disk.
-        dump_dir = fx_experimental_config.codegen_dump_dir
-        if not dump_dir and fx_experimental_config.profiler_codegen:
-            import tempfile
-
-            dump_dir = os.path.join(tempfile.gettempdir(), "torch_fx_codegen")
-        if dump_dir:
-            code_hash = hashlib.sha256(self._code.encode("utf-8")).hexdigest()[:16]
-            # Content-addressed filename, consistent with inductor cache pattern
-            dump_filename = f"fx_{code_hash}.py"
-            dump_path = os.path.join(dump_dir, dump_filename)
-            os.makedirs(dump_dir, exist_ok=True)
-            if not os.path.exists(dump_path):
-                with open(dump_path, "w") as f:
-                    f.write(self._code)
-            self._codegen_dump_path = dump_path
-
-            # Structured logging for tlparse integration
-            # TODO: consider gating on first-write only to avoid redundant logs
-            trace_structured(
-                "fx_codegen_dump",
-                lambda: {
-                    "filename": dump_filename,
-                    "file_path": os.path.abspath(dump_path),
-                },
-                payload_fn=lambda: self._code,
-                expect_trace_id=False,
-            )
+        self._dump_codegen_to_disk()
 
         cls = type(self)
         co_fields = self._graph._co_fields if hasattr(self._graph, "_co_fields") else {}
