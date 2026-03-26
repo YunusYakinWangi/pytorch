@@ -8,8 +8,6 @@ import torch
 
 
 __all__ = [
-    "PRNGKey",
-    "Philox4x32_10Key",
     "set_rng_state",
     "get_rng_state",
     "manual_seed",
@@ -30,120 +28,28 @@ if TYPE_CHECKING:
 from torch._C import default_generator
 
 
-class PRNGKey(torch.Tensor):
-    """Base tensor subclass for typed PRNG keys.
-
-    Uses _make_wrapper_subclass with __tensor_flatten__/__tensor_unflatten__
-    so torch.compile can decompose the key into a plain tensor for tracing.
-    __torch_dispatch__ unwraps the key for all ops, so the dispatcher always
-    sees plain tensors.
-    """
-
-    _data: torch.Tensor
-
-    __torch_function__ = torch._C._disabled_torch_function_impl
-
-    @staticmethod
-    def __new__(cls, data: torch.Tensor):
-        return torch.Tensor._make_wrapper_subclass(
-            cls,
-            data.shape,
-            dtype=data.dtype,
-            device=data.device,
-            strides=data.stride(),
-        )
-
-    def __init__(self, data: torch.Tensor):
-        self._data = data
-
-    def __tensor_flatten__(self):
-        return ["_data"], {}
-
-    @classmethod
-    def __tensor_unflatten__(cls, inner_tensors, metadata, outer_size, outer_stride):
-        return cls(inner_tensors["_data"])
-
-    @classmethod
-    def __torch_dispatch__(cls, func, types, args=(), kwargs=None):
-        if kwargs is None:
-            kwargs = {}
-
-        def unwrap(x):
-            return x._data if isinstance(x, PRNGKey) else x
-
-        args = torch.utils._pytree.tree_map(unwrap, args)
-        kwargs = torch.utils._pytree.tree_map(unwrap, kwargs)
-        return func(*args, **kwargs)
-
-    def __repr__(self):
-        return f"{type(self).__name__}({self._data})"
-
-    def _split(self, num: int) -> "PRNGKey":
-        raise NotImplementedError
-
-    def _fold_in(self, data: int) -> "PRNGKey":
-        raise NotImplementedError
-
-    def _uniform(
-        self, out: torch.Tensor, low: float, high: float, portable: bool
-    ) -> torch.Tensor:
-        raise NotImplementedError
-
-    def _normal(
-        self, out: torch.Tensor, mean: float, std: float, portable: bool
-    ) -> torch.Tensor:
-        raise NotImplementedError
-
-
-class Philox4x32_10Key(PRNGKey):
-    """Philox 4x32-10 PRNG key. Data layout: (*batch, 2) uint64 [seed, offset]."""
-
-    @classmethod
-    def __tensor_unflatten__(cls, inner_tensors, metadata, outer_size, outer_stride):
-        return cls(inner_tensors["_data"])
-
-    def _split(self, num):
-        return Philox4x32_10Key(torch.ops.aten._philox_key_split(self, num))
-
-    def _fold_in(self, data):
-        return Philox4x32_10Key(torch.ops.aten._philox_key_fold_in(self, data))
-
-    def _uniform(self, out, low, high, portable):
-        return torch.ops.aten._philox_uniform_(out, self, low, high, portable)
-
-    def _normal(self, out, mean, std, portable):
-        return torch.ops.aten._philox_normal_(out, self, mean, std, portable)
-
-
-_IMPLS: dict[str, type[PRNGKey]] = {"philox4x32-10": Philox4x32_10Key}
-
-
 def key(
     seed: int, impl: str = "philox4x32-10", device: torch.device | None = None
 ) -> torch.Tensor:
-    cls = _IMPLS.get(impl)
-    if cls is None:
+    if impl != "philox4x32-10":
         raise NotImplementedError(
             f"torch.random.key() does not support PRNG impl '{impl}'"
         )
-    data = torch.tensor([seed, 0], dtype=torch.uint64, device=device)
-    return cls(data)
+
+    # (seed, offset)
+    return torch.tensor([seed, 0], dtype=torch.uint64, device=device)
 
 
-def split(key, num: int = 2):
-    if isinstance(key, PRNGKey):
-        return key._split(num)
+def split(key: torch.Tensor, num: int = 2) -> torch.Tensor:
     return torch.ops.aten._philox_key_split(key, num)
 
 
-def fold_in(key, data: int):
-    if isinstance(key, PRNGKey):
-        return key._fold_in(data)
+def fold_in(key: torch.Tensor, data: int) -> torch.Tensor:
     return torch.ops.aten._philox_key_fold_in(key, data)
 
 
 def normal(
-    key,
+    key: torch.Tensor,
     *shape: tuple[int, ...],
     mean: float = 0.0,
     std: float = 1.0,
@@ -158,13 +64,11 @@ def normal(
     if device is None:
         device = key.device
     result = torch.empty(shape, dtype=dtype, device=device)
-    if isinstance(key, PRNGKey):
-        return key._normal(result, mean, std, portable)
     return torch.ops.aten._philox_normal_(result, key, mean, std, portable)
 
 
 def uniform(
-    key,
+    key: torch.Tensor,
     *shape: tuple[int, ...],
     low: float = 0.0,
     high: float = 1.0,
@@ -179,8 +83,6 @@ def uniform(
     if device is None:
         device = key.device
     result = torch.empty(shape, dtype=dtype, device=device)
-    if isinstance(key, PRNGKey):
-        return key._uniform(result, low, high, portable)
     return torch.ops.aten._philox_uniform_(result, key, low, high, portable)
 
 
