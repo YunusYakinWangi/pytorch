@@ -46,15 +46,6 @@ fi
 echo "Environment variables:"
 env
 
-TORCH_INSTALL_DIR=$(python -c "import site; print(site.getsitepackages()[0])")/torch
-TORCH_BIN_DIR="$TORCH_INSTALL_DIR"/bin
-TORCH_LIB_DIR="$TORCH_INSTALL_DIR"/lib
-TORCH_TEST_DIR="$TORCH_INSTALL_DIR"/test
-
-BUILD_DIR="build"
-BUILD_RENAMED_DIR="build_renamed"
-BUILD_BIN_DIR="$BUILD_DIR"/bin
-
 #Set Default values for these variables in case they are not set
 SHARD_NUMBER="${SHARD_NUMBER:=1}"
 NUM_TEST_SHARDS="${NUM_TEST_SHARDS:=1}"
@@ -132,12 +123,6 @@ if [[ "$BUILD_ENVIRONMENT" != *bazel* ]]; then
   CUSTOM_TEST_ARTIFACT_BUILD_DIR=$(realpath "${CUSTOM_TEST_ARTIFACT_BUILD_DIR:-"build/custom_test_artifacts"}")
 fi
 
-# Reduce set of tests to include when running run_test.py
-if [[ -n $TESTS_TO_INCLUDE ]]; then
-  echo "Setting INCLUDE_CLAUSE"
-  INCLUDE_CLAUSE="--include $TESTS_TO_INCLUDE"
-fi
-
 echo "Environment variables"
 env
 
@@ -198,8 +183,6 @@ if [[ "$BUILD_ENVIRONMENT" == *rocm* ]]; then
   rocminfo
   rocminfo | grep -E 'Name:.*\sgfx|Marketing'
 
-  # for benchmarks/dynamo/check_accuracy.py, we need to put results in a rocm specific directory to avoid clashes with cuda
-  MAYBE_ROCM="rocm/"
 fi
 
 if [[ "$BUILD_ENVIRONMENT" == *xpu* ]]; then

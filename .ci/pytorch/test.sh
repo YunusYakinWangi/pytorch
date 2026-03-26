@@ -9,6 +9,26 @@ export TERM=vt100
 # shellcheck source=./linux_test_setup.sh
 source "$(dirname "${BASH_SOURCE[0]}")/linux_test_setup.sh"
 
+TORCH_INSTALL_DIR=$(python -c "import site; print(site.getsitepackages()[0])")/torch
+TORCH_BIN_DIR="$TORCH_INSTALL_DIR"/bin
+TORCH_LIB_DIR="$TORCH_INSTALL_DIR"/lib
+TORCH_TEST_DIR="$TORCH_INSTALL_DIR"/test
+
+BUILD_DIR="build"
+BUILD_RENAMED_DIR="build_renamed"
+BUILD_BIN_DIR="$BUILD_DIR"/bin
+
+# for benchmarks/dynamo/check_accuracy.py, we need to put results in a rocm specific directory to avoid clashes with cuda
+if [[ "$BUILD_ENVIRONMENT" == *rocm* ]]; then
+  MAYBE_ROCM="rocm/"
+fi
+
+# Reduce set of tests to include when running run_test.py
+if [[ -n $TESTS_TO_INCLUDE ]]; then
+  echo "Setting INCLUDE_CLAUSE"
+  INCLUDE_CLAUSE="--include $TESTS_TO_INCLUDE"
+fi
+
 test_python_legacy_jit() {
   time python test/run_test.py --include test_jit_legacy test_jit_fuser_legacy --verbose
   assert_git_not_dirty
