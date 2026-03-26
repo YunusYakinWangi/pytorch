@@ -866,6 +866,95 @@ class {module_name}(torch.nn.Module):
             )
         return self._code
 
+    def _dump_codegen_to_disk(self, python_code_globals: dict[str, Any] | None = None) -> None:
+        """Write generated source to content-addressed file for debugging.
+
+        When ``codegen_dump_dir`` is set or ``profiler_codegen`` is enabled,
+        dump ``self._code`` to disk with a SHA-256-based filename.
+        Collects subgraph code for GraphModule children and appends it.
+        If ``python_code_globals`` is provided, also exec from disk and
+        install a hot-reload forward wrapper.
+        """
+        dump_dir = fx_experimental_config.codegen_dump_dir
+        if not dump_dir and fx_experimental_config.profiler_codegen:
+            import tempfile
+
+            dump_dir = os.path.join(tempfile.gettempdir(), "torch_fx_codegen")
+        if not dump_dir:
+            return
+
+        # Collect subgraph code for GraphModule children
+        subgraph_sections: list[str] = []
+        subgraph_globals: dict[str, Any] = {}
+        from torch.fx.profiler_codegen import ProfilerCodeGen as _ProfilerCodeGen
+
+        for name, child in self.named_children():
+            if isinstance(child, GraphModule) and hasattr(child, "_graph"):
+                child_code = child._graph.python_code("self")
+                child_src = child_code.src
+                if child_code.globals:
+                    subgraph_globals.update(child_code.globals)
+                # Generate impl + profiled + dispatcher for subgraph
+                impl_src = child_src.replace("def forward(", f"def _{name}_forward_impl(", 1)
+                # Remove import lines (already in main module)
+                impl_lines = [l for l in impl_src.split("\n") if not l.strip().startswith(("import ", "from "))]
+                impl_src = "\n".join(impl_lines)
+                # Profiled version: wrap recordable nodes
+                if isinstance(self._graph._codegen, _ProfilerCodeGen):
+                    profiled_lines = [f"def _{name}_forward_profiled(self, *args, **kwargs):"]
+                    profiled_lines.append(f"    return _{name}_forward_impl(self, *args, **kwargs)")
+                    profiled_src = "\n".join(profiled_lines)
+                    dispatcher = (
+                        f"def _{name}_forward(self, *args, **kwargs):\n"
+                        f"    if _autograd_profiler._is_profiler_enabled:\n"
+                        f"        return _{name}_forward_profiled(self, *args, **kwargs)\n"
+                        f"    return _{name}_forward_impl(self, *args, **kwargs)\n"
+                    )
+                else:
+                    profiled_src = ""
+                    dispatcher = (
+                        f"def _{name}_forward(self, *args, **kwargs):\n"
+                        f"    return _{name}_forward_impl(self, *args, **kwargs)\n"
+                    )
+                section = f"\n# ===== Subgraph: {name} =====\n{impl_src}\n\n{profiled_src}\n\n{dispatcher}"
+                subgraph_sections.append(section)
+
+        dump_code = self._code
+        if subgraph_sections:
+            dump_code += "\n" + "\n".join(subgraph_sections)
+
+        code_hash = hashlib.sha256(dump_code.encode("utf-8")).hexdigest()[:16]
+        rank_suffix = ""
+        if torch.distributed.is_initialized():
+            rank_suffix = f"_rank{torch.distributed.get_rank()}"
+        dump_filename = f"fx_{code_hash}{rank_suffix}.py"
+        dump_path = os.path.join(dump_dir, dump_filename)
+        os.makedirs(dump_dir, exist_ok=True)
+        if not os.path.exists(dump_path):
+            self._atomic_write(dump_path, dump_code)
+        self._codegen_dump_path = dump_path
+        self._codegen_dump_hash = code_hash
+        self._codegen_dump_mtime = os.path.getmtime(dump_path)
+
+        trace_structured(
+            "fx_codegen_dump",
+            lambda: {
+                "filename": dump_filename,
+                "file_path": os.path.abspath(dump_path),
+            },
+            payload_fn=lambda: dump_code,
+            expect_trace_id=False,
+        )
+
+        # Hot-reload: exec from disk file and install a forward wrapper
+        # that checks for file modifications on each call.
+        if python_code_globals is not None:
+            combined_globals = python_code_globals.copy()
+            if subgraph_globals:
+                combined_globals.update(subgraph_globals)
+            self._codegen_reload_from_disk(combined_globals)
+            self._codegen_python_code_globals = combined_globals
+
     def _codegen_check_modified(self) -> bool:
         """Check if the dumped codegen file was modified since last load.
 
@@ -972,12 +1061,10 @@ class {module_name}(torch.nn.Module):
 
         # ProfilerCodeGen has its own dual-path profiler instrumentation,
         # skip the old record_func / enrich_profiler_metadata path.
-        use_record_func = fx_experimental_config.enrich_profiler_metadata
-        if use_record_func:
-            from torch.fx.profiler_codegen import ProfilerCodeGen
-
-            if isinstance(self._graph._codegen, ProfilerCodeGen):
-                use_record_func = False
+        use_record_func = (
+            fx_experimental_config.enrich_profiler_metadata
+            and not fx_experimental_config.profiler_codegen
+        )
         python_code = self._graph.python_code(
             root_module="self",
             record_func=use_record_func,
@@ -986,85 +1073,10 @@ class {module_name}(torch.nn.Module):
         self._lineno_map = python_code._lineno_map
         self._prologue_start = python_code._prologue_start
 
-        # Disk dump: write generated source to content-addressed file.
+        # Disk dump + hot-reload: write generated source to content-addressed file.
         # When codegen_dump_dir is set, the file is executable and supports
         # hot-reload: edit the file on disk and the next forward() picks up changes.
-        dump_dir = fx_experimental_config.codegen_dump_dir
-        if not dump_dir and fx_experimental_config.profiler_codegen:
-            import tempfile
-
-            dump_dir = os.path.join(tempfile.gettempdir(), "torch_fx_codegen")
-        if dump_dir:
-            # Collect subgraph code for GraphModule children
-            subgraph_sections = []
-            subgraph_globals = {}
-            from torch.fx.profiler_codegen import ProfilerCodeGen as _ProfilerCodeGen
-
-            for name, child in self.named_children():
-                if isinstance(child, GraphModule) and hasattr(child, "_graph"):
-                    child_code = child._graph.python_code("self")
-                    child_src = child_code.src
-                    if child_code.globals:
-                        subgraph_globals.update(child_code.globals)
-                    # Generate impl + profiled + dispatcher for subgraph
-                    impl_src = child_src.replace("def forward(", f"def _{name}_forward_impl(", 1)
-                    # Remove import lines (already in main module)
-                    impl_lines = [l for l in impl_src.split("\n") if not l.strip().startswith(("import ", "from "))]
-                    impl_src = "\n".join(impl_lines)
-                    # Profiled version: wrap recordable nodes
-                    if isinstance(self._graph._codegen, _ProfilerCodeGen):
-                        profiled_lines = [f"def _{name}_forward_profiled(self, *args, **kwargs):"]
-                        profiled_lines.append(f"    return _{name}_forward_impl(self, *args, **kwargs)")
-                        profiled_src = "\n".join(profiled_lines)
-                        dispatcher = (
-                            f"def _{name}_forward(self, *args, **kwargs):\n"
-                            f"    if _autograd_profiler._is_profiler_enabled:\n"
-                            f"        return _{name}_forward_profiled(self, *args, **kwargs)\n"
-                            f"    return _{name}_forward_impl(self, *args, **kwargs)\n"
-                        )
-                    else:
-                        profiled_src = ""
-                        dispatcher = (
-                            f"def _{name}_forward(self, *args, **kwargs):\n"
-                            f"    return _{name}_forward_impl(self, *args, **kwargs)\n"
-                        )
-                    section = f"\n# ===== Subgraph: {name} =====\n{impl_src}\n\n{profiled_src}\n\n{dispatcher}"
-                    subgraph_sections.append(section)
-
-            dump_code = self._code
-            if subgraph_sections:
-                dump_code += "\n" + "\n".join(subgraph_sections)
-
-            code_hash = hashlib.sha256(dump_code.encode("utf-8")).hexdigest()[:16]
-            rank_suffix = ""
-            if torch.distributed.is_initialized():
-                rank_suffix = f"_rank{torch.distributed.get_rank()}"
-            dump_filename = f"fx_{code_hash}{rank_suffix}.py"
-            dump_path = os.path.join(dump_dir, dump_filename)
-            os.makedirs(dump_dir, exist_ok=True)
-            if not os.path.exists(dump_path):
-                self._atomic_write(dump_path, dump_code)
-            self._codegen_dump_path = dump_path
-            self._codegen_dump_hash = code_hash
-            self._codegen_dump_mtime = os.path.getmtime(dump_path)
-
-            trace_structured(
-                "fx_codegen_dump",
-                lambda: {
-                    "filename": dump_filename,
-                    "file_path": os.path.abspath(dump_path),
-                },
-                payload_fn=lambda: dump_code,
-                expect_trace_id=False,
-            )
-
-            # Hot-reload: exec from disk file and install a forward wrapper
-            # that checks for file modifications on each call.
-            combined_globals = python_code.globals.copy()
-            if subgraph_globals:
-                combined_globals.update(subgraph_globals)
-            self._codegen_reload_from_disk(combined_globals)
-            self._codegen_python_code_globals = combined_globals
+        self._dump_codegen_to_disk(python_code.globals)
 
         cls = type(self)
         co_fields = self._graph._co_fields if hasattr(self._graph, "_co_fields") else {}
