@@ -764,6 +764,45 @@ class TensorVariable(VariableTracker):
             torch._dynamo.config._autograd_backward_strict_mode_conditional_banned_ops
         )
 
+    def getitem_impl(
+        self,
+        tx: "InstructionTranslator",
+        key: VariableTracker,
+    ) -> VariableTracker:
+        # https://github.com/python/cpython/blob/v3.13.3/Objects/abstract.c#L164-L202
+        from .builder import SourcelessBuilder, VariableBuilder
+        from .torch_function import can_dispatch_torch_function, dispatch_torch_function
+
+        if self.is_strict_mode(tx) and "__getitem__" in self._strict_mode_banned_ops():
+            unimplemented(
+                gb_type="Illegal method invocation in strict mode",
+                context=f"getitem_impl {self} {key}",
+                explanation="Dynamo currently does not support __getitem__ "
+                "invocation in strict mode.",
+                hints=[],
+            )
+
+        args = (key,)
+        kwargs: dict[str, VariableTracker] = {}
+        static_attr = all_tensor_attrs.get("__getitem__", None)
+        if static_attr is not None and can_dispatch_torch_function(
+            tx, (self, key), kwargs
+        ):
+            if self.source:
+                func_var = VariableBuilder(
+                    tx,
+                    AttrSource(AttrSource(self.source, "__class__"), "__getitem__"),
+                )(static_attr)
+            else:
+                func_var = SourcelessBuilder.create(
+                    tx, getattr(torch.Tensor, "__getitem__")
+                )
+            return dispatch_torch_function(
+                tx, func_var, (self, key), kwargs
+            )
+
+        return self.method___getitem__(tx, key)
+
     def call_method(
         self,
         tx: "InstructionTranslator",

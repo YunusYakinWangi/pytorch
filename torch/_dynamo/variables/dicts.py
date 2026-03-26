@@ -605,6 +605,14 @@ class ConstDictVariable(VariableTracker):
             else:
                 self.install_dict_keys_match_guard()
 
+    def getitem_impl(
+        self,
+        tx: "InstructionTranslator",
+        key: VariableTracker,
+    ) -> VariableTracker:
+        # https://github.com/python/cpython/blob/v3.13.3/Objects/dictobject.c#L2626
+        return self.getitem_const_raise_exception_if_absent(tx, key)
+
     def call_method(
         self,
         tx: "InstructionTranslator",
@@ -631,11 +639,6 @@ class ConstDictVariable(VariableTracker):
             tx.output.side_effects.mutation(self)
             self.items.update(temp_dict_vt.items)  # type: ignore[attr-defined]
             return CONSTANT_VARIABLE_NONE
-        elif name == "__getitem__":
-            # Key guarding - Nothing to do. LazyVT for value will take care.
-            if len(args) != 1:
-                raise_args_mismatch(tx, name, "1 args", f"{len(args)} args")
-            return self.getitem_const_raise_exception_if_absent(tx, args[0])
         elif name == "items":
             if args or kwargs:
                 raise_args_mismatch(
@@ -1139,6 +1142,25 @@ class DefaultDictVariable(ConstDictVariable):
             ),
         ) or (isinstance(arg, variables.ConstantVariable) and arg.value is None)
 
+    def getitem_impl(
+        self,
+        tx: "InstructionTranslator",
+        key: VariableTracker,
+    ) -> VariableTracker:
+        # https://github.com/python/cpython/blob/v3.13.3/Modules/_collectionsmodule.c#L2295
+        if key in self:
+            return self.getitem_const(tx, key)
+
+        if (
+            istype(self.default_factory, ConstantVariable)
+            and self.default_factory.value is None
+        ):
+            raise_observed_exception(KeyError, tx, args=[key])
+        else:
+            default_var = self.default_factory.call_function(tx, [], {})
+            super().call_method(tx, "__setitem__", [key, default_var], {})
+            return default_var
+
     def call_method(
         self,
         tx: "InstructionTranslator",
@@ -1146,25 +1168,7 @@ class DefaultDictVariable(ConstDictVariable):
         args: list[VariableTracker],
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker:
-        if name == "__getitem__":
-            if len(args) != 1:
-                raise_args_mismatch(tx, name, "1 args", f"{len(args)} args")
-
-            if args[0] in self:
-                return self.getitem_const(tx, args[0])
-            else:
-                if (
-                    istype(self.default_factory, ConstantVariable)
-                    and self.default_factory.value is None
-                ):
-                    raise_observed_exception(KeyError, tx, args=[args[0]])
-                else:
-                    default_var = self.default_factory.call_function(tx, [], {})
-                    super().call_method(
-                        tx, "__setitem__", [args[0], default_var], kwargs
-                    )
-                    return default_var
-        elif name == "__setattr__" and self.is_mutable:
+        if name == "__setattr__" and self.is_mutable:
             if len(args) != 2:
                 raise_args_mismatch(tx, name, "2 args", f"{len(args)} args")
             # Setting a default factory must be a callable or None type
