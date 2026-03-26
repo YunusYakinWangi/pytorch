@@ -41,14 +41,14 @@ class Sm100GroupedBlockScaledGemmKernel:
         - Float8E4M3FN/Float8E5M2
     :note: Constraints:
         - MMA tiler M must be 128 or 256 (use_2cta_instrs)
-        - MMA tiler N must be 128/256
+        - MMA tiler N must be 64/128/256
         - Cluster shape M must be multiple of 2 if Mma tiler M is 256
         - Cluster shape M/N must be positive and power of 2, total cluster size <= 16
         - Cluster shape M/N must be <= 4 for scale factor multicasts due to limited size of scale factors
     """
 
     # Compile-time tuning knobs.
-    AB_TMA_LOAD_UNROLL = 2
+    AB_TMA_LOAD_UNROLL = 4
     NUM_WARPS_PER_CTA = 12
     GENERIC_REG_REQUIREMENT = 136
     ACCUM_REG_REQUIREMENT = 232
@@ -1616,7 +1616,6 @@ class Sm100GroupedBlockScaledGemmKernel:
                 self.cluster_tile_shape_mnk,
                 utils.create_initial_search_state(),
             )
-
             work_tile = tile_sched.initial_work_tile_info()
 
             acc_consumer_state = pipeline.make_pipeline_state(
@@ -1666,9 +1665,6 @@ class Sm100GroupedBlockScaledGemmKernel:
                     (None, None, None, None, None, acc_consumer_state.index)
                 ]
 
-                #
-                # Wait for accumulator buffer full
-                #
                 if warp_idx == self.epilog_warp_id[0]:
                     acc_pipeline.consumer_wait(acc_consumer_state)
                 self.epilog_sync_barrier.arrive_and_wait()

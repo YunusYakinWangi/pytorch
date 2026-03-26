@@ -154,11 +154,7 @@ def assert_cutedsl_runtime_available() -> None:
 
 def _select_kernel_config_fp8(M: int, N: int, K: int) -> _KernelConfig:
     # Port of MSLK mx8mx8bf16_grouped::get_kernel_via_heuristics()
-    # adjusted to the CuTeDSL kernel families currently available.
-    # MSLK has a 256x64 variant; CuTeDSL kernel supports N in {128,
-    # 256}, so we map that choice to a 128x128 transpose
-    # configuration.
-    cfg_256_64_ba = _KernelConfig((128, 128), (2, 1), True)
+    cfg_256_64_ba = _KernelConfig((256, 64), (2, 1), True)
     cfg_256_128_ba = _KernelConfig((256, 128), (2, 1), True)
     cfg_256_256_ab = _KernelConfig((256, 256), (2, 1), False)
     cfg_256_256_ba = _KernelConfig((256, 256), (2, 1), True)
@@ -515,17 +511,12 @@ def _select_kernel_config_fp8(M: int, N: int, K: int) -> _KernelConfig:
 
 
 def _select_kernel_config_fp4(M: int, N: int, K: int) -> _KernelConfig:
-    # Port of MSLK f4f4bf16_grouped::get_kernel_via_heuristics()
-    # adjusted to the CuTeDSL kernel families currently available.
-    # MSLK exposes dedicated 64-wide N kernels and both 1x1/2x1
-    # cluster variants for small-M regions. The CuTeDSL kernel
-    # supports N in {128, 256} only, so 64-wide choices are
-    # approximated via transpose_ab=True with a 128x128 tile. The FP4
-    # kernel family also carries its K-tiling in the compiled
+    # Port of MSLK f4f4bf16_grouped::get_kernel_via_heuristics().
+    # The FP4 kernel family carries its K-tiling in the compiled
     # dtype-specific kernel, so the MSLK 256x256x128 vs 256x256x256
     # distinction collapses to a single 256x256 choice here.
-    cfg_128_64 = _KernelConfig((128, 128), (1, 1), True)
-    cfg_256_64 = _KernelConfig((128, 128), (2, 1), True)
+    cfg_128_64 = _KernelConfig((128, 64), (1, 1), True)
+    cfg_256_64 = _KernelConfig((256, 64), (2, 1), True)
     cfg_128_128 = _KernelConfig((128, 128), (1, 1), False)
     cfg_256_128 = _KernelConfig((256, 128), (2, 1), False)
     cfg_256_256 = _KernelConfig((256, 256), (2, 1), False)

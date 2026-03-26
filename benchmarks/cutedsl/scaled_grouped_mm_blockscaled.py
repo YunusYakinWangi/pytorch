@@ -4,6 +4,7 @@ import importlib
 import statistics
 import subprocess
 import sys
+import time
 import warnings
 from collections.abc import Callable
 
@@ -14,6 +15,9 @@ from torch.testing._internal.common_quantized import (
     to_blocked,
     to_mxfp,
 )
+
+
+_CPP_SCALED_GROUPED_MM_V2_KERNEL = None
 
 
 def is_blackwell():
@@ -83,7 +87,7 @@ def _parse_format(value):
     return value
 
 
-def _do_bench_cuda(fn, warmup=10, rep=100):
+def _do_bench_cuda(fn, warmup=10, rep=100, settle_between_iters=0.0):
     if isinstance(fn, (list, tuple)):
         if len(fn) == 0:
             raise ValueError("fn list for benchmarking cannot be empty")
@@ -91,50 +95,65 @@ def _do_bench_cuda(fn, warmup=10, rep=100):
         for i in range(warmup):
             fns[i % len(fns)]()
         torch.cuda.synchronize()
-
-        start = torch.cuda.Event(enable_timing=True)
-        end = torch.cuda.Event(enable_timing=True)
-        start.record()
+        samples_us = []
         for i in range(rep):
+            if settle_between_iters > 0:
+                time.sleep(settle_between_iters)
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
             fns[i % len(fns)]()
-        end.record()
-        torch.cuda.synchronize()
-        return start.elapsed_time(end) * 1e3 / rep
+            end.record()
+            torch.cuda.synchronize()
+            samples_us.append(start.elapsed_time(end) * 1e3)
+        return sum(samples_us) / len(samples_us)
 
     for _ in range(warmup):
         fn()
     torch.cuda.synchronize()
-
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    start.record()
+    samples_us = []
     for _ in range(rep):
+        if settle_between_iters > 0:
+            time.sleep(settle_between_iters)
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
         fn()
-    end.record()
+        end.record()
+        torch.cuda.synchronize()
+        samples_us.append(start.elapsed_time(end) * 1e3)
+    return sum(samples_us) / len(samples_us)
+
+
+def _run_with_cuda_profiler(fn):
     torch.cuda.synchronize()
-    return start.elapsed_time(end) * 1e3 / rep
+    torch.cuda.cudart().cudaProfilerStart()
+    try:
+        out = fn()
+        torch.cuda.synchronize()
+        return out
+    finally:
+        torch.cuda.cudart().cudaProfilerStop()
 
 
-def _percentile(values: list[float], q: float) -> float:
-    if not values:
-        raise ValueError("values cannot be empty")
-    if q <= 0:
-        return float(min(values))
-    if q >= 100:
-        return float(max(values))
-    xs = sorted(float(v) for v in values)
-    pos = (len(xs) - 1) * (q / 100.0)
-    lo = int(pos)
-    hi = min(lo + 1, len(xs) - 1)
-    frac = pos - lo
-    return xs[lo] * (1.0 - frac) + xs[hi] * frac
+def _get_cpp_scaled_grouped_mm_v2_kernel():
+    global _CPP_SCALED_GROUPED_MM_V2_KERNEL
+    if _CPP_SCALED_GROUPED_MM_V2_KERNEL is None:
+        _CPP_SCALED_GROUPED_MM_V2_KERNEL = (
+            torch._C._dispatch_get_computed_kernel_for_dispatch_key(  # pyrefly: ignore [missing-module-attribute]
+                "aten::_scaled_grouped_mm_v2", "CUDA"
+            )
+        )
+    return _CPP_SCALED_GROUPED_MM_V2_KERNEL
 
 
-def _format_stat_triplet(values: list[float]) -> str:
-    med = statistics.median(values)
-    p10 = _percentile(values, 10.0)
-    p90 = _percentile(values, 90.0)
-    return f"{med:.2f} us (p10={p10:.2f}, p90={p90:.2f})"
+def _cuda_dispatch_keyset(device_type: str):
+    dispatch_key = torch._C._dispatch_key_for_device(device_type)  # pyrefly: ignore [missing-module-attribute]
+    dispatch_key = getattr(torch._C.DispatchKey, dispatch_key)  # pyrefly: ignore [missing-module-attribute]
+    return torch._C.DispatchKeySet(dispatch_key)  # pyrefly: ignore [missing-module-attribute]
+
+
+_get_cpp_scaled_grouped_mm_v2_kernel()
 
 
 def _nvidia_smi(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -265,7 +284,6 @@ def _bench_backend_subprocess(
     grouping: str,
     warmup: int,
     rep: int,
-    paired_trials: int,
     backend: str,
     use_cuda_graphs: bool,
     mma_tile_mn: tuple[int, int] | None,
@@ -290,8 +308,6 @@ def _bench_backend_subprocess(
         str(warmup),
         "--rep",
         str(rep),
-        "--paired-trials",
-        str(paired_trials),
         "--format",
         format,
         "--backend",
@@ -672,12 +688,11 @@ def benchmark_scaled_grouped_mm(
     seed=0,
     rtol=8e-2,
     atol=8e-2,
-    op: str = "benchmark",
     grouping="balanced",
     use_cuda_graphs=False,
     warmup=2,
     rep=20,
-    paired_trials=1,
+    settle_between_iters=0.1,
     backend="both",
     emit_us_only=False,
     mma_tile_mn: tuple[int, int] | None = None,
@@ -687,49 +702,23 @@ def benchmark_scaled_grouped_mm(
     layout_mode: str = "2d/3d",
     format: str = "mxfp8",
     subprocess_depth: int = 0,
+    cuda_profiler_backend: str | None = None,
 ):
     user_provided_gmnk = gmnk is not None
     if dtype is None:
         dtype = torch.bfloat16
     if backend not in ("both", "cpp", "cute"):
         raise ValueError(f"backend must be one of both/cpp/cute, got {backend}")
-    if op not in ("benchmark", "validate"):
-        raise ValueError(f"op must be one of benchmark/validate, got {op}")
-    if op == "validate":
-        if backend != "both":
-            raise ValueError(
-                "validate op requires backend='both' and runs a correctness check "
-                "between C++ and CuTeDSL."
-            )
-        if emit_us_only:
-            raise ValueError(
-                "validate op does not support emit_us_only; it prints only shape "
-                "and match/mismatch status."
-            )
-        if use_cuda_graphs:
-            raise ValueError(
-                "validate op does not support use_cuda_graphs (benchmark-only)."
-            )
-        if set_max_gpu_clocks:
-            raise ValueError(
-                "validate op does not support set_max_gpu_clocks (benchmark-only)."
-            )
-        if warmup != 2 or rep != 20 or paired_trials != 1:
-            raise ValueError(
-                "validate op does not accept warmup/rep/paired_trials overrides; "
-                "those are benchmark-only options."
-            )
-    # Benchmark op runs in isolated subprocesses only at top level.
-    # Child runs (subprocess_depth > 0) execute locally to avoid recursion.
-    use_subprocess = op == "benchmark" and subprocess_depth == 0
-    do_correctness = op == "validate"
-    if op == "validate":
-        warmup = 0
-        rep = 1
-        paired_trials = 1
-        use_cuda_graphs = False
-    if paired_trials < 1:
-        raise ValueError(f"paired_trials must be >= 1, got {paired_trials}")
+    if cuda_profiler_backend not in (None, "cpp", "cute", "both"):
+        raise ValueError(
+            "cuda_profiler_backend must be one of None/cpp/cute/both, "
+            f"got {cuda_profiler_backend}"
+        )
+    if settle_between_iters < 0:
+        raise ValueError(
+            f"settle_between_iters must be >= 0, got {settle_between_iters}"
+        )
+    use_subprocess = False
     if (mma_tile_mn is None) != (cluster_shape_mn is None):
         raise ValueError(
             "mma_tile_mn and cluster_shape_mn must be provided together or omitted together"
@@ -762,9 +751,6 @@ def benchmark_scaled_grouped_mm(
             # Backward-style mapping from 2d/3d forward defaults:
             # (G, M, N, K) -> (G, K, N, M)
             gmnk = [[g, k, n, m] for g, m, n, k in gmnk]
-    if op == "validate" and (not user_provided_gmnk) and gmnk:
-        # Keep validation mode quick by default.
-        gmnk = [gmnk[0]]
     swizzle = SwizzleType.NO_SWIZZLE
     if torch.version.cuda:
         swizzle = SwizzleType.SWIZZLE_32_4_4
@@ -777,6 +763,7 @@ def benchmark_scaled_grouped_mm(
     swizzle_int = [swizzle.value]
     run_cpp = backend in ("both", "cpp")
     run_cute = backend in ("both", "cute")
+    do_correctness = run_cpp and run_cute
     input_dtype_name = "bf16" if dtype == torch.bfloat16 else "fp16"
     gpu_perf_configured = False
     all_valid = True
@@ -858,27 +845,32 @@ def benchmark_scaled_grouped_mm(
                 _prepared_k_eff,
             ) = prepared_inputs
 
-            fn_cpp = lambda: torch._scaled_grouped_mm_v2(  # noqa: E731
-                input=xq,
-                mat2=wq.transpose(-2, -1),
-                scale_a=(
+            cpp_kernel = _get_cpp_scaled_grouped_mm_v2_kernel()
+            cpp_dispatch_keys = _cuda_dispatch_keyset(xq.device.type)
+
+            fn_cpp = lambda: cpp_kernel.call_boxed(  # noqa: E731
+                cpp_dispatch_keys,
+                xq,
+                wq.transpose(-2, -1),
+                (
                     [x_blocked_scales, x_global_scales]
                     if format == "nvfp4"
                     else [x_blocked_scales]
                 ),
-                recipe_a=scale_recipe_int,
-                swizzle_a=swizzle_int,
-                scale_b=(
+                scale_recipe_int,
+                swizzle_int,
+                (
                     [w_blocked_scales, w_global_scales]
                     if format == "nvfp4"
                     else [w_blocked_scales]
                 ),
-                recipe_b=scale_recipe_int,
-                swizzle_b=swizzle_int,
-                offs=offs,
-                bias=None,
-                out_dtype=torch.bfloat16,
-                use_fast_accum=False,
+                scale_recipe_int,
+                swizzle_int,
+                offs,
+                None,
+                torch.bfloat16,
+                [],
+                False,
             )
 
             fn_cute_base = lambda: scaled_grouped_mm(  # noqa: E731
@@ -904,102 +896,32 @@ def benchmark_scaled_grouped_mm(
             fn_cute = _make_cute_call(fn_cute_base)
             return fn_cpp, fn_cute
 
-        cpp_samples = []
-        cute_samples = []
-        speedup_samples = []
+        us_cpp = None
+        us_cute = None
 
         if use_subprocess:
-            if run_cpp and run_cute:
-                trial_cpp = _bench_backend_subprocess(
-                    g=g,
-                    m=m,
-                    n=n,
-                    k=k,
-                    input_dtype=input_dtype_name,
-                    seed=seed,
-                    grouping=grouping,
-                    warmup=warmup,
-                    rep=rep,
-                    paired_trials=paired_trials,
-                    backend="cpp",
-                    use_cuda_graphs=use_cuda_graphs,
-                    mma_tile_mn=mma_tile_mn,
-                    cluster_shape_mn=cluster_shape_mn,
-                    transpose_ab=transpose_ab,
-                    layout_mode=layout_mode,
-                    format=format,
-                    subprocess_depth=subprocess_depth,
-                )
-                trial_cute = _bench_backend_subprocess(
-                    g=g,
-                    m=m,
-                    n=n,
-                    k=k,
-                    input_dtype=input_dtype_name,
-                    seed=seed,
-                    grouping=grouping,
-                    warmup=warmup,
-                    rep=rep,
-                    paired_trials=paired_trials,
-                    backend="cute",
-                    use_cuda_graphs=use_cuda_graphs,
-                    mma_tile_mn=mma_tile_mn,
-                    cluster_shape_mn=cluster_shape_mn,
-                    transpose_ab=transpose_ab,
-                    layout_mode=layout_mode,
-                    format=format,
-                    subprocess_depth=subprocess_depth,
-                )
-                cpp_samples = [trial_cpp]
-                cute_samples = [trial_cute]
-                speedup_samples = [trial_cpp / trial_cute]
-            else:
-                if run_cpp:
-                    cpp_samples = [
-                        _bench_backend_subprocess(
-                            g=g,
-                            m=m,
-                            n=n,
-                            k=k,
-                            input_dtype=input_dtype_name,
-                            seed=seed,
-                            grouping=grouping,
-                            warmup=warmup,
-                            rep=rep,
-                            paired_trials=paired_trials,
-                            backend="cpp",
-                            use_cuda_graphs=use_cuda_graphs,
-                            mma_tile_mn=mma_tile_mn,
-                            cluster_shape_mn=cluster_shape_mn,
-                            transpose_ab=transpose_ab,
-                            layout_mode=layout_mode,
-                            format=format,
-                            subprocess_depth=subprocess_depth,
-                        )
-                    ]
-                if run_cute:
-                    cute_samples = [
-                        _bench_backend_subprocess(
-                            g=g,
-                            m=m,
-                            n=n,
-                            k=k,
-                            input_dtype=input_dtype_name,
-                            seed=seed,
-                            grouping=grouping,
-                            warmup=warmup,
-                            rep=rep,
-                            paired_trials=paired_trials,
-                            backend="cute",
-                            use_cuda_graphs=use_cuda_graphs,
-                            mma_tile_mn=mma_tile_mn,
-                            cluster_shape_mn=cluster_shape_mn,
-                            transpose_ab=transpose_ab,
-                            layout_mode=layout_mode,
-                            format=format,
-                            subprocess_depth=subprocess_depth,
-                        )
-                    ]
+            _sub_kwargs = dict(
+                g=g,
+                m=m,
+                n=n,
+                k=k,
+                input_dtype=input_dtype_name,
+                seed=seed,
+                grouping=grouping,
+                warmup=warmup,
+                rep=rep,
+                use_cuda_graphs=use_cuda_graphs,
+                mma_tile_mn=mma_tile_mn,
+                cluster_shape_mn=cluster_shape_mn,
+                transpose_ab=transpose_ab,
+                layout_mode=layout_mode,
+                format=format,
+                subprocess_depth=subprocess_depth,
+            )
+            if run_cpp:
+                us_cpp = _bench_backend_subprocess(**_sub_kwargs, backend="cpp")
+            if run_cute:
+                us_cute = _bench_backend_subprocess(**_sub_kwargs, backend="cute")
         else:
             fn_cpp, fn_cute = _ensure_bench_fns()
             bench_fn_cpp = (
@@ -1012,32 +934,26 @@ def benchmark_scaled_grouped_mm(
                 if run_cute
                 else None
             )
-            if run_cpp and run_cute:
-                for _ in range(paired_trials):
-                    trial_cpp = _do_bench_cuda(bench_fn_cpp, warmup=warmup, rep=rep)
-                    trial_cute = _do_bench_cuda(bench_fn_cute, warmup=warmup, rep=rep)
-                    cpp_samples.append(trial_cpp)
-                    cute_samples.append(trial_cute)
-                    speedup_samples.append(trial_cpp / trial_cute)
-            else:
-                if run_cpp:
-                    cpp_samples = [
-                        _do_bench_cuda(bench_fn_cpp, warmup=warmup, rep=rep)
-                        for _ in range(paired_trials)
-                    ]
-                if run_cute:
-                    cute_samples = [
-                        _do_bench_cuda(bench_fn_cute, warmup=warmup, rep=rep)
-                        for _ in range(paired_trials)
-                    ]
+            if run_cpp:
+                if cuda_profiler_backend in ("cpp", "both"):
+                    _run_with_cuda_profiler(bench_fn_cpp)
+                us_cpp = _do_bench_cuda(
+                    bench_fn_cpp,
+                    warmup=warmup,
+                    rep=rep,
+                    settle_between_iters=settle_between_iters,
+                )
+            if run_cute:
+                if cuda_profiler_backend in ("cute", "both"):
+                    _run_with_cuda_profiler(bench_fn_cute)
+                us_cute = _do_bench_cuda(
+                    bench_fn_cute,
+                    warmup=warmup,
+                    rep=rep,
+                    settle_between_iters=settle_between_iters,
+                )
 
-        us_cpp = statistics.median(cpp_samples) if cpp_samples else None
-        us_cute = statistics.median(cute_samples) if cute_samples else None
-        speedup = (
-            statistics.median(speedup_samples)
-            if speedup_samples
-            else (us_cpp / us_cute if us_cpp and us_cute else None)
-        )
+        speedup = us_cpp / us_cute if us_cpp and us_cute else None
 
         if emit_us_only:
             print(f"{us_cpp if run_cpp else us_cute}")
@@ -1045,25 +961,10 @@ def benchmark_scaled_grouped_mm(
                 {"G": g, "M": m, "N": n, "K": k, "us": us_cpp if run_cpp else us_cute}
             ]
 
-        if op == "validate":
-            # Keep validate output minimal and focused on correctness.
-            pass
-        elif us_cpp is not None:
+        if us_cpp is not None:
             print(f"  C++: {us_cpp:.2f} us")
-        if op != "validate" and us_cute is not None:
+        if us_cute is not None:
             print(f"  CuTeDSL: {us_cute:.2f} us")
-        if op != "validate" and paired_trials > 1:
-            if cpp_samples:
-                print(f"  C++ samples: {_format_stat_triplet(cpp_samples)}")
-            if cute_samples:
-                print(f"  CuTeDSL samples: {_format_stat_triplet(cute_samples)}")
-            if speedup_samples:
-                s_med = statistics.median(speedup_samples)
-                s_p10 = _percentile(speedup_samples, 10.0)
-                s_p90 = _percentile(speedup_samples, 90.0)
-                print(
-                    f"  speedup samples: {s_med:.3f} (p10={s_p10:.3f}, p90={s_p90:.3f})"
-                )
 
         if do_correctness and run_cpp and run_cute:
             fn_cpp, fn_cute = _ensure_bench_fns()
@@ -1091,27 +992,26 @@ def benchmark_scaled_grouped_mm(
                 "speedup": speedup,
             }
         )
-        if op != "validate":
-            print()
+        print()
 
-    if op != "validate":
-        import pandas as pd
+    import pandas as pd
 
-        df = pd.DataFrame(results)
-        for col in ("G", "M", "N", "K"):
-            df[col] = df[col].astype("int64")
-        for col in ("C++ (us)", "CuTeDSL (us)", "speedup"):
+    df = pd.DataFrame(results)
+    for col in ("G", "M", "N", "K"):
+        df[col] = df[col].astype("int64")
+    for col in df.columns:
+        if col not in ("G", "M", "N", "K"):
             df[col] = df[col].map(
                 lambda x: f"{x:.3f}" if x is not None and pd.notna(x) else "nan"
             )
-        print(
-            df.to_markdown(
-                index=False,
-                disable_numparse=True,
-                colalign=("right",) * len(df.columns),
-            )
+    print(
+        df.to_markdown(
+            index=False,
+            disable_numparse=True,
+            colalign=("right",) * len(df.columns),
         )
-    elif not all_valid:
+    )
+    if not all_valid:
         raise RuntimeError("validation failed for one or more shapes")
     return results
 
@@ -1188,18 +1088,6 @@ if __name__ == "__main__":
         help="Input layout mode for grouped MM benchmark.",
     )
     parser.add_argument(
-        "--op",
-        choices=["benchmark", "validate"],
-        default="benchmark",
-        help=(
-            "Operation op. benchmark (default): timing with subprocess "
-            "isolation and benchmark-only knobs (--warmup/--rep/--paired-trials/"
-            "--backend/--emit-us-only/--set-max-gpu-clocks/--use-cuda-graphs). "
-            "validate: quick correctness op (C++ vs CuTeDSL), minimal output, "
-            "benchmark-only knobs are not allowed."
-        ),
-    )
-    parser.add_argument(
         "--use-cuda-graphs",
         action="store_true",
         default=False,
@@ -1218,10 +1106,10 @@ if __name__ == "__main__":
         help="Measured iterations for timing loops.",
     )
     parser.add_argument(
-        "--paired-trials",
-        type=int,
-        default=1,
-        help="Number of paired timing trials per shape (C++ then CuTeDSL). Reports median timings and median per-trial speedup.",
+        "--settle-between-iters",
+        type=float,
+        default=0.1,
+        help="Idle time in seconds before each timed iteration.",
     )
     parser.add_argument(
         "--set-max-gpu-clocks",
@@ -1247,27 +1135,15 @@ if __name__ == "__main__":
         default=0,
         help=argparse.SUPPRESS,
     )
+    parser.add_argument(
+        "--cuda-profiler-backend",
+        choices=["cpp", "cute", "both"],
+        default=None,
+        help="Issue one cudaProfilerStart/Stop bracket around the selected backend before timing.",
+    )
     args = parser.parse_args()
     if (args.mma_tile_mn is None) != (args.cluster_shape_mn is None):
         parser.error("--mma-tile-mn and --cluster-shape-mn must be provided together")
-    if args.op == "validate":
-        disallowed_flags = [
-            "--warmup",
-            "--rep",
-            "--paired-trials",
-            "--backend",
-            "--emit-us-only",
-            "--set-max-gpu-clocks",
-            "--use-cuda-graphs",
-        ]
-        used_disallowed = [flag for flag in disallowed_flags if flag in sys.argv]
-        if used_disallowed:
-            parser.error(
-                "validate op is correctness-only and does not accept "
-                "benchmarking-only flags: "
-                + ", ".join(used_disallowed)
-                + ". Use --op benchmark for timing."
-            )
     dtype = torch.bfloat16 if args.input_dtype == "bf16" else torch.float16
     gmnk = args.gmnk if args.gmnk is not None else None
     benchmark_scaled_grouped_mm(
@@ -1276,12 +1152,11 @@ if __name__ == "__main__":
         seed=args.seed,
         rtol=args.rtol,
         atol=args.atol,
-        op=args.op,
         grouping=args.grouping,
         use_cuda_graphs=args.use_cuda_graphs,
         warmup=args.warmup,
         rep=args.rep,
-        paired_trials=args.paired_trials,
+        settle_between_iters=args.settle_between_iters,
         backend=args.backend,
         emit_us_only=args.emit_us_only,
         mma_tile_mn=args.mma_tile_mn,
@@ -1291,4 +1166,5 @@ if __name__ == "__main__":
         layout_mode=args.layout_mode,
         format=args.format,
         subprocess_depth=args.subprocess_depth,
+        cuda_profiler_backend=args.cuda_profiler_backend,
     )

@@ -13,6 +13,7 @@ from torch._opaque_base import OpaqueBase
 from torch.distributed import is_available
 from torch.distributed._mesh_layout import _MeshLayout
 from torch.distributed._pycute import IntTuple, is_int, suffix_product
+from torch.types import IntLikeType
 from torch.utils._typing_utils import not_none
 
 
@@ -1235,11 +1236,15 @@ else:
             """
             return self._coordinate_on_dim
 
-        def _sym_get_coordinate(self, index: int) -> int:
+        def _sym_get_coordinate(self, index: int) -> IntLikeType:
             import torch.distributed.config as config
             from torch._guards import detect_fake_mode
 
-            if not detect_fake_mode() or not config.compile_on_one_rank:
+            if (
+                not config.compile_on_one_rank
+                or not (fake_mode := detect_fake_mode())
+                or not fake_mode.shape_env
+            ):
                 # This is only valid when the current rank is part of the mesh.
                 if self._coordinate_on_dim is None:
                     raise AssertionError
@@ -1605,7 +1610,9 @@ def _register_distributed_opaque_types():
             "rank": MemberType.USE_REAL,
             "_get_backend_name": MemberType.USE_REAL,
             "group_name": MemberType.USE_REAL,
+            "group_desc": MemberType.USE_REAL,
             "__eq__": MemberType.USE_REAL,
+            "__ne__": MemberType.USE_REAL,
         },
     )
 
@@ -1632,6 +1639,7 @@ def _register_distributed_opaque_types():
             "get_coordinate": MemberType.USE_REAL,
             "get_local_rank": MemberType.USE_REAL,
             "__eq__": MemberType.USE_REAL,
+            "__ne__": MemberType.USE_REAL,
             "ndim": MemberType.USE_REAL,
             "shape": MemberType.USE_REAL,
             "mesh_dim_names": MemberType.USE_REAL,
