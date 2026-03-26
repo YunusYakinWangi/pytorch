@@ -1,9 +1,5 @@
 # flake8: noqa: G004
 
-# Note: Copies of this script in runner_determinator.py and _runner-determinator.yml
-#       must be kept in sync. You can do it easily by running the following command:
-#           python .github/scripts/update_runner_determinator.py
-
 """
 This runner determinator is used to determine which set of runners to run a
 GitHub job on. It uses the first comment of a GitHub issue (by default
@@ -362,11 +358,8 @@ def parse_settings_from_text(settings_text: str) -> Settings:
     """
     try:
         if settings_text:
-            # Escape the backtick as well so that we can have the settings in a code block on the GH issue
-            # for easy reading
-            # Note: Using ascii for the backtick so that the cat step in _runner-determinator.yml doesn't choke on
-            #       the backtick character in shell commands.
-            backtick = chr(96)  # backtick character
+            # Strip backticks so settings can be in a code block on the GH issue
+            backtick = chr(96)
             settings_text = settings_text.strip(f"\r\n\t{backtick} ")
             settings = load_yaml(settings_text)
 
@@ -538,7 +531,11 @@ def get_runner_prefix(
 
     # ARC experiment takes precedence: return a fixed label prefix
     if use_arc:
-        arc_prefix = ARC_CANARY_LABEL_PREFIX + ARC_LABEL_PREFIX if is_canary else ARC_LABEL_PREFIX
+        arc_prefix = (
+            ARC_CANARY_LABEL_PREFIX + ARC_LABEL_PREFIX
+            if is_canary
+            else ARC_LABEL_PREFIX
+        )
         return RunnerPrefixResult(prefix=arc_prefix, use_arc=True)
 
     if len(prefixes) > 1:
