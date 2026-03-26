@@ -13206,9 +13206,9 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
         _, code = run_and_get_code(torch.compile(fn), x, y, z)
         # z's alignment check should appear between the two mm calls:
         # first mm (uses x, y) -> alignment clone (for z) -> second mm (uses z)
-        FileCheck().check("extern_kernels.mm(").check(
-            "clone_preserve_strides"
-        ).check("extern_kernels.mm(").run(code[0])
+        FileCheck().check("extern_kernels.mm(").check("clone_preserve_strides").check(
+            "extern_kernels.mm("
+        ).run(code[0])
 
     @torch._dynamo.config.patch(capture_dynamic_output_shape_ops=True)
     @torch._inductor.config.patch(implicit_fallbacks=True)

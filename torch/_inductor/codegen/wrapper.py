@@ -1633,18 +1633,14 @@ class PythonWrapperCodegen(CodeGen):
                 name = V.graph.graph_input_names[idx]
                 self._pending_alignment_copies.add(name)
 
-    def codegen_deferred_alignment_copies(
-        self, input_names: Iterable[str]
-    ) -> None:
+    def codegen_deferred_alignment_copies(self, input_names: Iterable[str]) -> None:
         """Emit alignment check + clone just before the first kernel
         that reads each input, hiding the cost behind GPU execution."""
         for name in input_names:
             if name in self._pending_alignment_copies:
                 self._pending_alignment_copies.discard(name)
                 self.writeline(f"if {name}.data_ptr() % 16 != 0:")
-                self.writeline(
-                    f"    {name} = clone_preserve_strides({name})"
-                )
+                self.writeline(f"    {name} = clone_preserve_strides({name})")
 
     # this function (and below) takes the graph name as input so
     # that stream caching happens per graph instance. this
