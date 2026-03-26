@@ -704,6 +704,16 @@
       ]
     }
   ],
+  "GB6270": [
+    {
+      "Gb_type": "Unhandled tensor method",
+      "Context": "call_method {self} {name} {args} {kwargs}",
+      "Explanation": "Tensor method `{name}` is not defined on {check_type.__name__} and does not have an explicit handler in TensorVariable.",
+      "Hints": [
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
+      ]
+    }
+  ],
   "GB0060": [
     {
       "Gb_type": "Failed to trace unittest method",
@@ -1940,6 +1950,16 @@
       "Hints": [
         "Remove mutations from the generator.",
         "This graph break is fundamental - it is unlikely that Dynamo will ever be able to trace through your code. Consider finding a workaround."
+      ]
+    }
+  ],
+  "GB5115": [
+    {
+      "Gb_type": "Missing getitem_impl",
+      "Context": "getitem({self.python_type_name()}, {item.python_type_name()})",
+      "Explanation": "Dynamo does not support getitem() on {self.python_type_name()}. Add getitem_impl to this VariableTracker subclass.",
+      "Hints": [
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
       ]
     }
   ],
@@ -3468,6 +3488,14 @@
       "Hints": [
         "Use two-argument super(type, object_or_type)."
       ]
+    }
+  ],
+  "GB3383": [
+    {
+      "Gb_type": "Pydantic dataclass constructor",
+      "Context": "{self.value}",
+      "Explanation": "Dynamo graph breaks on pydantic dataclass constructors because validation mutates the instance outside traced bytecode.",
+      "Hints": []
     }
   ],
   "GB0281": [

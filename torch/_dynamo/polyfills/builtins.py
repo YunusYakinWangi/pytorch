@@ -61,6 +61,8 @@ def sum(iterable: Iterable[_T], /, start: _T = 0) -> _T:  # type: ignore[assignm
     return functools.reduce(operator.add, iterable, start)
 
 
+# TODO(guilhermeleobas): Implement this iterator as a VariableTracker to see if
+# it is faster than tracing through it
 class _CallableIterator:
     def __init__(self, fn, sentinel):  # type: ignore[no-untyped-def]
         self.fn = fn
@@ -90,6 +92,7 @@ def iter_(fn_or_iterable, sentinel=_sentinel_missing, /):  # type: ignore[no-unt
     # Without a second argument, object must be a collection object which supports
     # the iterable (__iter__) or the sequence protocol (__getitem__ with an integer
     # starting at 0)
+    # TODO(guilhermeleobas): the if block is dead code
     if sentinel is _sentinel_missing:
         iterable = fn_or_iterable
         if hasattr(iterable, "__iter__"):

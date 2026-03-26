@@ -1200,6 +1200,9 @@ class LocalGeneratorObjectVariable(VariableTracker):
             return CONSTANT_VARIABLE_TRUE
         return CONSTANT_VARIABLE_FALSE
 
+    def iter_impl(self, tx: "InstructionTranslator") -> VariableTracker:
+        return self
+
     def has_unpack_var_sequence(self, tx: "InstructionTranslator") -> bool:
         return False
 
@@ -3073,9 +3076,12 @@ class DynamoTritonHOPifier(TritonHOPifier):
         from .builder import VariableBuilder
 
         assert tx is not None
+        # Route through VariableBuilder.__call__ so already-tracked mutable
+        # objects (for example autotuner config lists) are reused instead of
+        # being registered for mutation twice in the same trace.
         wrapped_user_obj = VariableBuilder(
             tx, AttrSource(variable.kernel_source, f"{name}")
-        )._wrap(user_obj)
+        )(user_obj)
         return wrapped_user_obj
 
     def maybe_unpack_configs(

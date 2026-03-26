@@ -15,7 +15,7 @@ handling of iterator operations during code transformation and optimization.
 
 import itertools
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, KeysView, Sequence
 from typing import Any, TYPE_CHECKING
 
 from .. import graph_break_hints, polyfills, variables
@@ -34,6 +34,7 @@ from ..exc import (
 )
 from .base import ValueMutationNew, VariableTracker
 from .constant import ConstantVariable
+from .dicts import ConstDictVariable
 
 
 if TYPE_CHECKING:
@@ -198,10 +199,20 @@ class ItertoolsVariable(VariableTracker):
             return tx.inline_user_function_return(
                 VariableTracker.build(tx, polyfills.repeat), args, kwargs
             )
-        elif self.value is itertools.count:
-            return variables.CountIteratorVariable(
-                *args, mutation_type=ValueMutationNew()
-            )
+        elif self.value is itertools.count and not kwargs:
+            if len(args) == 0:
+                return variables.CountIteratorVariable(mutation_type=ValueMutationNew())
+            if len(args) == 1:
+                return variables.CountIteratorVariable(
+                    item=args[0], mutation_type=ValueMutationNew()
+                )
+            if len(args) == 2:
+                return variables.CountIteratorVariable(
+                    item=args[0],
+                    step=args[1],
+                    mutation_type=ValueMutationNew(),
+                )
+            return super().call_function(tx, args, kwargs)
         elif (
             self.value is itertools.permutations
             and (len(args) == 1 or (len(args) == 2 and args[1].is_python_constant()))
@@ -286,38 +297,6 @@ class IteratorVariable(VariableTracker):
         return super().call_method(tx, name, args, kwargs)
 
 
-class ObjectIteratorVariable(IteratorVariable):
-    """
-    VariableTracker for iter(obj) that implements the iterator protocol (i.e.,
-    has a `__next__` method).
-
-    We use this class to track the state of the iterator and handle the case
-    when the iterator is exhausted:
-
-    Example usage:
-        > b = iter(obj)
-        > list(b)  # exhaust the iterator
-        > list(b)  # empty list
-    """
-
-    def __init__(self, obj: VariableTracker, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        self.obj = obj
-        self.generator_exhausted = False
-
-    def next_variable(self, tx: "InstructionTranslator") -> VariableTracker:
-        if self.generator_exhausted:
-            raise_observed_exception(StopIteration, tx)
-
-        try:
-            return self.obj.next_variable(tx)
-        except ObservedUserStopIteration:
-            # Do not rely on the object to always return StopIteration once it
-            # is exhausted.
-            self.generator_exhausted = True
-            raise
-
-
 class RepeatIteratorVariable(IteratorVariable):
     def __init__(self, item: VariableTracker, **kwargs: Any) -> None:
         super().__init__(**kwargs)
@@ -341,10 +320,18 @@ class RepeatIteratorVariable(IteratorVariable):
 
 
 class CountIteratorVariable(IteratorVariable):
+    # advance_count tracks how many next() calls were made during tracing,
+    # used by side_effects.py to replay them on the real iterator post-execution.
+    _nonvar_fields = {
+        "advance_count",
+        *IteratorVariable._nonvar_fields,
+    }
+
     def __init__(
         self,
         item: int | VariableTracker = 0,
         step: int | VariableTracker = 1,
+        advance_count: int = 0,
         **kwargs: Any,
     ) -> None:
         super().__init__(**kwargs)
@@ -354,12 +341,14 @@ class CountIteratorVariable(IteratorVariable):
             step = ConstantVariable.create(step)
         self.item = item
         self.step = step
+        self.advance_count = advance_count
 
     def next_variable(self, tx: "InstructionTranslator") -> VariableTracker:
         assert self.is_mutable()
         old_item = self.item
         tx.output.side_effects.mutation(self)
         self.item = self.item.call_method(tx, "__add__", [self.step], {})
+        self.advance_count += 1
         return old_item
 
     def reconstruct(self, codegen: "PyCodegen") -> None:
@@ -624,25 +613,9 @@ class FilterVariable(IteratorVariable):
         codegen.extend_output(create_call_function(2, False))
 
 
-class SequenceIterator(IteratorVariable):
-    def __init__(self, seq: VariableTracker, **kwargs: Any) -> None:
-        super().__init__(**kwargs)
-        # seq implements __getitem__ and __len__
-        self.seq = seq
-        self.index = 0
-
-
-#     def next_variable(self, tx: "InstructionTranslator") -> VariableTracker:
-#         # if self.index >= len(self.seq):
-#         #     raise_observed_exception(StopIteration, tx)
-#         # item = self.seq[self.index]
-#         # self.index += 1
-#         # return item
-
-
 class DictIterator(IteratorVariable):
     def __init__(
-        self, items: dict[VariableTracker, VariableTracker], **kwargs: Any
+        self, items: KeysView[ConstDictVariable._HashableTracker], **kwargs: Any
     ) -> None:
         super().__init__(**kwargs)
         self.iter_items = iter(items)
