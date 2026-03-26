@@ -665,7 +665,7 @@ def can_skip_internal_checks(pr: GitHubPR, comment_id: int | None = None) -> boo
     comment = pr.get_comment_by_id(comment_id)
     if comment.editor_login is not None:
         return False
-    return comment.author_login == "facebook-github-bot"
+    return comment.author_login == "facebook-github-tools[bot]"
 
 
 def _revlist_to_prs(

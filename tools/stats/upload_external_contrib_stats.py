@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
 FILTER_OUT_USERS = {
     "pytorchmergebot",
-    "facebook-github-bot",
+    "facebook-github-tools[bot]",
     "pytorch-bot[bot]",
     "pytorchbot",
     "pytorchupdatebot",
