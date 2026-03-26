@@ -44,6 +44,7 @@ from torch.sparse import SparseSemiStructuredTensor, to_sparse_semi_structured
 from torch.testing import FileCheck
 from torch.testing._internal.common_cuda import (
     PLATFORM_SUPPORTS_FP8,
+    SM120OrLater,
     SM80OrLater,
     SM90OrLater,
 )
@@ -67,6 +68,10 @@ if HAS_CUDA_AND_TRITON:
 
 
 log = logging.getLogger(__name__)
+
+
+def skipIfSM120(reason: str):
+    return unittest.skipIf(SM120OrLater, reason)
 
 
 def _get_path_without_sccache() -> str:
@@ -265,6 +270,7 @@ class TestCutlassBackend(TestCase):
 
         self.assertIsNotNone(cutlass_key())
 
+    @skipIfSM120("CUTLASS-only mm coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_cutlass_backend_subproc_mm(self):
@@ -274,7 +280,6 @@ class TestCutlassBackend(TestCase):
         NOTE: Shape like M, N, K = 100, 100, 10 would get filtered out due to
         alignment mismatch.
         """
-
         M, N, K = 4096, 2048, 25728
 
         a = torch.randn(M, K).cuda().half()
@@ -293,6 +298,7 @@ class TestCutlassBackend(TestCase):
             Y = torch.mm(a, b)
             torch.testing.assert_close(Y_compiled, Y)
 
+    @skipIfSM120("CUTLASS-only addmm coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     @parametrize("dtype", (torch.float16, torch.bfloat16))
@@ -300,7 +306,6 @@ class TestCutlassBackend(TestCase):
         """
         Test autotune_in_subproc works for addmm.
         """
-
         M, N, K = 4096, 2048, 25728
         dtype = torch.float16
 
@@ -335,13 +340,13 @@ class TestCutlassBackend(TestCase):
                 Y = torch.addmm(x, a, b, alpha=alpha, beta=beta)
                 torch.testing.assert_close(Y_compiled, Y)
 
+    @skipIfSM120("CUTLASS-only bmm coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_cutlass_backend_subproc_bmm(self):
         """
         Test autotune_in_subproc works for bmm.
         """
-
         B, M, N, K = 10, 4096, 2048, 25728
 
         a = torch.randn(B, M, K).cuda().half()
@@ -360,6 +365,7 @@ class TestCutlassBackend(TestCase):
             Y = torch.bmm(a, b)
             torch.testing.assert_close(Y_compiled, Y)
 
+    @skipIfSM120("CUTLASS-only mm coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @parametrize("dynamic", (False, True))
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
@@ -403,6 +409,7 @@ class TestCutlassBackend(TestCase):
                 2,
             ).run(codes[0])
 
+    @skipIfSM120("CUTLASS-only mm coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_number_mm_precompiles(self):
@@ -454,6 +461,7 @@ class TestCutlassBackend(TestCase):
             )
 
     # NOTE: right now tuned_mm doesn't support cutlass 2x, which is used by A100
+    @skipIfSM120("CUTLASS-only mm coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @parametrize("dynamic", (False, True))
     @parametrize("use_aoti", (False, True))
@@ -469,7 +477,6 @@ class TestCutlassBackend(TestCase):
         """
         Main test for mm.
         """
-
         # M, N, K
         shapes = [
             (128, 128, 16),
@@ -520,6 +527,7 @@ class TestCutlassBackend(TestCase):
 
             torch.testing.assert_close(actual, expected)
 
+    @skipIfSM120("CUTLASS-only FP8 scaled_mm coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @parametrize("dynamic", (False, True))
     @parametrize("use_aoti", (False, True))
@@ -535,7 +543,6 @@ class TestCutlassBackend(TestCase):
         """
         Main test for mm.
         """
-
         # M, N, K
         shapes = [
             (128, 128, 16),
@@ -651,6 +658,7 @@ class TestCutlassBackend(TestCase):
         expected = scaled_mm_fn(a8, b8)
         torch.testing.assert_close(actual, expected, rtol=1e-2, atol=0.05)
 
+    @skipIfSM120("CUTLASS-only addmm coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @parametrize("dynamic", (False, True))
     @parametrize("use_aoti", (False, True))
@@ -792,6 +800,7 @@ class TestCutlassBackend(TestCase):
         finally:
             AlgorithmSelectorCache.benchmark_choices = original_benchmark_choices
 
+    @skipIfSM120("CUTLASS-only bmm coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @parametrize("dynamic", (False, True))
     @parametrize("use_aoti", (False, True))
@@ -858,6 +867,7 @@ class TestCutlassBackend(TestCase):
                 actual = [compiled_model(*input) for input in inputs]
             torch.testing.assert_close(actual, expected)
 
+    @skipIfSM120("CUTLASS-only stream-k coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_max_autotune_cutlass_backend_regular_mm_streamk(
@@ -866,7 +876,6 @@ class TestCutlassBackend(TestCase):
         """
         Make sure autotuning mm in sub processes work without crashes.
         """
-
         compiled_model = torch.compile(torch.mm, dynamic=dynamic)
 
         with config.patch(
@@ -900,6 +909,7 @@ class TestCutlassBackend(TestCase):
                 # matmuls involved. Many small addition differences add up.
                 torch.testing.assert_close(Y_compiled, Y, atol=0.01, rtol=0.01)
 
+    @skipIfSM120("CUTLASS-only stream-k coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     def test_streamk_with_dynamic(
         self,
@@ -910,7 +920,6 @@ class TestCutlassBackend(TestCase):
         Problem is streamk can have a different workspace depending on the
         shape. Without a correct workspace, the kernel will fail at runtime.
         """
-
         a = torch.randn(128, 16).cuda().half()
         b = torch.randn(128, 16).cuda().half().t()
 
@@ -924,6 +933,7 @@ class TestCutlassBackend(TestCase):
             with self.assertRaisesRegex(InductorError, r".*NoValidChoicesError.*"):
                 _ = torch.compile(torch.mm, dynamic=True)(a, b)
 
+    @skipIfSM120("CUTLASS-only stream-k coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     def test_streamk_with_static(
         self,
@@ -931,7 +941,6 @@ class TestCutlassBackend(TestCase):
         """
         Test streamk with dynamic=False. Streamk should work.
         """
-
         shapes = [
             (18432, 3072, 6144),
             (9216, 3072, 6144),
@@ -1090,6 +1099,7 @@ class TestCutlassBackend(TestCase):
             Y = mm(a, b)
             torch.testing.assert_close(Y_compiled, Y)
 
+    @skipIfSM120("CUTLASS-only mm coverage is not available on sm_120")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     def test_force_cutlass_backend_aoti_dynamic(self):
@@ -1123,6 +1133,7 @@ class TestCutlassBackend(TestCase):
             expected = model(x, w)
             torch.testing.assert_close(expected, actual)
 
+    @skipIfSM120("CUTLASS-only mm coverage is not available on sm_120")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     def test_force_cutlass_backend_aoti_cexpr_codegen(self):
@@ -1161,6 +1172,7 @@ class TestCutlassBackend(TestCase):
             expected = model(x, w)
             torch.testing.assert_close(expected, actual)
 
+    @skipIfSM120("CUTLASS-only stream-k coverage is not available on sm_120")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     def test_aoti_workspace_ptr(self):
@@ -1244,6 +1256,7 @@ class TestCutlassBackend(TestCase):
                 f"Expected cutlass_kernels_count > 0, got {cutlass_kernels_count}"
             )
 
+    @skipIfSM120("CUTLASS allowlist and denylist coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_cutlass_backend_op_denylist(
@@ -1297,6 +1310,7 @@ class TestCutlassBackend(TestCase):
                     if cuda_template_count <= 0:
                         raise AssertionError("No CUTLASSTemplateCaller choices")
 
+    @skipIfSM120("CUTLASS allowlist and denylist coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_cutlass_backend_op_allowlist(
@@ -1350,6 +1364,7 @@ class TestCutlassBackend(TestCase):
                     if cuda_template_count <= 0:
                         raise AssertionError("No CUTLASSTemplateCaller choices")
 
+    @skipIfSM120("CUTLASS-only FP8 scaled_mm coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_cutlass_backend_fp8_scaled_mm_fast_accum_filtering(
@@ -1440,6 +1455,7 @@ class TestCutlassBackend(TestCase):
         run_test(True)
         run_test(False)
 
+    @skipIfSM120("CUTLASS-only mm coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @mock.patch.dict(os.environ, {"PATH": _get_path_without_sccache()})
     def test_cutlass_backend_shape_coverage_mm(
@@ -1449,7 +1465,6 @@ class TestCutlassBackend(TestCase):
         Checks if cutlass backend produces some ops for a variety of shapes.
 
         This test doesn't compile and check the correctness of the ops.
-
         NOTE: K has to be even.
         """
 
@@ -2018,6 +2033,7 @@ class TestCutlassBackend(TestCase):
             torch.testing.assert_close(actual, expected)
         self.assertTrue(time.time() - start_time < 50)
 
+    @skipIfSM120("CUTLASS-only EVT coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @use_evt_config
     @evt_all_ops
@@ -2030,6 +2046,7 @@ class TestCutlassBackend(TestCase):
 
         self.run_evt_test(TestModel(), op, shape)
 
+    @skipIfSM120("CUTLASS-only EVT coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @use_evt_config
     @evt_bin_ops
@@ -2055,6 +2072,7 @@ class TestCutlassBackend(TestCase):
         )
         torch.testing.assert_close(result, ref_result)
 
+    @skipIfSM120("CUTLASS-only EVT coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @use_evt_config
     @evt_un_ops
@@ -2080,6 +2098,7 @@ class TestCutlassBackend(TestCase):
         )
         torch.testing.assert_close(result, ref_result)
 
+    @skipIfSM120("CUTLASS-only EVT coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @use_evt_config
     @evt_all_ops
@@ -2121,6 +2140,7 @@ class TestCutlassBackend(TestCase):
 
         torch.testing.assert_close(result, ref_result)
 
+    @skipIfSM120("CUTLASS-only EVT coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @use_evt_config
     @evt_all_ops
@@ -2132,6 +2152,7 @@ class TestCutlassBackend(TestCase):
 
         self.run_evt_test(TestModel(), op, (1024, 512))
 
+    @skipIfSM120("CUTLASS-only EVT coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @use_evt_config
     @evt_all_ops
@@ -2143,6 +2164,7 @@ class TestCutlassBackend(TestCase):
 
         self.run_evt_test(TestModel(), op, (1024, 1024))  # shape needs to be square
 
+    @skipIfSM120("CUTLASS-only EVT coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @use_evt_config
     @evt_all_ops
@@ -2179,6 +2201,7 @@ class TestCutlassBackend(TestCase):
             )
             torch.testing.assert_close(result, ref_result)
 
+    @skipIfSM120("CUTLASS-only EVT coverage is not available on sm_120")
     @unittest.skipIf(not SM90OrLater, "need sm_90")
     @use_evt_config
     def test_evt_return_accumulator(self):
