@@ -67,8 +67,10 @@ struct CUDAGuardImpl final : public c10::impl::DeviceGuardImplInterface {
         (1ULL << kIndex_Double) | (1ULL << kIndex_ComplexHalf) |
         (1ULL << kIndex_ComplexFloat) | (1ULL << kIndex_ComplexDouble) |
         (1ULL << kIndex_Bool) | (1ULL << kIndex_BFloat16) |
-        (1ULL << kIndex_UInt16) | (1ULL << kIndex_UInt32) |
-        (1ULL << kIndex_UInt64);
+        (1ULL << kIndex_Float8_e5m2) | (1ULL << kIndex_Float8_e4m3fn) |
+        (1ULL << kIndex_Float8_e5m2fnuz) | (1ULL << kIndex_Float8_e4m3fnuz) |
+        (1ULL << kIndex_Float8_e8m0fnu) | (1ULL << kIndex_UInt16) |
+        (1ULL << kIndex_UInt32) | (1ULL << kIndex_UInt64);
 #ifndef USE_ROCM
     cudaDeviceProp device_prop{};
     C10_CUDA_CHECK(cudaGetDeviceProperties(&device_prop, d.index()));
