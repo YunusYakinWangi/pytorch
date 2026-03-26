@@ -2030,18 +2030,6 @@ class BuiltinVariable(VariableTracker):
     ) -> VariableTracker:
         from .object_protocol import generic_getiter
 
-        if len(args) == 0:
-            return generic_getiter(tx, obj)
-        else:
-            return variables.UserFunctionVariable(
-                polyfills.builtins.iter_
-            ).call_function(tx, [obj, *args], kwargs)
-
-        # iter_obj = generic_getiter(tx, obj)
-        # return variables.UserFunctionVariable(polyfills.builtins.iter_).call_function(
-        #     tx, [iter_obj, *args], kwargs
-        # )
-
         # # avoid the overhead of tracing the polyfill if we already know the class implemented __iter__
         # if isinstance(
         #     obj,
@@ -2056,6 +2044,22 @@ class BuiltinVariable(VariableTracker):
         #         DictViewVariable,
         #     ),
         # ):
+        #
+        # TODO(guilhermeleobas): make sure we avoid the overhead of tracing the
+        # polyfill if we already know the class implements __iter__
+
+        if len(args) == 0:
+            return generic_getiter(tx, obj)
+        else:
+            return variables.UserFunctionVariable(
+                polyfills.builtins.callable_iterator
+            ).call_function(tx, [obj, *args], kwargs)
+
+        # iter_obj = generic_getiter(tx, obj)
+        # return variables.UserFunctionVariable(polyfills.builtins.iter_).call_function(
+        #     tx, [iter_obj, *args], kwargs
+        # )
+
         #     return obj.call_method(tx, "__iter__", [], {})
         # else:
         #     # If the object doesn't implement a __iter__ method, it will be an error in eager mode when calling iter on it anyway.

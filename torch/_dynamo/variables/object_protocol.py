@@ -104,10 +104,9 @@ def vt_sequence_check(obj: "VariableTracker") -> bool:
     if istype(obj, ConstDictVariable):
         return False
 
-    return vt_implements_method(obj, "len_impl")
-    # return vt_implements_method(obj, "getitem_impl") and vt_implements_method(
-    #     obj, "len_impl"
-    # )
+    # needs generic_getitem to be implemented in Dynamo
+    return True
+    # return vt_implements_method(obj, " getitem_impl")
 
 
 def generic_len(
@@ -152,7 +151,7 @@ def generic_getiter(
     if vt_implements_tp_iter(obj):
         return obj.iter_impl(tx)
     elif vt_sequence_check(obj):
-        return UserFunctionVariable(polyfills.builtins.iter_).call_function(
+        return UserFunctionVariable(polyfills.builtins.sequence_iterator).call_function(
             tx, [obj], {}
         )
     else:

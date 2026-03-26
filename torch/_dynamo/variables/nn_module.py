@@ -587,12 +587,11 @@ class NNModuleVariable(VariableTracker):
                 )
 
     def iter_impl(self, tx: "InstructionTranslator") -> VariableTracker:
-        raise AssertionError("find which tests reach this!")
-        # from . import ListIteratorVariable
+        from . import ListIteratorVariable
 
-        # return ListIteratorVariable(
-        #     self.unpack_var_sequence(tx), mutation_type=ValueMutationNew()
-        # )
+        return ListIteratorVariable(
+            self.unpack_var_sequence(tx), mutation_type=ValueMutationNew()
+        )
 
     def call_method(
         self,
@@ -838,7 +837,8 @@ class NNModuleVariable(VariableTracker):
             for name, submod in module.items():  # type: ignore[operator]
                 items_result.append(named_embed(name, submod))
             return ListIteratorVariable(items_result, mutation_type=ValueMutationNew())
-        # elif name == "__iter__":
+        elif name == "__iter__":
+            return self.iter_impl(tx)
         #     return ListIteratorVariable(
         #         self.unpack_var_sequence(tx), mutation_type=ValueMutationNew()
         #     )

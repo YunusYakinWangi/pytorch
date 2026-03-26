@@ -1153,11 +1153,23 @@ class UserDefinedEnumClassVariable(UserDefinedClassVariable):
     def var_getattr(self, tx: "InstructionTranslator", name: str) -> "VariableTracker":
         method = self._maybe_get_baseclass_method(name)
         if method in enum_type_methods:
-            # __iter__ is a bound method which is not correctly handled by the parent var_getattr, so need to handle it here
+            # __iter__ is a bound method which is not correctly handled by the
+            # parent var_getattr, so need to handle it here
             if name == "__iter__":
                 source = self.source and AttrSource(self.source, name)
-                return variables.UserMethodVariable(method, self, source=source)
+                return variables.GetAttrVariable(self, name, source=source)
         return super().var_getattr(tx, name)
+
+    def iter_impl(self, tx: "InstructionTranslator") -> "VariableTracker":
+        from .lists import ListIteratorVariable
+
+        method = self._maybe_get_baseclass_method("__iter__")
+        if method in enum_type_methods:
+            return ListIteratorVariable(
+                self.unpack_var_sequence(tx),
+                mutation_type=ValueMutationNew(),
+            )
+        return super().iter_impl(tx)
 
 
 class RemovableHandleClass:
@@ -1437,15 +1449,13 @@ class UserDefinedObjectVariable(UserDefinedVariable):
         return super().call_method(tx, name, args, kwargs)
 
     def len_impl(self, tx: "InstructionTranslator") -> VariableTracker:
-        from . import UserMethodVariable
-
         method = self._maybe_get_baseclass_method("__len__")
-        if method is None:
-            return super().len_impl(tx)
-        if method is list.__len__ and self.source:
-            install_guard(self.source.make_guard(GuardBuilder.SEQUENCE_LENGTH))
-            return VariableTracker.build(tx, len(self.value))  # type: ignore[arg-type]
-        return UserMethodVariable(method, self).call_function(tx, [], {})
+        if method is not None:
+            source = self.source and AttrSource(self.source, "__len__")
+            return variables.UserMethodVariable(
+                method, self, source=source
+            ).call_function(tx, [], {})
+        return super().len_impl(tx)
 
     def method_setattr_standard(
         self,

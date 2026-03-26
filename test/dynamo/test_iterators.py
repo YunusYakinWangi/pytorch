@@ -1,5 +1,6 @@
 # Owner(s): ["module: dynamo"]
 
+import enum
 import unittest
 
 import torch
@@ -905,6 +906,77 @@ class TestIteratorMutationSemantics(torch._dynamo.test_case.TestCase):
 
         self.assertEqual(next(it1), 4)
         self.assertEqual(next(it2), 4)
+
+
+class Color(enum.Enum):
+    RED = 1
+    GREEN = 2
+    BLUE = 3
+
+
+class Direction(enum.Enum):
+    NORTH = "N"
+    SOUTH = "S"
+    EAST = "E"
+    WEST = "W"
+
+
+class Priority(enum.IntEnum):
+    LOW = 1
+    MEDIUM = 2
+    HIGH = 3
+
+
+class TestEnumIteration(torch._dynamo.test_case.TestCase):
+    """Test iteration over enum classes"""
+
+    def setUp(self):
+        super().setUp()
+        self._u_prev = torch._dynamo.config.enable_trace_unittest
+        torch._dynamo.config.enable_trace_unittest = True
+
+    def tearDown(self):
+        super().tearDown()
+        torch._dynamo.config.enable_trace_unittest = self._u_prev
+
+    @make_dynamo_test
+    def test_enum_iter(self):
+        result = list(iter(Color))
+        self.assertEqual(result, [Color.RED, Color.GREEN, Color.BLUE])
+
+    @make_dynamo_test
+    def test_enum_for_loop(self):
+        result = list(Color)
+        self.assertEqual(result, [Color.RED, Color.GREEN, Color.BLUE])
+
+    @make_dynamo_test
+    def test_enum_iter_values(self):
+        result = [m.value for m in Color]
+        self.assertEqual(result, [1, 2, 3])
+
+    @make_dynamo_test
+    def test_enum_iter_names(self):
+        result = [m.name for m in Color]
+        self.assertEqual(result, ["RED", "GREEN", "BLUE"])
+
+    @make_dynamo_test
+    def test_enum_string_values_iter(self):
+        result = list(iter(Direction))
+        self.assertEqual(
+            result, [Direction.NORTH, Direction.SOUTH, Direction.EAST, Direction.WEST]
+        )
+
+    @make_dynamo_test
+    def test_int_enum_iter(self):
+        result = list(iter(Priority))
+        self.assertEqual(result, [Priority.LOW, Priority.MEDIUM, Priority.HIGH])
+
+    @make_dynamo_test
+    def test_enum_iter_unpacking(self):
+        a, b, c = Color
+        self.assertEqual(a, Color.RED)
+        self.assertEqual(b, Color.GREEN)
+        self.assertEqual(c, Color.BLUE)
 
 
 if __name__ == "__main__":
