@@ -132,9 +132,9 @@ runs:
       shell: bash
       run: |
         # Limit uv parallelism to avoid OOM on memory-constrained pods where
-        # uv defaults to the host CPU count (e.g., 192) instead of the pod limit.
-        export UV_CONCURRENT_BUILDS=$(nproc)
-        export UV_CONCURRENT_INSTALLS=$(nproc)
+        # uv defaults to the host CPU count (e.g., 192) instead of the pod
+        # limit. Can be removed once uv pip cache is ready
+        export UV_CONCURRENT_BUILDS=1
         uv pip install -r .ci/docker/requirements-ci.txt
         echo "CMAKE_PREFIX_PATH=${VIRTUAL_ENV}" >> "${GITHUB_ENV}"
 
