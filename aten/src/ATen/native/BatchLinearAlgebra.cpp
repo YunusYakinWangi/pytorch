@@ -3871,8 +3871,8 @@ Tensor& linalg_solve_triangular_out(
   // NOTE: mem overlaps are fine as long as either cols or rows are contiguous.
   // FIXME: batch overlaps are permissible, but the kernel loops over the batch dims,
   // so the batch dims are being materialized.
-  // This behavior is inhereted from the previous imlementations.
-  const auto pA = [&out, &unitriangular, out_fully_owned](const auto& A) -> c10::MaybeOwned<Tensor> {
+  // This behavior is inhereted from the previous implementations.
+  const auto pA = [&unitriangular](const auto& A) -> c10::MaybeOwned<Tensor> {
     if (can_flatten_batch_dims(A) && (A.stride(-2) == 1 || A.stride(-1) == 1)) {
       return c10::MaybeOwned<Tensor>::borrowed(A);
     } else {
