@@ -91,7 +91,26 @@ class DistTensorRandomInitTest(DTensorTestBase):
         )
         self._run_init_op(torch.nn.init.normal_, mean=1.5, std=0.8)
         self._run_init_op(torch.nn.init.uniform_, a=0, b=1.2)
+        self._run_init_op(torch.Tensor.log_normal_)
 
+    @with_comms
+    def test_multinomial_sharded(self):
+        """Test multinomial with sharded batch dimension."""
+        device_mesh = self.build_device_mesh()
+        # Create a probability tensor with shape [8, 4] (batch_size=8, categories=4)
+        probs = torch.rand(8, 4, device=self.device_type)
+        probs = probs / probs.sum(dim=-1, keepdim=True)  # normalize to valid probs
+
+        # Shard on batch dim (dim 0) — should work
+        dt_probs = distribute_tensor(probs, device_mesh, [Shard(0)])
+        result = torch.multinomial(dt_probs, num_samples=2, replacement=True)
+        self.assertEqual(result.shape, torch.Size([8, 2]))
+        self.assertIsInstance(result, DTensor)
+        # Output should also be sharded on dim 0
+        self.assertEqual(result.placements, (Shard(0),))
+
+    @with_comms
+    def test_init_ops_dtypes(self):
         for dtype in (torch.float32, torch.float16):
             self._run_init_op(torch.rand_like, dtype=dtype)
             self._run_init_op(torch.randn_like, dtype=dtype)
