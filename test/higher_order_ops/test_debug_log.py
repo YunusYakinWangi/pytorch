@@ -6,7 +6,6 @@ import unittest
 from contextlib import redirect_stdout
 from functools import partial
 from io import StringIO
-from typing import Optional
 
 import torch
 import torch.distributed as dist
@@ -66,8 +65,8 @@ def _run_compile(f, inputs):
 
 
 def _run_aot_function(f, inputs):
-    fw_cell: list[Optional[torch.fx.GraphModule]] = [None]
-    bw_cell: list[Optional[torch.fx.GraphModule]] = [None]
+    fw_cell: list[torch.fx.GraphModule | None] = [None]
+    bw_cell: list[torch.fx.GraphModule | None] = [None]
     compiled_f = aot_function(
         f,
         fw_compiler=partial(_extract_graph, graph_cell=fw_cell),
@@ -176,7 +175,7 @@ class GraphModule(torch.nn.Module):
         _opaque_obj0 = self._opaque_obj0
         _opaque_obj1 = self._opaque_obj1
         _tree_spec_constant0 = self._tree_spec_constant0
-        with_effects = torch.ops.higher_order.with_effects(primals_1, torch.ops.higher_order.invoke_leaf_function, _opaque_obj0, _opaque_obj1, _tree_spec_constant0, '', mul, 'intermediate', requires_grad_indices = (0,));  primals_1 = _opaque_obj0 = _opaque_obj1 = _tree_spec_constant0 = None
+        with_effects = torch.ops.higher_order.with_effects(primals_1, torch.ops.higher_order.invoke_leaf_function, _opaque_obj0, _opaque_obj1, _tree_spec_constant0, '', mul, 'intermediate', requires_grad_indices = '0');  primals_1 = _opaque_obj0 = _opaque_obj1 = _tree_spec_constant0 = None
 
         getitem: "f32[0]" = with_effects[0];  with_effects = None
         return (getitem, mul)
@@ -190,7 +189,7 @@ class GraphModule(torch.nn.Module):
         _opaque_obj2 = self._opaque_obj2
         _opaque_obj3 = self._opaque_obj3
         _tree_spec_constant0_1 = self._tree_spec_constant0
-        with_effects_1 = torch.ops.higher_order.with_effects(tangents_token, torch.ops.higher_order.invoke_leaf_function, _opaque_obj2, _opaque_obj3, _tree_spec_constant0_1, '', tangents_1, 'intermediate', requires_grad_indices = ());  tangents_token = _opaque_obj2 = _opaque_obj3 = _tree_spec_constant0_1 = None
+        with_effects_1 = torch.ops.higher_order.with_effects(tangents_token, torch.ops.higher_order.invoke_leaf_function, _opaque_obj2, _opaque_obj3, _tree_spec_constant0_1, '', tangents_1, 'intermediate', requires_grad_indices = '');  tangents_token = _opaque_obj2 = _opaque_obj3 = _tree_spec_constant0_1 = None
         getitem_2: "f32[0]" = with_effects_1[0];  with_effects_1 = None
         mul_1: "f32[3, 3]" = torch.ops.aten.mul.Tensor(tangents_1, 2);  tangents_1 = None
         return (mul_1, getitem_2)
@@ -229,7 +228,7 @@ class GraphModule(torch.nn.Module):
         _opaque_obj0 = self._opaque_obj0
         _opaque_obj1 = self._opaque_obj1
         _tree_spec_constant0 = self._tree_spec_constant0
-        with_effects = torch.ops.higher_order.with_effects(primals_1, torch.ops.higher_order.invoke_leaf_function, _opaque_obj0, _opaque_obj1, _tree_spec_constant0, '', mul, 'intermediate', requires_grad_indices = (0,));  primals_1 = _opaque_obj0 = _opaque_obj1 = _tree_spec_constant0 = None
+        with_effects = torch.ops.higher_order.with_effects(primals_1, torch.ops.higher_order.invoke_leaf_function, _opaque_obj0, _opaque_obj1, _tree_spec_constant0, '', mul, 'intermediate', requires_grad_indices = '0');  primals_1 = _opaque_obj0 = _opaque_obj1 = _tree_spec_constant0 = None
 
         getitem: "f32[0]" = with_effects[0];  with_effects = None
         return (getitem, mul)
@@ -243,7 +242,7 @@ class GraphModule(torch.nn.Module):
         _opaque_obj2 = self._opaque_obj2
         _opaque_obj3 = self._opaque_obj3
         _tree_spec_constant0_1 = self._tree_spec_constant0
-        with_effects_1 = torch.ops.higher_order.with_effects(tangents_token, torch.ops.higher_order.invoke_leaf_function, _opaque_obj2, _opaque_obj3, _tree_spec_constant0_1, '', tangents_1, 'intermediate', requires_grad_indices = ());  tangents_token = _opaque_obj2 = _opaque_obj3 = _tree_spec_constant0_1 = None
+        with_effects_1 = torch.ops.higher_order.with_effects(tangents_token, torch.ops.higher_order.invoke_leaf_function, _opaque_obj2, _opaque_obj3, _tree_spec_constant0_1, '', tangents_1, 'intermediate', requires_grad_indices = '');  tangents_token = _opaque_obj2 = _opaque_obj3 = _tree_spec_constant0_1 = None
         getitem_2: "f32[0]" = with_effects_1[0];  with_effects_1 = None
 
         mul_1: "f32[3, 3]" = torch.ops.aten.mul.Tensor(tangents_1, 2);  tangents_1 = None
@@ -278,6 +277,40 @@ class GraphModule(torch.nn.Module):
         output = buf.getvalue()
         # norm of [3, 4] is 5.0
         self.assertIn("5.", output)
+
+    def test_backward_norm_printed_correctly(self):
+        """Verify the backward hook prints the correct gradient norm."""
+
+        def f(x):
+            y = x * 2
+            debug_log(y, "bwd_check")
+            return y
+
+        x = torch.tensor([3.0, 4.0], requires_grad=True)
+        _, _, output = _run_eager(f, [x])
+
+        # fwd: y = x * 2 = [6, 8], norm = 10.0
+        self.assertIn("[bwd_check][fwd] norm=10.", output)
+        # bwd: grad of (x*2).sum() w.r.t. y is [1, 1], norm = sqrt(2) ≈ 1.414
+        self.assertIn("[bwd_check][bwd] norm=1.41", output)
+
+    def test_backward_norm_printed_correctly_compile(self):
+        """Verify backward gradient norm is correct under torch.compile."""
+
+        def f(x):
+            y = x * 2
+            debug_log(y, "bwd_compile")
+            return y
+
+        x = torch.tensor([3.0, 4.0], requires_grad=True)
+        eager_out, eager_grads, eager_output = _run_eager(f, [x])
+        compiled_out, compiled_grads, compiled_output = _run_compile(f, [x])
+
+        self.assertEqual(eager_out, compiled_out)
+        self.assertEqual(eager_grads[0], compiled_grads[0])
+        # Both should print the same backward norm
+        self.assertIn("[bwd_compile][bwd] norm=1.41", eager_output)
+        self.assertIn("[bwd_compile][bwd] norm=1.41", compiled_output)
 
 
 @unittest.skipIf(not torch.distributed.is_available(), "requires distributed")
@@ -544,8 +577,8 @@ class TestDebugLogRank(TestCase):
             debug_log_rank(y, "graph_check", ranks=0)
             return y
 
-        fw_cell: list[Optional[torch.fx.GraphModule]] = [None]
-        bw_cell: list[Optional[torch.fx.GraphModule]] = [None]
+        fw_cell: list[torch.fx.GraphModule | None] = [None]
+        bw_cell: list[torch.fx.GraphModule | None] = [None]
         local = dt.to_local().clone().detach().requires_grad_(True)
         aot_f = aot_function(
             f,
@@ -570,7 +603,7 @@ class GraphModule(torch.nn.Module):
         _opaque_obj0 = self._opaque_obj0
         _opaque_obj1 = self._opaque_obj1
         _tree_spec_constant0 = self._tree_spec_constant0
-        with_effects = torch.ops.higher_order.with_effects(primals_1, torch.ops.higher_order.invoke_leaf_function, _opaque_obj0, _opaque_obj1, _tree_spec_constant0, '', mul, 'graph_check', 0, requires_grad_indices = (0,));  primals_1 = _opaque_obj0 = _opaque_obj1 = _tree_spec_constant0 = None
+        with_effects = torch.ops.higher_order.with_effects(primals_1, torch.ops.higher_order.invoke_leaf_function, _opaque_obj0, _opaque_obj1, _tree_spec_constant0, '', mul, 'graph_check', 0, requires_grad_indices = '0');  primals_1 = _opaque_obj0 = _opaque_obj1 = _tree_spec_constant0 = None
 
         getitem: "f32[0]" = with_effects[0];  with_effects = None
         return (getitem, mul)
@@ -584,7 +617,7 @@ class GraphModule(torch.nn.Module):
         _opaque_obj2 = self._opaque_obj2
         _opaque_obj3 = self._opaque_obj3
         _tree_spec_constant0_1 = self._tree_spec_constant0
-        with_effects_1 = torch.ops.higher_order.with_effects(tangents_token, torch.ops.higher_order.invoke_leaf_function, _opaque_obj2, _opaque_obj3, _tree_spec_constant0_1, '', tangents_1, 'graph_check', 0, requires_grad_indices = ());  tangents_token = _opaque_obj2 = _opaque_obj3 = _tree_spec_constant0_1 = None
+        with_effects_1 = torch.ops.higher_order.with_effects(tangents_token, torch.ops.higher_order.invoke_leaf_function, _opaque_obj2, _opaque_obj3, _tree_spec_constant0_1, '', tangents_1, 'graph_check', 0, requires_grad_indices = '');  tangents_token = _opaque_obj2 = _opaque_obj3 = _tree_spec_constant0_1 = None
         getitem_2: "f32[0]" = with_effects_1[0];  with_effects_1 = None
         mul_1: "f32[4, 4]" = torch.ops.aten.mul.Tensor(tangents_1, 2);  tangents_1 = None
         return (mul_1, getitem_2)
@@ -628,7 +661,7 @@ class GraphModule(torch.nn.Module):
         _opaque_obj0 = self._opaque_obj0
         _opaque_obj1 = self._opaque_obj1
         _tree_spec_constant0 = self._tree_spec_constant0
-        with_effects = torch.ops.higher_order.with_effects(primals_1, torch.ops.higher_order.invoke_leaf_function, _opaque_obj0, _opaque_obj1, _tree_spec_constant0, '', mul, 'graph_check', 0, requires_grad_indices = (0,));  primals_1 = _opaque_obj0 = _opaque_obj1 = _tree_spec_constant0 = None
+        with_effects = torch.ops.higher_order.with_effects(primals_1, torch.ops.higher_order.invoke_leaf_function, _opaque_obj0, _opaque_obj1, _tree_spec_constant0, '', mul, 'graph_check', 0, requires_grad_indices = '0');  primals_1 = _opaque_obj0 = _opaque_obj1 = _tree_spec_constant0 = None
 
         getitem: "f32[0]" = with_effects[0];  with_effects = None
         return (getitem, mul)
@@ -642,7 +675,7 @@ class GraphModule(torch.nn.Module):
         _opaque_obj2 = self._opaque_obj2
         _opaque_obj3 = self._opaque_obj3
         _tree_spec_constant0_1 = self._tree_spec_constant0
-        with_effects_1 = torch.ops.higher_order.with_effects(tangents_token, torch.ops.higher_order.invoke_leaf_function, _opaque_obj2, _opaque_obj3, _tree_spec_constant0_1, '', tangents_1, 'graph_check', 0, requires_grad_indices = ());  tangents_token = _opaque_obj2 = _opaque_obj3 = _tree_spec_constant0_1 = None
+        with_effects_1 = torch.ops.higher_order.with_effects(tangents_token, torch.ops.higher_order.invoke_leaf_function, _opaque_obj2, _opaque_obj3, _tree_spec_constant0_1, '', tangents_1, 'graph_check', 0, requires_grad_indices = '');  tangents_token = _opaque_obj2 = _opaque_obj3 = _tree_spec_constant0_1 = None
         getitem_2: "f32[0]" = with_effects_1[0];  with_effects_1 = None
 
         mul_1: "f32[4, 4]" = torch.ops.aten.mul.Tensor(tangents_1, 2);  tangents_1 = None
