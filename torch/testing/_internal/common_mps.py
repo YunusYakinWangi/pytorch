@@ -99,6 +99,7 @@ if torch.backends.mps.is_available():
             "linalg.diagonal",
             "linalg.householder_product",
             "linalg.svd",
+            "linalg.vander",
             "linalg.vecdot",
             "linalg.vector_norm",
             "log10",
