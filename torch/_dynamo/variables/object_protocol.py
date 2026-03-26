@@ -8,10 +8,12 @@ Per-type richcompare_impl hooks live in their respective VT files.
 
 from typing import TYPE_CHECKING
 
+from .. import polyfills
 from ..exc import raise_observed_exception
 from ..utils import istype
 from .base import NO_SUCH_SUBOBJ, VariableTracker
 from .constant import CONSTANT_VARIABLE_FALSE, CONSTANT_VARIABLE_TRUE
+from .functions import UserFunctionVariable
 
 
 if TYPE_CHECKING:
@@ -81,6 +83,20 @@ def vt_implements_method(obj: "VariableTracker", method_name: str) -> bool:
     return m1 is not m2
 
 
+def vt_implements_tp_iter(obj: "VariableTracker") -> bool:
+    """Helper function to check if a VariableTracker implements the tp_iter slot."""
+    from .user_defined import UserDefinedObjectVariable
+
+    # for user defined objects this check if a little bit more complicated
+    # because we want to actually check if __iter__ is defined in the
+    # object's class
+    if istype(obj, UserDefinedObjectVariable):
+        iter_fn = obj._maybe_get_baseclass_method("__iter__")
+        return iter_fn is not None
+    else:
+        return vt_implements_method(obj, "iter_impl")
+
+
 def vt_sequence_check(obj: "VariableTracker") -> bool:
     """Implements PySequence_Check semantics for VariableTracker objects."""
     from .dicts import ConstDictVariable
@@ -88,9 +104,10 @@ def vt_sequence_check(obj: "VariableTracker") -> bool:
     if istype(obj, ConstDictVariable):
         return False
 
-    return vt_implements_method(obj, "getitem_impl") and vt_implements_method(
-        obj, "len_impl"
-    )
+    return vt_implements_method(obj, "len_impl")
+    # return vt_implements_method(obj, "getitem_impl") and vt_implements_method(
+    #     obj, "len_impl"
+    # )
 
 
 def generic_len(
@@ -101,6 +118,16 @@ def generic_len(
     Routes to obj.len_impl(tx)
     """
     return obj.len_impl(tx)
+
+
+def generic_getitem(
+    tx: "InstructionTranslator", obj: "VariableTracker", item: "VariableTracker"
+) -> "VariableTracker":
+    """
+    Implements PyObject_GetItem semantics for VariableTracker objects.
+    Routes to obj.getitem_impl(tx, item)
+    """
+    return obj.getitem_impl(tx, item)
 
 
 # TODO(guilhermeleobas): should we narrow the return type to IteratorVariable?
@@ -121,13 +148,13 @@ def generic_getiter(
     #    and __len__, then create a sequence iterator for the object and return
     #    it.
     # 3. Otherwise, raise a TypeError
-    if obj.__class__.iter_impl is not VariableTracker.iter_impl:
+
+    if vt_implements_tp_iter(obj):
         return obj.iter_impl(tx)
     elif vt_sequence_check(obj):
-        # from .iter import SequenceIterator
-
-        # return SequenceIterator(obj)
-        raise AssertionError("Missing getitem_impl")
+        return UserFunctionVariable(polyfills.builtins.iter_).call_function(
+            tx, [obj], {}
+        )
     else:
         msg = VariableTracker.build(
             tx, f"'{obj.python_type_name()}' object is not iterable"

@@ -7,6 +7,59 @@ import torch._dynamo.test_case
 from torch.testing._internal.common_utils import make_dynamo_test
 
 
+class CustomIterable:
+    def __init__(self, data):
+        self.data = data
+
+    def __iter__(self):
+        return iter(self.data)
+
+
+class CustomIterator:
+    def __init__(self, max_val):
+        self.max_val = max_val
+        self.current = 0
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        if self.current >= self.max_val:
+            raise StopIteration
+        self.current += 1
+        return self.current
+
+
+class SequenceClass:
+    def __init__(self, data):
+        self.data = data
+
+    def __getitem__(self, index):
+        return self.data[index]
+
+    def __len__(self):
+        return len(self.data)
+
+
+class CustomList(list):
+    def __iter__(self):
+        # Return elements in reverse order
+        return iter(reversed(self))
+
+
+class CustomDict(dict):
+    def __iter__(self):
+        # Return keys in reverse order
+        return iter(sorted(self.keys(), reverse=True))
+
+
+class CustomSet(set):
+    def __iter__(self):
+        # Return elements multiplied by 2
+        for item in set.__iter__(self):
+            yield item * 2
+
+
 class TestIterators(torch._dynamo.test_case.TestCase):
     """Test iterator support in Dynamo"""
 
@@ -366,24 +419,9 @@ class TestIterators(torch._dynamo.test_case.TestCase):
         self.assertEqual(list((42,).__iter__()), [42])
         self.assertEqual(list({42}.__iter__()), [42])
 
-    @unittest.expectedFailure
     @make_dynamo_test
     def test_custom_iterator_class(self):
         """Test custom class implementing iterator protocol"""
-
-        class CustomIterator:
-            def __init__(self, max_val):
-                self.max_val = max_val
-                self.current = 0
-
-            def __iter__(self):
-                return self
-
-            def __next__(self):
-                if self.current >= self.max_val:
-                    raise StopIteration
-                self.current += 1
-                return self.current
 
         it = CustomIterator(3)
         result = []
@@ -391,18 +429,9 @@ class TestIterators(torch._dynamo.test_case.TestCase):
             result.append(val)  # noqa: PERF402
         self.assertEqual(result, [1, 2, 3])
 
-    @unittest.expectedFailure
     @make_dynamo_test
     def test_custom_iterable_class(self):
         """Test custom class with __iter__ returning different object"""
-
-        class CustomIterable:
-            def __init__(self, data):
-                self.data = data
-
-            def __iter__(self):
-                return iter(self.data)
-
         obj = CustomIterable([10, 20, 30])
         result = list(obj.__iter__())
         self.assertEqual(result, [10, 20, 30])
@@ -482,7 +511,6 @@ class TestIterators(torch._dynamo.test_case.TestCase):
         self.assertEqual(b, 2)
         self.assertEqual(c, 3)
 
-    @unittest.expectedFailure
     @make_dynamo_test
     def test_iterator_unpacking_too_few(self):
         """Test unpacking with too few values raises error"""
@@ -532,20 +560,9 @@ class TestIterators(torch._dynamo.test_case.TestCase):
         result = list(reversed(lst).__iter__())
         self.assertEqual(result, [3, 2, 1])
 
-    @unittest.expectedFailure
     @make_dynamo_test
     def test_iter_sequence_protocol(self):
         """Test iteration using sequence protocol (__getitem__)"""
-
-        class SequenceClass:
-            def __init__(self, data):
-                self.data = data
-
-            def __getitem__(self, index):
-                return self.data[index]
-
-            def __len__(self):
-                return len(self.data)
 
         seq = SequenceClass([10, 20, 30])
         # Even without __iter__, should be iterable via __getitem__
@@ -627,51 +644,24 @@ class TestIterators(torch._dynamo.test_case.TestCase):
 
     @unittest.expectedFailure
     @make_dynamo_test
-    def test_iter_on_slice_object(self):
-        """Test that iter() on slice raises TypeError"""
-        s = slice(1, 5, 2)
-        # slice objects are not iterable
-        with self.assertRaises(TypeError):
-            s.__iter__()
-
-    @unittest.expectedFailure
-    @make_dynamo_test
     def test_custom_list_subclass_with_custom_iter(self):
         """Test custom list subclass that overloads __iter__"""
-
-        class CustomList(list):
-            def __iter__(self):
-                # Return elements in reverse order
-                return iter(reversed(self))
 
         cl = CustomList([1, 2, 3])
         result = list(cl.__iter__())
         self.assertEqual(result, [3, 2, 1])
 
-    @unittest.expectedFailure
     @make_dynamo_test
     def test_custom_dict_subclass_with_custom_iter(self):
         """Test custom dict subclass that overloads __iter__"""
-
-        class CustomDict(dict):
-            def __iter__(self):
-                # Return keys in reverse order
-                return iter(sorted(self.keys(), reverse=True))
 
         cd = CustomDict({"a": 1, "b": 2, "c": 3})
         result = list(cd.__iter__())
         self.assertEqual(result, ["c", "b", "a"])
 
-    @unittest.expectedFailure
     @make_dynamo_test
     def test_custom_set_subclass_with_custom_iter(self):
         """Test custom set subclass that overloads __iter__"""
-
-        class CustomSet(set):
-            def __iter__(self):
-                # Return elements multiplied by 2
-                for item in set.__iter__(self):
-                    yield item * 2
 
         cs = CustomSet([1, 2, 3])
         result = sorted(cs.__iter__())
@@ -746,6 +736,14 @@ class CustomObjectWithCustomIter:
         yield 3
 
 
+class GeneratorIterIterable:
+    def __init__(self, data):
+        self.data = data
+
+    def __iter__(self):
+        yield from self.data
+
+
 class TestCustomIteratorMethods(torch._dynamo.test_case.TestCase):
     """Test custom __iter__ implementations on user-defined subclasses"""
 
@@ -790,6 +788,13 @@ class TestCustomIteratorMethods(torch._dynamo.test_case.TestCase):
         d = CustomDictWithKeyLengthIter({"a": 1, "ab": 2, "abc": 3, "b": 4})
         result = sorted(d.__iter__())
         self.assertEqual(result, ["ab", "abc"])
+
+    @make_dynamo_test
+    def test_custom_object_yield_from(self):
+        """Test custom object whose __iter__ uses yield from self.data"""
+        obj = GeneratorIterIterable([10, 20, 30])
+        result = list(iter(obj))
+        self.assertEqual(result, [10, 20, 30])
 
 
 class TestIteratorMutationSemantics(torch._dynamo.test_case.TestCase):

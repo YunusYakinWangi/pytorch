@@ -1349,7 +1349,14 @@ class UserDefinedObjectVariable(UserDefinedVariable):
         )
 
     def iter_impl(self, tx: "InstructionTranslator") -> VariableTracker:
-        return self
+        iter_fn = self._maybe_get_baseclass_method("__iter__")
+        if iter_fn:
+            return variables.UserMethodVariable(
+                iter_fn,
+                self,
+                source=self.source and AttrSource(self.source, "__iter__"),
+            ).call_function(tx, [], {})
+        return super().iter_impl(tx)
 
     @staticmethod
     @functools.cache

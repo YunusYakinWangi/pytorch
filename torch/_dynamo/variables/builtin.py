@@ -2967,6 +2967,7 @@ class BuiltinVariable(VariableTracker):
     def call_reversed(
         self, tx: "InstructionTranslator", obj: VariableTracker
     ) -> VariableTracker | None:
+        # TODO(guilhermeleobas): Reverse is broken because of generic_getiter
         if obj.has_unpack_var_sequence(tx):
             items = list(reversed(obj.unpack_var_sequence(tx)))
             return variables.TupleVariable(items)
