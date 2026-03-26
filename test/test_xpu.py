@@ -247,6 +247,32 @@ if __name__ == "__main__":
         rc = check_output(test_script).splitlines()[-1]
         self.assertEqual(rc, str(torch.xpu.device_count()))
 
+    @unittest.skipIf(not TEST_MULTIXPU, "requires multiple devices")
+    def test_device_count_not_cached_pre_init(self):
+        try:
+            import pyzes  # noqa: F401
+        except ImportError:
+            self.skipTest("pyzes is required for this test")
+
+        test_script = """\
+import torch
+import os
+r1 = torch.xpu.device_count()
+os.environ['ZE_AFFINITY_MASK'] = '0'
+r2 = torch.xpu.device_count()
+torch.empty(10, device='xpu')
+print(f"{r1}, {r2}")
+"""
+
+        r = (
+            subprocess.check_output([sys.executable, "-c", test_script])
+            .decode("ascii")
+            .strip()
+        )
+
+        x = torch.xpu.device_count()
+        self.assertEqual(f"{x}, 1", r)
+
     @unittest.skipIf(
         IS_WINDOWS, "Only for lazy initialization on Linux, not applicable on Windows."
     )
