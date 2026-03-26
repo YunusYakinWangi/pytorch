@@ -64,6 +64,8 @@ def is_fake(x: object) -> bool:
     if isinstance(x, Tensor) and torch._C._is_fake_tensor(x):
         return True
     return False
+
+
 from torch._subclasses.functional_tensor import FunctionalTensor
 from torch._subclasses.meta_utils import is_sparse_any
 from torch.fx import GraphModule, Proxy, Tracer
@@ -680,9 +682,6 @@ def extract_val(val: _ExtractValType, include_real: bool = False) -> _ExtractVal
     elif isinstance(val, Tensor):
         if not val.is_sparse:
             if torch._C._is_cpp_fake_tensor_mode_active():
-                # C++ fake mode is active — create metadata via C++ path.
-                # Cannot create a Python FakeTensorMode here as it conflicts
-                # with the C++ Fake dispatch key in TLS.
                 return torch.empty_strided(
                     val.shape, val.stride(), device=val.device, dtype=val.dtype
                 )
