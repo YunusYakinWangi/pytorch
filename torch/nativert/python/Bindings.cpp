@@ -3,6 +3,7 @@
 #include <torch/csrc/jit/python/pybind_utils.h>
 #include <torch/csrc/utils/pybind.h>
 
+#ifdef FBCODE_CAFFE2
 #include <torch/nativert/ModelRunner.h>
 
 namespace py = pybind11;
@@ -81,3 +82,13 @@ void initModelRunnerPybind(py::module& m) {
 }
 
 } // namespace torch::nativert
+
+#else // !FBCODE_CAFFE2
+
+namespace py = pybind11;
+
+namespace torch::nativert {
+void initModelRunnerPybind(py::module& m) {}
+} // namespace torch::nativert
+
+#endif // FBCODE_CAFFE2
