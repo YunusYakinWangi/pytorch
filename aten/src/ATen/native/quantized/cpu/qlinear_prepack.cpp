@@ -589,7 +589,7 @@ class QLinearPackWeightInt8 final {
       std::optional<Tensor> bias) {
     auto& ctx = at::globalContext();
 
-#if defined(USE_FBGEMM) && !defined(__aarch64__)
+#ifdef USE_FBGEMM
     if (ctx.qEngine() == at::QEngine::FBGEMM ||
         ctx.qEngine() == at::QEngine::X86) {
       return PackedLinearWeight::prepack(std::move(weight), std::move(bias));
