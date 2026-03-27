@@ -641,11 +641,8 @@ class StopTheWorldGuard {
 // == Thread local cache ======================================================
 // ============================================================================
 struct ThreadLocalResults {
-  ThreadLocalResults(
-      PyThreadState* thread_state,
-      PythonTracer* active_tracer)
-      : thread_state_{thread_state},
-        active_tracer_{active_tracer} {}
+  ThreadLocalResults(PyThreadState* thread_state, PythonTracer* active_tracer)
+      : thread_state_{thread_state}, active_tracer_{active_tracer} {}
 
   ThreadLocalResults() = delete;
   ThreadLocalResults(const ThreadLocalResults&) = delete;
@@ -1296,7 +1293,10 @@ class PostProcess {
       : end_time_{end_time_ns}, time_converter_{std::move(time_converter)} {
     for (size_t python_tid : c10::irange(tls.size())) {
       CallTypeHelper<TraceKeyCacheState>::map(
-          tls[python_tid].trace_keys_, *this, tls[python_tid].value_cache_, python_tid);
+          tls[python_tid].trace_keys_,
+          *this,
+          tls[python_tid].value_cache_,
+          python_tid);
 
       addExits<EventType::PyCall>(tls[python_tid].exit_times_, python_tid);
       addExits<EventType::PyCCall>(tls[python_tid].c_exit_times_, python_tid);
@@ -1461,9 +1461,7 @@ std::vector<std::shared_ptr<Result>> PythonTracer::getEvents(
     tls.value_cache_.trimPrefixes();
   }
   PostProcess post_process(
-      std::move(time_converter),
-      thread_local_results_,
-      end_time_ns);
+      std::move(time_converter), thread_local_results_, end_time_ns);
   post_process.set_start_frames(start_frames_, enters);
   auto out = post_process.run(enters);
 
