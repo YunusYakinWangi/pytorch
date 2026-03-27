@@ -502,6 +502,11 @@ def meta_philox_key_fold_in(key, data):
     return key.new_empty(key.shape)
 
 
+@register_meta(aten._philox_normal_.default)
+def meta_philox_normal_(self, key, mean=0.0, std=1.0):
+    return self
+
+
 @register_meta([aten._fft_c2r.default, aten._fft_c2r.out])
 @out_wrapper()
 def meta_fft_c2r(self: Tensor, dim: list[int], normalization: int, lastdim: int):
