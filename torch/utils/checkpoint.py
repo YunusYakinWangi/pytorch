@@ -1554,10 +1554,11 @@ def _checkpoint_without_reentrant_generator(
             )
         else:
             forward_context, _ = context_fn()
-            if not isinstance(forward_context, TorchDispatchMode):
+            if not isinstance(forward_context, _CachingTorchDispatchMode):
                 raise AssertionError(
-                    "In torch.compile mode, `context_fn` arg passed to `torch.utils.checkpoint` "
-                    "must generate a tuple of two `TorchDispatchMode`s."
+                    "In non-strict tracing mode, `context_fn` arg passed to "
+                    "`torch.utils.checkpoint` must generate a `_CachingTorchDispatchMode` "
+                    "(from `create_selective_checkpoint_contexts`)."
                 )
         # For the make_fx path (no HOP), ac_graph_id isn't set yet.
         # The HOP path sets it via context_fn_with_graph_id during the context_fn() call above.
@@ -1572,12 +1573,13 @@ def _checkpoint_without_reentrant_generator(
     forward_context, recompute_context = context_fn()
     if _is_compiling(fn, args, kwargs) and context_fn is not noop_context_fn:
         if (
-            not isinstance(forward_context, TorchDispatchMode)
-            or not isinstance(recompute_context, TorchDispatchMode)
+            not isinstance(forward_context, _CachingTorchDispatchMode)
+            or not isinstance(recompute_context, _CachedTorchDispatchMode)
         ):
             raise AssertionError(
                 "In torch.compile mode, `context_fn` arg passed to `torch.utils.checkpoint` "
-                "must generate a tuple of two `TorchDispatchMode`s."
+                "must generate a `_CachingTorchDispatchMode` and `_CachedTorchDispatchMode` "
+                "(from `create_selective_checkpoint_contexts`)."
             )
     # Accommodates the (remote) possibility that autocast is enabled for cpu AND gpu.
     device_autocast_kwargs, cpu_autocast_kwargs = _get_autocast_kwargs(device_type=device_type)

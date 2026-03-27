@@ -2587,11 +2587,11 @@ instantiate_device_type_tests(
 )
 
 
-class ActivationCheckpointingMakeFxTests(torch._dynamo.test_case.TestCase):
-    """Tests that SAC metadata is correctly stamped when tracing with make_fx."""
+class ActivationCheckpointingNonStrictTracerTests(torch._dynamo.test_case.TestCase):
+    """Tests that SAC metadata is correctly stamped during non-strict tracing."""
 
     @torch._dynamo.config.patch(error_on_nested_fx_trace=False)
-    def _trace_with_make_fx(self, mod, args):
+    def _trace_with_non_strict_tracer(self, mod, args):
         from torch._subclasses import FakeTensorMode
         from torch.fx.experimental.proxy_tensor import make_fx
         from torch.fx.experimental.symbolic_shapes import ShapeEnv
@@ -2658,7 +2658,7 @@ class ActivationCheckpointingMakeFxTests(torch._dynamo.test_case.TestCase):
         def context_fn():
             return create_selective_checkpoint_contexts(policy_fn)
 
-        gm = self._trace_with_make_fx(
+        gm = self._trace_with_non_strict_tracer(
             self._make_sac_model(3, context_fn), (torch.randn(2, 8),)
         )
 
@@ -2711,7 +2711,7 @@ class ActivationCheckpointingMakeFxTests(torch._dynamo.test_case.TestCase):
                 x = checkpoint(self.layers[3], x, use_reentrant=False)
                 return x
 
-        gm = self._trace_with_make_fx(Model(), (torch.randn(2, 8),))
+        gm = self._trace_with_non_strict_tracer(Model(), (torch.randn(2, 8),))
 
         # Collect ac_graph_ids in order of appearance.
         ids_in_order = []
@@ -2734,7 +2734,7 @@ class ActivationCheckpointingMakeFxTests(torch._dynamo.test_case.TestCase):
                 lambda ctx, func, *args, **kwargs: CheckpointPolicy.PREFER_RECOMPUTE
             )
 
-        gm = self._trace_with_make_fx(
+        gm = self._trace_with_non_strict_tracer(
             self._make_sac_model(3, context_fn), (torch.randn(2, 8),)
         )
         cleanup_recompute_tags(gm, is_default_partition=False)
