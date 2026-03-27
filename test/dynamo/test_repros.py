@@ -7945,9 +7945,7 @@ SavedForBackwardsAOTOutput(idx=1)
 SavedForBackwardsAOTOutput(idx=2)
 SavedForBackwardsNoVcCheckAOTOutput(idx=3)
 SavedForBackwardsNoVcCheckAOTOutput(idx=4)
-SavedForBackwardsAOTOutput(idx=5)
-SavedForBackwardsAOTOutput(idx=6)
-SavedForBackwardsAOTOutput(idx=7)""",
+SavedForBackwardsAOTOutput(idx=5)""",
             )
 
     def test_move_tensor_subclass_parameter_after_compile(self):
