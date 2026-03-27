@@ -45,7 +45,6 @@
 #include <ATen/ops/view_as_real.h>
 #endif
 
-
 namespace at::native {
 namespace mps {
 
@@ -336,14 +335,16 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
   constexpr uint32_t threads_per_group = 256;
   uint32_t num_blocks = (numel + threads_per_group - 1) / threads_per_group;
 
-  // Allocate temporary buffers for prefix sums and block totals
+  // Allocate temporary buffers for prefix sums, block totals, and block offsets
   Tensor prefix_buf = at::empty({static_cast<int64_t>(numel)}, input.options().dtype(kInt));
   Tensor block_sums_buf = at::empty({static_cast<int64_t>(num_blocks)}, input.options().dtype(kInt));
+  Tensor block_offsets_buf = at::empty({static_cast<int64_t>(num_blocks)}, input.options().dtype(kInt));
+  Tensor total_nonzero_buf = at::empty({1}, input.options().dtype(kInt));
 
   MPSStream* stream = getCurrentMPSStream();
+  const auto type_str = scalarToMetalTypeString(input);
 
   // Phase 1: prefix sum + block totals
-  const auto type_str = scalarToMetalTypeString(input);
   dispatch_sync_with_rethrow(stream->queue(), ^() {
     @autoreleasepool {
       id<MTLComputeCommandEncoder> computeEncoder = stream->commandEncoder();
@@ -354,23 +355,23 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
       mtl_setArgs(computeEncoder, input, prefix_buf, block_sums_buf, numel);
       [computeEncoder dispatchThreads:MTLSizeMake(numel, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(threads_per_group, 1, 1)];
+
+      // Phase 1.5: GPU prefix sum of block_sums → block_offsets + total
+      id<MTLComputePipelineState> pso_blocks = lib.getPipelineStateForFunc("prefix_sum_blocks");
+      [computeEncoder setComputePipelineState:pso_blocks];
+      mtl_setArgs(computeEncoder, block_sums_buf, block_offsets_buf, total_nonzero_buf, num_blocks);
+      uint32_t tg_size_blocks = std::min(1024u, ((num_blocks + 31) / 32) * 32);
+      [computeEncoder dispatchThreads:MTLSizeMake(tg_size_blocks, 1, 1)
+                threadsPerThreadgroup:MTLSizeMake(tg_size_blocks, 1, 1)];
     }
   });
 
-  // Sync to read back block sums
+  // Sync to read back just the total count (1 int instead of all block_sums)
   dispatch_sync_with_rethrow(stream->queue(), ^() {
     stream->synchronize(SyncType::COMMIT_AND_WAIT);
   });
 
-  // Compute block offsets on CPU (exclusive prefix sum of block totals)
-  Tensor block_sums_cpu = block_sums_buf.to(kCPU);
-  auto* bs_ptr = block_sums_cpu.data_ptr<int>();
-  std::vector<int> block_offsets(num_blocks);
-  int64_t total_nonzero = 0;
-  for (uint32_t i = 0; i < num_blocks; i++) {
-    block_offsets[i] = static_cast<int>(total_nonzero);
-    total_nonzero += bs_ptr[i];
-  }
+  int64_t total_nonzero = total_nonzero_buf.item<int>();
 
   at::native::resize_output(out_, {total_nonzero, nDim});
   if (total_nonzero == 0 || out_.numel() == 0) {
@@ -380,18 +381,13 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
   bool contiguous_output = out_.is_contiguous();
   Tensor out = contiguous_output ? out_ : at::empty_like(out_, MemoryFormat::Contiguous);
 
-  // Upload block offsets and sizes to GPU
-  Tensor block_offsets_buf = at::empty({static_cast<int64_t>(num_blocks)}, input.options().dtype(kInt));
-  block_offsets_buf.copy_(
-      at::from_blob(block_offsets.data(), {static_cast<int64_t>(num_blocks)}, at::kInt));
-
   std::vector<int64_t> sizes_vec(input.sizes().begin(), input.sizes().end());
   Tensor sizes_buf = at::empty({nDim}, input.options().dtype(kLong));
   sizes_buf.copy_(at::from_blob(sizes_vec.data(), {nDim}, at::kLong));
 
   int ndim_int = static_cast<int>(nDim);
 
-  // Phase 2: scatter indices
+  // Phase 2: scatter indices (block_offsets already on GPU)
   dispatch_sync_with_rethrow(stream->queue(), ^() {
     @autoreleasepool {
       id<MTLComputeCommandEncoder> computeEncoder = stream->commandEncoder();

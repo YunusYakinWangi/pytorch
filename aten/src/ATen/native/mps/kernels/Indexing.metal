@@ -795,10 +795,10 @@ INSTANTIATE_INDEX_FILL_FROM_MASK(half2)
 // Nonzero kernel implementation using prefix-sum + scatter approach.
 //
 // Phase 1 (count_nonzero_prefix_sum): Each threadgroup processes a chunk of the
-// flattened input. Within each threadgroup we compute an exclusive prefix sum of
-// the nonzero flags. The total count for each threadgroup is written to a small
-// auxiliary buffer (block_sums). The prefix sum values are written to a temporary
-// buffer (prefix) so phase 2 can look up output positions.
+// flattened input. Within each threadgroup we compute an exclusive prefix sum
+// of the nonzero flags. The total count for each threadgroup is written to a
+// small auxiliary buffer (block_sums). The prefix sum values are written to a
+// temporary buffer (prefix) so phase 2 can look up output positions.
 //
 // Between phases the host reads back the block_sums, computes a CPU-side prefix
 // sum to get per-block offsets, and allocates the output tensor.
@@ -819,7 +819,6 @@ kernel void count_nonzero_prefix_sum(
     uint tgid [[threadgroup_position_in_grid]],
     uint simd_lane_id [[thread_index_in_simdgroup]],
     uint simd_group_id [[simdgroup_index_in_threadgroup]]) {
-
   uint num_simds = (tgsize + simdgroup_size - 1) / simdgroup_size;
 
   int flag = 0;
@@ -853,9 +852,11 @@ kernel void count_nonzero_prefix_sum(
   // First simd group computes exclusive prefix sum of simd group totals
   threadgroup int simdgroup_offsets[32];
   if (simd_group_id == 0) {
-    int sg_val = (simd_lane_id < num_simds) ? simdgroup_totals[simd_lane_id] : 0;
+    int sg_val =
+        (simd_lane_id < num_simds) ? simdgroup_totals[simd_lane_id] : 0;
     for (uint offset = 1; offset < simdgroup_size; offset <<= 1) {
-      int other = simd_shuffle_and_fill_up(sg_val, 0, static_cast<ushort>(offset));
+      int other =
+          simd_shuffle_and_fill_up(sg_val, 0, static_cast<ushort>(offset));
       sg_val += other;
     }
     int exclusive = simd_shuffle_and_fill_up(sg_val, 0, static_cast<ushort>(1));
@@ -870,7 +871,70 @@ kernel void count_nonzero_prefix_sum(
   }
 
   if (lid == tgsize - 1) {
-    block_sums[tgid] = simdgroup_offsets[num_simds - 1] + simdgroup_totals[num_simds - 1];
+    block_sums[tgid] =
+        simdgroup_offsets[num_simds - 1] + simdgroup_totals[num_simds - 1];
+  }
+}
+
+// Phase 1.5: exclusive prefix sum of block_sums → block_offsets, and write
+// total nonzero count to a 1-element buffer.  Runs in a single threadgroup
+// (num_blocks <= 32*32 = 1024 for numel < INT_MAX with TG_SIZE = 256).
+kernel void prefix_sum_blocks(
+    const device int* block_sums [[buffer(0)]],
+    device int* block_offsets [[buffer(1)]],
+    device int* total_nonzero [[buffer(2)]],
+    constant uint& num_blocks [[buffer(3)]],
+    uint lid [[thread_position_in_threadgroup]],
+    uint tgsize [[threads_per_threadgroup]],
+    uint simd_lane_id [[thread_index_in_simdgroup]],
+    uint simd_group_id [[simdgroup_index_in_threadgroup]]) {
+  uint num_simds = (tgsize + simdgroup_size - 1) / simdgroup_size;
+
+  int val_in = (lid < num_blocks) ? block_sums[lid] : 0;
+
+  // Inclusive SIMD scan
+  int val = val_in;
+  for (uint offset = 1; offset < simdgroup_size; offset <<= 1) {
+    int other = simd_shuffle_and_fill_up(val, 0, static_cast<ushort>(offset));
+    val += other;
+  }
+
+  threadgroup int simdgroup_totals[32];
+  bool is_last_lane_in_simd;
+  if (simd_group_id < num_simds - 1) {
+    is_last_lane_in_simd = (simd_lane_id == simdgroup_size - 1);
+  } else {
+    uint lanes_in_last = tgsize - simd_group_id * simdgroup_size;
+    is_last_lane_in_simd = (simd_lane_id == lanes_in_last - 1);
+  }
+  if (is_last_lane_in_simd) {
+    simdgroup_totals[simd_group_id] = val;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  threadgroup int simdgroup_offsets[32];
+  if (simd_group_id == 0) {
+    int sg_val =
+        (simd_lane_id < num_simds) ? simdgroup_totals[simd_lane_id] : 0;
+    for (uint offset = 1; offset < simdgroup_size; offset <<= 1) {
+      int other =
+          simd_shuffle_and_fill_up(sg_val, 0, static_cast<ushort>(offset));
+      sg_val += other;
+    }
+    int exclusive = simd_shuffle_and_fill_up(sg_val, 0, static_cast<ushort>(1));
+    simdgroup_offsets[simd_lane_id] = exclusive;
+  }
+  threadgroup_barrier(mem_flags::mem_threadgroup);
+
+  int exclusive_val = val - val_in + simdgroup_offsets[simd_group_id];
+
+  if (lid < num_blocks) {
+    block_offsets[lid] = exclusive_val;
+  }
+
+  if (lid == tgsize - 1) {
+    *total_nonzero =
+        simdgroup_offsets[num_simds - 1] + simdgroup_totals[num_simds - 1];
   }
 }
 
@@ -887,44 +951,46 @@ kernel void scatter_nonzero_indices(
     constant int* block_offsets [[buffer(6)]],
     uint tid [[thread_position_in_grid]],
     uint tgid [[threadgroup_position_in_grid]]) {
-
-  if (tid >= numel) return;
-  if (input[tid] == T(0)) return;
+  if (tid >= numel)
+    return;
+  if (input[tid] == T(0))
+    return;
 
   int pos = block_offsets[tgid] + prefix[tid];
 
   uint flat = tid;
   for (int d = ndim - 1; d >= 0; d--) {
     int64_t dim_size = sizes[d];
-    output[pos * ndim + d] = static_cast<int64_t>(flat % static_cast<uint>(dim_size));
+    output[pos * ndim + d] =
+        static_cast<int64_t>(flat % static_cast<uint>(dim_size));
     flat /= static_cast<uint>(dim_size);
   }
 }
 
-#define REGISTER_NONZERO_KERNELS(DTYPE)                                            \
-  template [[host_name("count_nonzero_prefix_sum_" #DTYPE)]] [[kernel]] void       \
-  count_nonzero_prefix_sum<DTYPE>(                                                 \
-      const device DTYPE* input [[buffer(0)]],                                     \
-      device int* prefix [[buffer(1)]],                                            \
-      device int* block_sums [[buffer(2)]],                                        \
-      constant uint& numel [[buffer(3)]],                                          \
-      uint tid [[thread_position_in_grid]],                                        \
-      uint lid [[thread_position_in_threadgroup]],                                 \
-      uint tgsize [[threads_per_threadgroup]],                                     \
-      uint tgid [[threadgroup_position_in_grid]],                                  \
-      uint simd_lane_id [[thread_index_in_simdgroup]],                             \
-      uint simd_group_id [[simdgroup_index_in_threadgroup]]);                      \
-                                                                                   \
-  template [[host_name("scatter_nonzero_indices_" #DTYPE)]] [[kernel]] void        \
-  scatter_nonzero_indices<DTYPE>(                                                  \
-      const device DTYPE* input [[buffer(0)]],                                     \
-      const device int* prefix [[buffer(1)]],                                      \
-      device int64_t* output [[buffer(2)]],                                        \
-      constant uint& numel [[buffer(3)]],                                          \
-      constant int& ndim [[buffer(4)]],                                            \
-      constant int64_t* sizes [[buffer(5)]],                                       \
-      constant int* block_offsets [[buffer(6)]],                                   \
-      uint tid [[thread_position_in_grid]],                                        \
+#define REGISTER_NONZERO_KERNELS(DTYPE)                                      \
+  template [[host_name("count_nonzero_prefix_sum_" #DTYPE)]] [[kernel]] void \
+  count_nonzero_prefix_sum<DTYPE>(                                           \
+      const device DTYPE* input [[buffer(0)]],                               \
+      device int* prefix [[buffer(1)]],                                      \
+      device int* block_sums [[buffer(2)]],                                  \
+      constant uint& numel [[buffer(3)]],                                    \
+      uint tid [[thread_position_in_grid]],                                  \
+      uint lid [[thread_position_in_threadgroup]],                           \
+      uint tgsize [[threads_per_threadgroup]],                               \
+      uint tgid [[threadgroup_position_in_grid]],                            \
+      uint simd_lane_id [[thread_index_in_simdgroup]],                       \
+      uint simd_group_id [[simdgroup_index_in_threadgroup]]);                \
+                                                                             \
+  template [[host_name("scatter_nonzero_indices_" #DTYPE)]] [[kernel]] void  \
+  scatter_nonzero_indices<DTYPE>(                                            \
+      const device DTYPE* input [[buffer(0)]],                               \
+      const device int* prefix [[buffer(1)]],                                \
+      device int64_t* output [[buffer(2)]],                                  \
+      constant uint& numel [[buffer(3)]],                                    \
+      constant int& ndim [[buffer(4)]],                                      \
+      constant int64_t* sizes [[buffer(5)]],                                 \
+      constant int* block_offsets [[buffer(6)]],                             \
+      uint tid [[thread_position_in_grid]],                                  \
       uint tgid [[threadgroup_position_in_grid]])
 
 REGISTER_NONZERO_KERNELS(float);
