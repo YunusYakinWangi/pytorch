@@ -1250,6 +1250,7 @@ class AOTDedupeWrapper(CompilerWrapper):
                 flat_args_descs=deduped_flat_args_descs,
                 static_input_indices=aot_config.static_input_indices,
                 keep_input_mutations=fw_metadata.keep_input_mutations,
+                is_train=fw_metadata.is_train,
             )(*deduped_flat_args)
             if ref_fw_metadata != updated_fw_metadata:
                 raise AssertionError(
@@ -1472,6 +1473,7 @@ class AOTSyntheticBaseWrapper(CompilerWrapper):
                 flat_args_descs=flat_args_descs_with_synthetic_bases,
                 static_input_indices=aot_config.static_input_indices,
                 keep_input_mutations=fw_metadata.keep_input_mutations,
+                is_train=fw_metadata.is_train,
             )(*flat_args_with_synthetic_bases)
             if ref_fw_metadata != fw_metadata_updated:
                 raise AssertionError(
@@ -2782,7 +2784,8 @@ Your tensor subclass must implement __coerce_same_metadata_as_tangent__."""
             def backward(ctx: Any, *flat_args: Any) -> tuple[Any, ...]:
                 # With boxed_grads_call, PyNode::apply passes a single mutable
                 # list as the argument. Otherwise, grads come as *flat_args.
-                if len(flat_args) == 1 and isinstance(flat_args[0], list):
+                if CompiledFunction.boxed_grads_call:
+                    assert len(flat_args) == 1 and isinstance(flat_args[0], list)
                     grad_args = flat_args[0]
                 else:
                     grad_args = list(flat_args)
