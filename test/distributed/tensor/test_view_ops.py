@@ -177,15 +177,6 @@ class TestViewOps(DTensorContinuousTestBase):
             if isinstance(rule, Repeat):
                 if isinstance(rule.input_dim, InputDim):
                     no_shard_dims.add(rule.input_dim.input_dim)
-            elif isinstance(rule, Flatten):
-                for dim in rule.input_dims[1:]:
-                    if isinstance(dim, InputDim):
-                        no_shard_dims.add(dim.input_dim)
-            elif isinstance(rule, Split):
-                if isinstance(rule.input_dim, Flatten):
-                    for dim in rule.input_dim.input_dims[1:]:
-                        if isinstance(dim, InputDim):
-                            no_shard_dims.add(dim.input_dim)
 
         if op == torch.unbind:
             no_shard_dims.add(kwargs.get("dim", 0))
@@ -301,6 +292,30 @@ class TestViewOps(DTensorContinuousTestBase):
                 (2, 3),
                 strict_view=True,
             )
+
+    def test_reshape_non_first_flatten_dim(self):
+        """Reshape with non-first flatten dim sharding produces _StridedShard, zero comm."""
+        mesh = self.build_device_mesh()
+        mesh_size = mesh.size()
+
+        # [2, 3, 4] Shard(1) → reshape [24]: dim 1 is last in Flatten → always OK
+        tensor = torch.randn(2 * mesh_size, 3 * mesh_size, 4)
+        dt = distribute_tensor(tensor, mesh, [Shard(1)])
+        with CommDebugMode() as comm_mode:
+            result = dt.reshape(-1)
+        self.assertEqual(comm_mode.get_total_counts(), 0)
+        self.assertEqual(result.full_tensor(), tensor.reshape(-1))
+        self.assertIsInstance(result.placements[0], _StridedShard)
+
+        # [6, 12] Shard(1) → reshape [72]: dim 1 is last in Flatten → _StridedShard
+        tensor = torch.randn(mesh_size, 12)
+        dt = distribute_tensor(tensor, mesh, [Shard(1)])
+        with CommDebugMode() as comm_mode:
+            result = dt.reshape(-1)
+        self.assertEqual(comm_mode.get_total_counts(), 0)
+        self.assertEqual(result.full_tensor(), tensor.reshape(-1))
+        self.assertIsInstance(result.placements[0], _StridedShard)
+        self.assertEqual(result.placements[0].split_factor, mesh_size)
 
     def test_view_ops(self):
         mesh_shape = (dist.get_world_size() // 2, 2)

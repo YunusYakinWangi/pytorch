@@ -845,15 +845,11 @@ class _ViewShardingPropagator:
                     )
                 sharded_dims.append(dim)
             else:
-                # TODO: non-strict (reshape) should allow can_shard_dim = True
-                # for non-first flatten dims, since strict_view already does.
-                # Currently forces redistribution because the rewrite phase
-                # wasn't originally implemented for this case.
-                if i == 0:
-                    sharded_dims.append(dim)
-                    if guard_or_true(tensor_dim_size % mesh_dim_size != 0):
-                        can_shard_dim = False
-                else:
+                is_last_input_dim = i == num_input_dims - 1
+                sharded_dims.append(dim)
+                if not is_last_input_dim and guard_or_true(
+                    tensor_dim_size % mesh_dim_size != 0
+                ):
                     can_shard_dim = False
             self.shard_allowed[dim.input_dim] = [can_shard_dim] * self.mesh_ndim
 
