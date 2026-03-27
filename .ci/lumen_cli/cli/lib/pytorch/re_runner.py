@@ -72,9 +72,9 @@ def _resolve_commit(pr: int | None, commit: str | None) -> dict:
 
 def build_run_command(*commands: str) -> str:
     """Wrap commands for RE execution using uv run."""
-    wrapped = ["cd .ci/lumen_cli"]
+    wrapped = []
     for cmd in commands:
-        wrapped.append(f"uv run {cmd}")
+        wrapped.append(f"uv run --project .ci/lumen_cli {cmd}")
     return "\n".join(wrapped)
 
 
