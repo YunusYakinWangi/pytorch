@@ -1540,6 +1540,15 @@ class SchedulerNode(BaseSchedulerNode):
         self._init_from_node(node)
         self._compute_attrs()
 
+    def _collect_fake_deps(self) -> OrderedSet[Dep]:
+        """Collect manually-added fake dependencies (StarDep/WeakDep) that
+        cannot be re-derived by extract_read_writes."""
+        if not hasattr(self, "read_writes"):
+            return OrderedSet()
+        return OrderedSet(
+            dep for dep in self.read_writes.reads if isinstance(dep, (WeakDep, StarDep))
+        )
+
     def _compute_attrs(
         self,
         extra_indexing_constraints: tuple[dict[Any, Any], list[Any]] | None = None,
@@ -1547,17 +1556,7 @@ class SchedulerNode(BaseSchedulerNode):
     ) -> None:
         assert isinstance(self.node, (ir.ComputedBuffer, ir.TemplateBuffer))
 
-        # Preserve manually-added fake dependencies (StarDep/WeakDep) that
-        # cannot be re-derived by extract_read_writes.  On the first call
-        # (from __init__) read_writes hasn't been set yet, so there is
-        # nothing to preserve.
-        fake_deps: OrderedSet[Dep] = OrderedSet()
-        if hasattr(self, "read_writes"):
-            fake_deps = OrderedSet(
-                dep
-                for dep in self.read_writes.reads
-                if isinstance(dep, (WeakDep, StarDep))
-            )
+        fake_deps = self._collect_fake_deps()
 
         self._sizes, body = self.node.simplify_and_reorder(
             extra_indexing_constraints=extra_indexing_constraints,
@@ -1584,6 +1583,9 @@ class SchedulerNode(BaseSchedulerNode):
 
         if fake_deps:
             new_rw = new_rw.with_read(fake_deps)
+        # Apply mutation renames for consistency with refresh_dependencies.
+        if self.mutation_renames:
+            new_rw = new_rw.rename(self.mutation_renames)
         self.set_read_writes(new_rw)
 
     def recompute_size_and_body(
@@ -1599,11 +1601,7 @@ class SchedulerNode(BaseSchedulerNode):
     def refresh_dependencies(
         self, normalize: bool, need_clear_tiling_cache: bool
     ) -> None:
-        # Fake dependencies are added manually. They can not be analyzed from
-        # extract_read_writes. Find them out and apply manually.
-        fake_deps: OrderedSet[Dep] = OrderedSet(
-            dep for dep in self.read_writes.reads if isinstance(dep, (WeakDep, StarDep))
-        )
+        fake_deps = self._collect_fake_deps()
 
         # don't normalize since the loop order may need to be further changed
         # later

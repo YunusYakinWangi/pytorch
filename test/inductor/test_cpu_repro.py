@@ -6317,6 +6317,10 @@ class CPUReproTests(TestCase):
         eager_loss = eager_model(x1.clone(), x2.clone())
         eager_loss.backward()
         torch.testing.assert_close(eager_loss, compiled_loss)
+        for p_eager, p_compiled in zip(
+            eager_model.parameters(), compiled_model.parameters()
+        ):
+            torch.testing.assert_close(p_eager.grad, p_compiled.grad)
 
 
 if __name__ == "__main__":
