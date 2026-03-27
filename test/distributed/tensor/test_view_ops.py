@@ -317,6 +317,13 @@ class TestViewOps(DTensorContinuousTestBase):
         self.assertIsInstance(result.placements[0], _StridedShard)
         self.assertEqual(result.placements[0].split_factor, mesh_size)
 
+        # [mesh_size, 5] Shard(1) → reshape [-1]: last dim not divisible by mesh_size
+        tensor = torch.randn(mesh_size, 5)
+        dt = distribute_tensor(tensor, mesh, [Shard(1)])
+        with CommDebugMode() as comm_mode:
+            result = dt.reshape(-1)
+        self.assertEqual(result.full_tensor(), tensor.reshape(-1))
+
     def test_view_ops(self):
         mesh_shape = (dist.get_world_size() // 2, 2)
         self.device_mesh = init_device_mesh(
