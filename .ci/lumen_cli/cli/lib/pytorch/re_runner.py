@@ -78,6 +78,9 @@ def submit_command(
     if bootstrap is None:
         bootstrap = list(DEFAULT_BOOTSTRAP)
 
+    resolver = CommitResolver(REPO)
+    resolved = resolver.resolve(pr, commit)
+
     modules_list = (
         ["header", "find_script", "git_clone", "git_checkout"]
         + bootstrap
@@ -92,11 +95,8 @@ def submit_command(
         task_type="cpu-large",
         image=image,
         runner_modules=modules,
-        env_vars={},
+        env_vars={"REPO_URL": resolved["repo"], "COMMIT_SHA": resolved["sha"]},
     )
-
-    resolver = CommitResolver(REPO)
-    resolved = resolver.resolve(pr, commit)
 
     client = K8sClient(K8sConfig(namespace="remote-execution-system", timeout=60))
     runner = JobRunner(
