@@ -71,15 +71,7 @@ struct CUDAGuardImpl final : public c10::impl::DeviceGuardImplInterface {
         (1ULL << kIndex_Float8_e5m2fnuz) | (1ULL << kIndex_Float8_e4m3fnuz) |
         (1ULL << kIndex_Float8_e8m0fnu) | (1ULL << kIndex_UInt16) |
         (1ULL << kIndex_UInt32) | (1ULL << kIndex_UInt64);
-#ifndef USE_ROCM
-    cudaDeviceProp device_prop{};
-    C10_CUDA_CHECK(cudaGetDeviceProperties(&device_prop, d.index()));
-    if (device_prop.major >= 6) {
-      cap.capability_data.capability_bits |= (1ULL << kIndex_BFloat16);
-    }
-#else
-    cap.capability_data.capability_bits |= (1ULL << kIndex_BFloat16);
-#endif
+
     return cap;
   }
   Stream getStream(Device d) const override {
