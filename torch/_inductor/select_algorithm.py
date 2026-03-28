@@ -1791,28 +1791,25 @@ class TritonTemplateKernel(TritonKernel):
 
         # finalize must be called after adding epilogue above
         with V.set_kernel_handler(self):
-            if not isinstance(partial_code, str):
+            if isinstance(partial_code, str):
+                src_code = partial_code
+            else:
                 # This is used to calculate flops in TritonTemplateKernels
                 with ir.IRNode.current_origins(template_node.node.origins):
                     partial_code.finalize_hook("<DEF_KERNEL>")
                 partial_code.finalize_hook("<ARGDEFS>", strict=False)
 
-            # TODO: Maybe unify CUTLASSTemplateKernel to also use PartialRender for flexible epilogue fusion.
+                # TODO: Maybe unify CUTLASSTemplateKernel to also use PartialRender for flexible epilogue fusion.
 
-            for input_name in self.named_input_nodes:
-                subgraph_name = f"<LOAD_INPUT_{input_name}>"
+                for input_name in self.named_input_nodes:
+                    subgraph_name = f"<LOAD_INPUT_{input_name}>"
+                    partial_code.finalize_hook(subgraph_name, strict=False)
 
-                partial_code.finalize_hook(subgraph_name, strict=False)
+                num_store_subgraphs = self.get_store_output_count()
+                for i in range(num_store_subgraphs):
+                    subgraph_name = self._get_store_output_subgraph_name(i)
+                    partial_code.finalize_hook(subgraph_name)
 
-            num_store_subgraphs = self.get_store_output_count()
-            for i in range(num_store_subgraphs):
-                subgraph_name = self._get_store_output_subgraph_name(i)
-
-                partial_code.finalize_hook(subgraph_name)
-
-            if isinstance(partial_code, str):
-                src_code = partial_code
-            else:
                 # Ensure all hooks are finalized before the kernel is defined.
                 # Note: some of these hooks may have been registered by a kernel subclass
                 src_code = partial_code.finalize_remaining()
