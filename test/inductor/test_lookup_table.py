@@ -2,18 +2,14 @@
 import re
 import unittest
 from functools import partial
-from typing import Any, Optional
+from typing import Any
 from unittest.mock import patch
 
 import torch
 import torch.nn as nn
 from torch._inductor import config as inductor_config
 from torch._inductor.choices import InductorChoices
-from torch._inductor.kernel_inputs import (
-    ConvKernelInputs,
-    MMKernelInputs,
-    SerializableValue,
-)
+from torch._inductor.kernel_inputs import MMKernelInputs
 from torch._inductor.lookup_table.choices import LookupTableChoices
 from torch._inductor.select_algorithm import (
     add_preprocessing_fn,
@@ -27,10 +23,15 @@ from torch._inductor.virtualized import V
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
-    TEST_WITH_ROCM,
 )
 from torch.testing._internal.inductor_utils import HAS_CPU, HAS_CUDA_AND_TRITON, HAS_GPU
 from torch.utils._triton import has_triton_stable_tma_api, has_triton_tma_device
+
+
+# Conditional patch for decompose_k tests - override to 10 on ROCm, no-op elsewhere
+_DECOMPOSE_K_PATCH_ROCM = (
+    {"triton.num_decompose_k_splits": 10} if torch.version.hip else {}
+)
 
 
 class MockTensorNode:
@@ -58,7 +59,7 @@ class MockMMKernelInputs(MMKernelInputs):
     def __init__(
         self,
         tensors: list[torch.Tensor],
-        scalars: Optional[dict[str, SerializableValue]] = None,
+        scalars: dict[str, float | int] | None = None,
         mat1_idx: int = -2,
         mat2_idx: int = -1,
     ):
@@ -80,38 +81,7 @@ class MockMMKernelInputs(MMKernelInputs):
         return self.mnk_symbolic()  # pyre-ignore
 
     @property
-    def device_type(self) -> Optional[str]:
-        return self.tensors[0].device.type
-
-
-class MockConvKernelInputs(ConvKernelInputs):
-    """Mock ConvKernelInputs that subclasses the real class and uses real tensors"""
-
-    def __init__(
-        self,
-        tensors: list[torch.Tensor],
-        scalars: Optional[dict[str, SerializableValue]] = None,
-        x_idx: int = 0,
-        weight_idx: int = 1,
-        bias_idx: Optional[int] = None,
-    ):
-        """Initialize with real tensors, creating mock nodes for the base class"""
-        mock_nodes = [MockTensorNode(t) for t in tensors]
-        super().__init__(
-            mock_nodes, scalars, x_idx=x_idx, weight_idx=weight_idx, bias_idx=bias_idx
-        )
-        self.tensors = tensors  # Keep reference to original tensors
-
-    def shapes_hinted(self) -> tuple[tuple[int, ...], ...]:
-        """Delegate to symbolic since real tensors already have int shapes"""
-        return self.shapes_symbolic()
-
-    def strides_hinted(self) -> tuple[tuple[int, ...], ...]:
-        """Delegate to symbolic since real tensors already have int strides"""
-        return self.strides_symbolic()  # pyre-ignore
-
-    @property
-    def device_type(self) -> Optional[str]:
+    def device_type(self) -> str | None:
         return self.tensors[0].device.type
 
 
@@ -135,10 +105,10 @@ class BaseLookupTableTest(TestCase):
 
     def create_mock_mm_kernel_inputs(
         self,
-        shapes: Optional[list[tuple[int, ...]]] = None,
+        shapes: list[tuple[int, ...]] | None = None,
         device: torch.device = torch.device("cuda"),
         dtype: torch.dtype = torch.float32,
-        scalars: Optional[dict[str, SerializableValue]] = None,
+        scalars: dict[str, float | int] | None = None,
     ) -> MockMMKernelInputs:
         """Create MockMMKernelInputs with real tensors"""
         if shapes is None:
@@ -239,7 +209,8 @@ class TestLookupTable(BaseLookupTableTest):
             result = test_choices.lookup_template_configs(
                 kernel_inputs, "mm", ["triton"]
             )
-            assert result is not None, "Result should not be None"
+            if result is None:
+                raise AssertionError("Result should not be None")
             self.assertEqual(len(result["triton"]), 2)
             for config in result["triton"]:
                 self.assertNotIn("template_id", config)
@@ -247,7 +218,8 @@ class TestLookupTable(BaseLookupTableTest):
 
             # Test tma template filtering
             result = test_choices.lookup_template_configs(kernel_inputs, "mm", ["tma"])
-            assert result is not None, "Result should not be None"
+            if result is None:
+                raise AssertionError("Result should not be None")
             self.assertEqual(len(result["tma"]), 1)
             self.assertNotIn("template_id", result["tma"][0])
             self.assertEqual(result["tma"][0]["BLOCK_M"], 256)
@@ -256,7 +228,8 @@ class TestLookupTable(BaseLookupTableTest):
             result = test_choices.lookup_template_configs(
                 kernel_inputs, "mm", ["decompose_k"]
             )
-            assert result is not None, "Result should not be None"
+            if result is None:
+                raise AssertionError("Result should not be None")
             self.assertEqual(len(result["decompose_k"]), 1)
             self.assertNotIn("template_id", result["decompose_k"][0])
             self.assertEqual(result["decompose_k"][0]["k_split"], 4)
@@ -322,8 +295,10 @@ class TestLookupTable(BaseLookupTableTest):
                 kernel_inputs, "mm", ["triton"]
             )
             result2 = test_choices.lookup_template_configs(kernel_inputs, "mm", ["tma"])
-            assert result1 is not None, "Result1 should not be None"
-            assert result2 is not None, "Result2 should not be None"
+            if result1 is None:
+                raise AssertionError("Result1 should not be None")
+            if result2 is None:
+                raise AssertionError("Result2 should not be None")
             self.assertEqual(len(result1["triton"]), 1)
             self.assertEqual(len(result2["tma"]), 1)
 
@@ -332,8 +307,10 @@ class TestLookupTable(BaseLookupTableTest):
                 kernel_inputs, "mm", ["triton"]
             )
             result4 = test_choices.lookup_template_configs(kernel_inputs, "mm", ["tma"])
-            assert result3 is not None, "Result3 should not be None"
-            assert result4 is not None, "Result4 should not be None"
+            if result3 is None:
+                raise AssertionError("Result3 should not be None")
+            if result4 is None:
+                raise AssertionError("Result4 should not be None")
             self.assertEqual(len(result3["triton"]), 1)
             self.assertEqual(len(result4["tma"]), 1)
 
@@ -356,7 +333,8 @@ class TestLookupTable(BaseLookupTableTest):
             result = test_choices.lookup_template_configs(
                 kernel_inputs, "mm", ["triton", "tma", "decompose_k"]
             )
-            assert result is not None, "Result should not be None"
+            if result is None:
+                raise AssertionError("Result should not be None")
 
             # Should have entries for triton and tma, but not decompose_k
             self.assertIn("triton", result)
@@ -407,7 +385,8 @@ class TestLookupTable(BaseLookupTableTest):
             )
 
             if expected_kept:
-                assert result is not None, "Result should not be None"
+                if result is None:
+                    raise AssertionError("Result should not be None")
                 self.assertIn("triton", result)
                 self.assertEqual(len(result["triton"]), 1)
                 # template_hash should be removed from returned config
@@ -442,7 +421,8 @@ class TestLookupTable(BaseLookupTableTest):
             )
 
             # Should keep config even with mismatching hash since checking is disabled
-            assert result is not None, "Result should not be None"
+            if result is None:
+                raise AssertionError("Result should not be None")
             self.assertIn("triton", result)
             self.assertEqual(len(result["triton"]), 1)
             # template_hash should still be removed from returned config
@@ -475,7 +455,8 @@ class TestLookupTable(BaseLookupTableTest):
                 kernel_inputs, "mm", ["triton"], template_hash_map
             )
 
-            assert result is not None, "Result should not be None"
+            if result is None:
+                raise AssertionError("Result should not be None")
             self.assertIn("triton", result)
             # Should keep 2 configs: the one with correct hash and the one without hash
             self.assertEqual(len(result["triton"]), 2)
@@ -526,7 +507,8 @@ class TestLookupTable(BaseLookupTableTest):
             )
 
             # Should keep config regardless of hash validity since checking is disabled
-            assert result is not None, f"Result should not be None for {description}"
+            if result is None:
+                raise AssertionError(f"Result should not be None for {description}")
             self.assertIn(
                 "triton", result, f"Should have triton result for {description}"
             )
@@ -617,9 +599,10 @@ class TestLookupTable(BaseLookupTableTest):
             )
 
         if expected_found:
-            assert result is not None, (
-                f"Result should not be None when expected_found={expected_found}"
-            )
+            if result is None:
+                raise AssertionError(
+                    f"Result should not be None when expected_found={expected_found}"
+                )
             self.assertIn("triton", result, "Should have triton result when found")
             self.assertEqual(len(result["triton"]), 1, "Should have exactly 1 config")
             self.assertEqual(
@@ -666,7 +649,8 @@ class TestLookupTable(BaseLookupTableTest):
             )
 
             # Should get device-specific config (BLOCK_M=256), not device-agnostic (BLOCK_M=128)
-            assert result is not None, "Result should not be None"
+            if result is None:
+                raise AssertionError("Result should not be None")
             self.assertIn("triton", result)
             self.assertEqual(len(result["triton"]), 1)
             self.assertEqual(
@@ -868,7 +852,6 @@ class BaseE2ELookupTableTest(BaseLookupTableTest):
         ]
 
 
-@unittest.skipIf(TEST_WITH_ROCM, "ROCm doesn't support lookup table")
 @unittest.skipIf(not HAS_CUDA_AND_TRITON, "CUDA not available")
 @instantiate_parametrized_tests
 class TestLookupTableE2E(BaseE2ELookupTableTest):
@@ -893,22 +876,23 @@ class TestLookupTableE2E(BaseE2ELookupTableTest):
         # Inline validation function
         def validate_choices(choices):
             if max_autotune:
-                assert len(choices) > 2, (
-                    f"Max-autotune should have >2 choices, got {len(choices)}"
-                )
-                assert any(isinstance(c, ExternKernelCaller) for c in choices), (
-                    "Should have ExternKernelCaller"
-                )
-                assert any(isinstance(c, TritonTemplateCaller) for c in choices), (
-                    "Should have TritonTemplateCaller"
-                )
+                if len(choices) <= 2:
+                    raise AssertionError(
+                        f"Max-autotune should have >2 choices, got {len(choices)}"
+                    )
+                if not any(isinstance(c, ExternKernelCaller) for c in choices):
+                    raise AssertionError("Should have ExternKernelCaller")
+                if not any(isinstance(c, TritonTemplateCaller) for c in choices):
+                    raise AssertionError("Should have TritonTemplateCaller")
             else:
-                assert len(choices) == 1, (
-                    f"No max-autotune should have 1 choice, got {len(choices)}"
-                )
-                assert isinstance(choices[0], ExternKernelCaller), (
-                    f"Should be ExternKernelCaller, got {type(choices[0])}"
-                )
+                if len(choices) != 1:
+                    raise AssertionError(
+                        f"No max-autotune should have 1 choice, got {len(choices)}"
+                    )
+                if not isinstance(choices[0], ExternKernelCaller):
+                    raise AssertionError(
+                        f"Should be ExternKernelCaller, got {type(choices[0])}"
+                    )
             return choices
 
         add_preprocessing_fn(validate_choices)
@@ -963,21 +947,26 @@ class TestLookupTableE2E(BaseE2ELookupTableTest):
             operation, tensors, {"triton.enable_persistent_tma_matmul": True}
         )
 
+    # Enable decompose_k for this test (disabled by default on ROCm)
     @fresh_cache()
     def test_decompose_k_lookup_table_entry(self):
         """Test decompose_k template entry"""
-        tensors = self.create_tensors("mm", m=32, n=32, k=32 * 32)
-        config = self.create_basic_config(
-            torch._inductor.kernel.mm.decompose_k_subgraph_template.uid
-        )
-
-        self.setup_lookup_table("mm", tensors, [config])
-        add_preprocessing_fn(
-            partial(
-                verify_choice_names, pattern="decompose_k|bmm_dtype", expected_count=1
+        with inductor_config.patch(_DECOMPOSE_K_PATCH_ROCM):
+            tensors = self.create_tensors("mm", m=32, n=32, k=32 * 32)
+            config = self.create_basic_config(
+                torch._inductor.kernel.mm.decompose_k_subgraph_template.uid
             )
-        )
-        self.run_model("mm", tensors)
+
+            self.setup_lookup_table("mm", tensors, [config])
+            add_preprocessing_fn(
+                partial(
+                    verify_choice_names,
+                    pattern="decompose_k|bmm_dtype",
+                    expected_count=1,
+                )
+            )
+
+            self.run_model("mm", tensors)
 
     @fresh_cache()
     def test_bias_addmm_lookup_table_entry(self):
@@ -1089,119 +1078,6 @@ class TestLookupTableE2E(BaseE2ELookupTableTest):
         # Ensure hash checking is enabled
         with patch.object(inductor_config.lookup_table, "check_src_hash", True):
             self.run_model("mm", tensors)
-
-    @fresh_cache()
-    def test_conv2d_lookup_table_entry_e2e(self):
-        """Test end-to-end conv2d with lookup table entry - verifies config is picked up and produces valid results"""
-        import torch._inductor.kernel.conv
-
-        # Create input tensors with specific shapes for conv2d
-        # Input: [batch=2, in_channels=3, height=32, width=32]
-        # Weight: [out_channels=64, in_channels=3, kernel_h=3, kernel_w=3]
-        # Make them channels-last to match what conv lowering uses
-        x = torch.randn(2, 3, 32, 32, device=self.device, dtype=torch.float16).to(
-            memory_format=torch.channels_last
-        )
-        weight = torch.randn(64, 3, 3, 3, device=self.device, dtype=torch.float16).to(
-            memory_format=torch.channels_last
-        )
-
-        # Define conv parameters - use these SAME values everywhere
-        stride = (1, 1)
-        padding = (1, 1)
-        dilation = (1, 1)
-        groups = 1
-
-        # Create MockConvKernelInputs using the SAME tensors and SAME scalar values
-        mock_scalars = {
-            "stride": stride,
-            "padding": padding,
-            "dilation": dilation,
-            "transposed": False,
-            "output_padding": (0, 0),
-            "groups": groups,
-        }
-        mock_kernel_inputs = MockConvKernelInputs([x, weight], mock_scalars)
-
-        # Create lookup key for "convolution" operation
-        choices_handler = LookupTableChoices()
-        lookup_key = choices_handler.make_lookup_key(mock_kernel_inputs, "convolution")
-
-        # Get the exact template UID from conv2d_template
-        template_uid = torch._inductor.kernel.conv.conv2d_template.uid
-
-        # Create a precisely configured conv2d config
-        # IMPORTANT: Only include per-config tunable parameters!
-        # Static parameters (KERNEL_H, STRIDE_H, GROUPS, UNROLL, ALLOW_TF32) are
-        # automatically generated by get_extra_kwargs() and should NOT be in the lookup table
-        conv2d_config = {
-            "template_id": template_uid,
-            # Per-config tunable parameters only (what you'd tune via autotuning)
-            "BLOCK_M": 64,
-            "BLOCK_N": 64,
-            "BLOCK_K": 32,
-            "num_stages": 2,
-            "num_warps": 4,
-        }
-
-        # Setup lookup table
-        inductor_config.lookup_table.table = {lookup_key: [conv2d_config]}
-
-        def validate_conv_choice(choices):
-            assert len(choices) == 1, (
-                f"Expected 1 choice from lookup table, got {len(choices)}"
-            )
-            assert isinstance(choices[0], TritonTemplateCaller), (
-                f"Expected TritonTemplateCaller, got {type(choices[0])}"
-            )
-            assert "convolution2d" in choices[0].name, (
-                f"Expected 'convolution2d' in name, got {choices[0].name}"
-            )
-            return choices
-
-        add_preprocessing_fn(validate_conv_choice)
-
-        # Create and compile the model using the SAME weight tensor
-        class SimpleConv2d(nn.Module):
-            def __init__(self, weight):
-                super().__init__()
-                self.register_buffer("weight", weight)
-
-            def forward(self, x):
-                return torch.conv2d(
-                    x,
-                    self.weight,
-                    bias=None,
-                    stride=stride,
-                    padding=padding,
-                    dilation=dilation,
-                    groups=groups,
-                )
-
-        model = SimpleConv2d(weight).to(self.device)
-
-        with inductor_config.patch({"max_autotune": True, "max_autotune_gemm": True}):
-            compiled_model = torch.compile(model)
-            result = compiled_model(x)  # Use the SAME x tensor
-
-        # Output shape: [batch=2, out_channels=64, out_h=32, out_w=32]
-        # (same spatial dims due to padding=1, stride=1, kernel=3)
-        expected_shape = (2, 64, 32, 32)
-        self.assertEqual(
-            result.shape,
-            expected_shape,
-            f"Expected shape {expected_shape}, got {result.shape}",
-        )
-
-        self.assertFalse(
-            torch.isnan(result).any().item(),
-            "Output contains NaN values",
-        )
-
-        self.assertFalse(
-            torch.isinf(result).any().item(),
-            "Output contains Inf values",
-        )
 
 
 if __name__ == "__main__":
