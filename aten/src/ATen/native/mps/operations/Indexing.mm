@@ -291,7 +291,7 @@ TORCH_IMPL_FUNC(index_copy_out_mps)(const Tensor& self,
 // Metal kernel-based nonzero using prefix-sum + scatter.
 // Step 1: Per-element exclusive prefix sum of nonzero flags + block totals.
 // Step 2: GPU prefix sum of block totals → block offsets + total count.
-// Host:   Read back 1 int (total count), allocate output.
+// Host:   Read back total count, allocate output.
 // Step 3: Scatter multi-dimensional indices into the output.
 Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
   int64_t nDim = self.dim();
@@ -305,8 +305,7 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
   TORCH_CHECK(self.numel() < std::numeric_limits<int>::max(),
               "nonzero is not supported for tensors with more than INT_MAX elements, "
               "See https://github.com/pytorch/pytorch/issues/51871");
-  TORCH_CHECK(
-      out_.dtype() == at::kLong, "Expected object of scalar type ", at::kLong, " as out, but got ", out_.dtype());
+  TORCH_CHECK(out_.dtype() == at::kLong, "Expected output type to be Long, but got ", out_.dtype());
   TORCH_CHECK(self.device() == out_.device(),
               "expected self and out to be on the same device, but got out on ",
               out_.device(),
@@ -316,36 +315,38 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
 
   Tensor input = self.contiguous();
   const auto numel = static_cast<uint32_t>(input.numel());
+  const auto type_str = scalarToMetalTypeString(input);
+  MPSStream* stream = getCurrentMPSStream();
 
-  constexpr uint32_t threads_per_group = 256;
+  // All three kernels declare [[max_total_threads_per_threadgroup(1024)]]
+  // so mtl_dispatch1DJob picks the same threadgroup size for steps 1 and 3,
+  // ensuring tgid in scatter matches block_offsets from the prefix sum.
+  auto pso_step1 = lib.getPipelineStateForFunc(fmt::format("count_nonzero_prefix_sum_{}", type_str));
+  auto pso_step2 = lib.getPipelineStateForFunc("prefix_sum_blocks");
+  auto pso_step3 = lib.getPipelineStateForFunc(fmt::format("scatter_nonzero_indices_{}", type_str));
+  TORCH_INTERNAL_ASSERT([pso_step1 maxTotalThreadsPerThreadgroup] == [pso_step3 maxTotalThreadsPerThreadgroup],
+                        "nonzero: step 1 and step 3 threadgroup sizes must match");
+
+  uint32_t threads_per_group = static_cast<uint32_t>([pso_step1 maxTotalThreadsPerThreadgroup]);
   uint32_t num_blocks = (numel + threads_per_group - 1) / threads_per_group;
 
-  // Single allocation for all temporary int32 buffers:
-  // [prefix (numel) | block_sums (num_blocks) | block_offsets (num_blocks) | total (1)]
-  const auto tmp = at::empty({input.numel() + 2 * num_blocks + 1}, input.options().dtype(kInt));
+  // Single allocation: [prefix | block_sums | block_offsets | total]
+  auto tmp = at::empty({input.numel() + 2 * num_blocks + 1}, input.options().dtype(kInt));
   Tensor prefix_buf = tmp.slice(0, 0, numel);
   Tensor block_sums_buf = tmp.slice(0, numel, numel + num_blocks);
   Tensor block_offsets_buf = tmp.slice(0, numel + num_blocks, numel + 2 * num_blocks);
   Tensor total_nonzero_buf = tmp.slice(0, numel + 2 * num_blocks, numel + 2 * num_blocks + 1);
 
-  MPSStream* stream = getCurrentMPSStream();
-  const auto type_str = scalarToMetalTypeString(input);
-
-  // Step 1: prefix sum + block totals
+  // Steps 1+2: compute prefix sums and block offsets entirely on GPU
   dispatch_sync_with_rethrow(stream->queue(), ^() {
     @autoreleasepool {
       auto computeEncoder = stream->commandEncoder();
-      auto kernel_name = fmt::format("count_nonzero_prefix_sum_{}", type_str);
-      auto pso = lib.getPipelineStateForFunc(kernel_name);
 
-      [computeEncoder setComputePipelineState:pso];
+      [computeEncoder setComputePipelineState:pso_step1];
       mtl_setArgs(computeEncoder, input, prefix_buf, block_sums_buf);
-      [computeEncoder dispatchThreads:MTLSizeMake(numel, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(threads_per_group, 1, 1)];
+      mtl_dispatch1DJob(computeEncoder, pso_step1, numel);
 
-      // Step 2: GPU prefix sum of block_sums → block_offsets + total
-      auto pso_blocks = lib.getPipelineStateForFunc("prefix_sum_blocks");
-      [computeEncoder setComputePipelineState:pso_blocks];
+      [computeEncoder setComputePipelineState:pso_step2];
       mtl_setArgs(computeEncoder, block_sums_buf, block_offsets_buf, total_nonzero_buf, num_blocks);
       uint32_t tg_size_blocks = std::min(1024u, ((num_blocks + 31) / 32) * 32);
       [computeEncoder dispatchThreads:MTLSizeMake(tg_size_blocks, 1, 1)
@@ -369,13 +370,9 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
   dispatch_sync_with_rethrow(stream->queue(), ^() {
     @autoreleasepool {
       auto computeEncoder = stream->commandEncoder();
-      auto kernel_name = fmt::format("scatter_nonzero_indices_{}", type_str);
-      auto pso = lib.getPipelineStateForFunc(kernel_name);
-
-      [computeEncoder setComputePipelineState:pso];
+      [computeEncoder setComputePipelineState:pso_step3];
       mtl_setArgs(computeEncoder, input, prefix_buf, out, ndim_int, input.sizes(), block_offsets_buf);
-      [computeEncoder dispatchThreads:MTLSizeMake(numel, 1, 1)
-                threadsPerThreadgroup:MTLSizeMake(threads_per_group, 1, 1)];
+      mtl_dispatch1DJob(computeEncoder, pso_step3, numel);
     }
   });
 

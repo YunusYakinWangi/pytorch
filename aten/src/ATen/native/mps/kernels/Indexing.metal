@@ -818,6 +818,7 @@ inline bool is_nonzero(T val) {
 }
 
 template <typename T>
+[[max_total_threads_per_threadgroup(1024)]]
 kernel void count_nonzero_prefix_sum(
     const device T* input [[buffer(0)]],
     device int* prefix [[buffer(1)]],
@@ -881,8 +882,10 @@ kernel void count_nonzero_prefix_sum(
 }
 
 // Step 2: exclusive prefix sum of block_sums → block_offsets, and write
-// total nonzero count to a 1-element buffer.  Runs in a single threadgroup
-// (num_blocks <= 32*32 = 1024 for numel < INT_MAX with TG_SIZE = 256).
+// total nonzero count to a 1-element buffer.  Runs in a single threadgroup.
+// Each thread handles ceil(num_blocks / tgsize) consecutive blocks via a
+// serial loop, then the per-thread totals are scanned in parallel.
+[[max_total_threads_per_threadgroup(1024)]]
 kernel void prefix_sum_blocks(
     const device int* block_sums [[buffer(0)]],
     device int* block_offsets [[buffer(1)]],
@@ -894,10 +897,19 @@ kernel void prefix_sum_blocks(
     uint simd_group_id [[simdgroup_index_in_threadgroup]]) {
   uint num_simds = (tgsize + simdgroup_size - 1) / simdgroup_size;
 
-  int val_in = (lid < num_blocks) ? block_sums[lid] : 0;
+  // Each thread handles a contiguous chunk of blocks
+  uint chunk_size = (num_blocks + tgsize - 1) / tgsize;
+  uint start = lid * chunk_size;
+  uint end = min(start + chunk_size, num_blocks);
 
-  // Inclusive SIMD scan
-  int val = val_in;
+  // Serial sum over this thread's chunk
+  int chunk_total = 0;
+  for (uint i = start; i < end; i++) {
+    chunk_total += block_sums[i];
+  }
+
+  // Parallel inclusive prefix sum of chunk_totals across threads
+  int val = chunk_total;
   for (uint offset = 1; offset < simdgroup_size; offset <<= 1) {
     int other = simd_shuffle_and_fill_up(val, 0, static_cast<ushort>(offset));
     val += other;
@@ -930,10 +942,15 @@ kernel void prefix_sum_blocks(
   }
   threadgroup_barrier(mem_flags::mem_threadgroup);
 
-  int exclusive_val = val - val_in + simdgroup_offsets[simd_group_id];
+  // This thread's exclusive offset = inclusive_scan - chunk_total +
+  // simdgroup_offset
+  int thread_offset = val - chunk_total + simdgroup_offsets[simd_group_id];
 
-  if (lid < num_blocks) {
-    block_offsets[lid] = exclusive_val;
+  // Write block_offsets for this thread's chunk using a serial exclusive scan
+  int running = thread_offset;
+  for (uint i = start; i < end; i++) {
+    block_offsets[i] = running;
+    running += block_sums[i];
   }
 
   if (lid == tgsize - 1) {
@@ -945,6 +962,7 @@ kernel void prefix_sum_blocks(
 // Scatter the multi-dimensional indices of nonzero elements.
 // Output layout: out[position * ndim + d] = index along dimension d.
 template <typename T>
+[[max_total_threads_per_threadgroup(1024)]]
 kernel void scatter_nonzero_indices(
     const device T* input [[buffer(0)]],
     const device int* prefix [[buffer(1)]],
