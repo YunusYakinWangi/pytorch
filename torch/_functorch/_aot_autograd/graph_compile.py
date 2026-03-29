@@ -199,8 +199,6 @@ def _hoist_opaque_ref_getattrs(
         info: dict[str, Any] = {"type": type(real_val).__name__}
         if hasattr(real_val, "mesh_dim_names") and real_val.mesh_dim_names is not None:
             info["mesh_dim_names"] = tuple(real_val.mesh_dim_names)
-        else:
-            info["value"] = val
         hoisted_info.append(info)
 
     for get_attr_node, obj_id, _val in hoisted_nodes:
@@ -230,10 +228,13 @@ def _find_parent_device_mesh(args: list[Any]) -> Any:
         real = arg
         if isinstance(arg, FakeScriptObject):
             real = getattr(arg, "real_obj", None) or arg
-        if isinstance(real, DeviceMesh) and real.mesh_dim_names is not None:
-            best_dims = best.mesh_dim_names if best is not None else None
-            if best_dims is None or len(real.mesh_dim_names) > len(best_dims):
+        if isinstance(real, DeviceMesh):
+            if best is None:
                 best = real
+            elif real.mesh_dim_names is not None:
+                best_dims = best.mesh_dim_names if best is not None else None
+                if best_dims is None or len(real.mesh_dim_names) > len(best_dims):
+                    best = real
     return best
 
 
@@ -249,12 +250,10 @@ def _wrap_hoisted_opaque_refs(
     """
     from functools import wraps
 
-    needs_mesh = any("mesh_dim_names" in info for info in info_list)
-
     @wraps(compiled_fn)
     def wrapper(args: list[Any]) -> Any:
-        parent_mesh = _find_parent_device_mesh(args) if needs_mesh else None
-        if needs_mesh and parent_mesh is None:
+        parent_mesh = _find_parent_device_mesh(args)
+        if parent_mesh is None:
             raise RuntimeError(
                 "Cannot find parent DeviceMesh in runtime args to derive "
                 "hoisted submeshes: "
@@ -265,7 +264,7 @@ def _wrap_hoisted_opaque_refs(
                 dim_names = tuple(info["mesh_dim_names"])
                 args.append(parent_mesh[dim_names])
             else:
-                args.append(info["value"])
+                args.append(parent_mesh)
         return compiled_fn(args)
 
     wrapper._boxed_call = True  # type: ignore[attr-defined]
