@@ -634,41 +634,37 @@ def insert_deferred_runtime_asserts(
                         except TypeError:
                             return None
 
-                    if expr_to_proxy[i0].node.target is not torch.sym_ite:
-                        # Range assertions are unnecessary for SymBool-backed
-                        # symbols since their range is trivially [0, 1].
-
-                        with _set_node_metadata_hook(
-                            gm,
-                            functools.partial(
-                                _node_metadata_hook,
-                                stack_trace=node.meta.get("stack_trace"),
-                                nn_module_stack=node.meta.get("nn_module_stack"),
-                                # nodes added in `apply_runtime_assertion_pass` will have the same annotation
-                                # as the input node to the assertion
-                                custom=node.meta.get("custom"),
-                            ),
-                        ):
-                            if (min_val := convert(vr.lower)) is not None:
-                                ge = _sympy_interp(expr_to_proxy, i0 >= min_val).node
-                                graph.call_function(
-                                    torch.ops.aten._assert_scalar.default,
-                                    (
-                                        ge,
-                                        f"Runtime assertion failed for expression {i0 >= min_val} on node '{ge}'",
-                                    ),
-                                )
-                                added_asserts.add(i0 >= min_val)
-                            if (max_val := convert(vr.upper)) is not None:
-                                le = _sympy_interp(expr_to_proxy, i0 <= max_val).node
-                                graph.call_function(
-                                    torch.ops.aten._assert_scalar.default,
-                                    (
-                                        le,
-                                        f"Runtime assertion failed for expression {i0 <= max_val} on node '{le}'",
-                                    ),
-                                )
-                                added_asserts.add(i0 <= max_val)
+                    with _set_node_metadata_hook(
+                        gm,
+                        functools.partial(
+                            _node_metadata_hook,
+                            stack_trace=node.meta.get("stack_trace"),
+                            nn_module_stack=node.meta.get("nn_module_stack"),
+                            # nodes added in `apply_runtime_assertion_pass` will have the same annotation
+                            # as the input node to the assertion
+                            custom=node.meta.get("custom"),
+                        ),
+                    ):
+                        if (min_val := convert(vr.lower)) is not None:
+                            ge = _sympy_interp(expr_to_proxy, i0 >= min_val).node
+                            graph.call_function(
+                                torch.ops.aten._assert_scalar.default,
+                                (
+                                    ge,
+                                    f"Runtime assertion failed for expression {i0 >= min_val} on node '{ge}'",
+                                ),
+                            )
+                            added_asserts.add(i0 >= min_val)
+                        if (max_val := convert(vr.upper)) is not None:
+                            le = _sympy_interp(expr_to_proxy, i0 <= max_val).node
+                            graph.call_function(
+                                torch.ops.aten._assert_scalar.default,
+                                (
+                                    le,
+                                    f"Runtime assertion failed for expression {i0 <= max_val} on node '{le}'",
+                                ),
+                            )
+                            added_asserts.add(i0 <= max_val)
 
                 constrained_unbacked_symbols.add(i0)
                 add_runtime_asserts(ras)
