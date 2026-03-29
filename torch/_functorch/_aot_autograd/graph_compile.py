@@ -197,8 +197,10 @@ def _hoist_opaque_ref_getattrs(
         joint_inputs[0].append(val)
 
         info: dict[str, Any] = {"type": type(real_val).__name__}
-        if hasattr(real_val, "mesh_dim_names"):
+        if hasattr(real_val, "mesh_dim_names") and real_val.mesh_dim_names is not None:
             info["mesh_dim_names"] = tuple(real_val.mesh_dim_names)
+        else:
+            info["value"] = val
         hoisted_info.append(info)
 
     for get_attr_node, obj_id, _val in hoisted_nodes:
@@ -247,18 +249,23 @@ def _wrap_hoisted_opaque_refs(
     """
     from functools import wraps
 
+    needs_mesh = any("mesh_dim_names" in info for info in info_list)
+
     @wraps(compiled_fn)
     def wrapper(args: list[Any]) -> Any:
-        parent_mesh = _find_parent_device_mesh(args)
-        if parent_mesh is None:
+        parent_mesh = _find_parent_device_mesh(args) if needs_mesh else None
+        if needs_mesh and parent_mesh is None:
             raise RuntimeError(
                 "Cannot find parent DeviceMesh in runtime args to derive "
                 "hoisted submeshes: "
                 f"{[i.get('mesh_dim_names') for i in info_list]}"
             )
         for info in info_list:
-            dim_names = tuple(info["mesh_dim_names"])
-            args.append(parent_mesh[dim_names])
+            if "mesh_dim_names" in info:
+                dim_names = tuple(info["mesh_dim_names"])
+                args.append(parent_mesh[dim_names])
+            else:
+                args.append(info["value"])
         return compiled_fn(args)
 
     wrapper._boxed_call = True  # type: ignore[attr-defined]
