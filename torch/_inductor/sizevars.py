@@ -472,27 +472,19 @@ class SizeVarAllocator:
         if len(free_symbols(numerator)) > 15:
             return False
 
-        try:
-            # Attempt to prove divisibility via algebraic cancellation.
-            # This is critical for resolving regressions in vision models (e.g., MaskRCNN).
-            div = sympy.cancel(numerator / denominator)
-            if not div.has(sympy.Mod) and div.is_integer:
-                return True
-        except Exception:
-            pass
-
-        try:
-           # Fallback to GCD-based verification for additive symbolic expressions
-            # e.g., proving (2*a + 2*b) is a multiple of 2.
-            common = sympy.gcd(numerator, denominator)
-            if common == denominator:
-                return True
-        except Exception:
-            pass
-
         # Final fallback using standard ShapeEnv truth-proving mechanism
         expr = sympy.Eq(sympy.Mod(numerator, denominator), 0)
         return self.statically_known_true(expr)  # type: ignore[arg-type]
+
+    def statically_known_power_of_2(self, expr: Expr) -> bool:
+        return isinstance(expr, sympy.Integer) and is_power_of_2(int(expr))
+
+    def expect_true(self, expr: Expr) -> bool:
+        if not self.statically_known_true(expr):
+            return self.shape_env.guard_or_defer_runtime_assert(
+                expr, "sizevars.expect_true"
+            )
+        return True
     
     def check(self, expr: Expr) -> None:
         """
