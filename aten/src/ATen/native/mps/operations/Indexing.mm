@@ -289,25 +289,12 @@ TORCH_IMPL_FUNC(index_copy_out_mps)(const Tensor& self,
   });
 }
 
-static Tensor nonzero_fallback(const Tensor& self) {
-  return at::nonzero(self.to("cpu")).to("mps");
-}
-
 // Metal kernel-based nonzero using prefix-sum + scatter.
-// Phase 1: Compute per-element exclusive prefix sum of nonzero flags and
-//          per-threadgroup totals.
-// Host:    Read back block totals, compute block offsets, allocate output.
-// Phase 2: Scatter multi-dimensional indices into the output.
+// Step 1: Per-element exclusive prefix sum of nonzero flags + block totals.
+// Step 2: GPU prefix sum of block totals → block offsets + total count.
+// Host:   Read back 1 int (total count), allocate output.
+// Step 3: Scatter multi-dimensional indices into the output.
 Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
-  if (self.is_complex()) {
-    TORCH_WARN_ONCE("MPS: nonzero op is not supported for complex datatypes. ",
-                    "Falling back on CPU. This may have performance implications.");
-    Tensor out_fallback = nonzero_fallback(self);
-    at::native::resize_output(out_, out_fallback.sizes());
-    out_.copy_(out_fallback);
-    return out_;
-  }
-
   int64_t nDim = self.dim();
   if (self.numel() == 0) {
     at::native::resize_output(out_, {0, nDim});
@@ -330,34 +317,36 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
   TORCH_CHECK(out_.is_mps());
 
   Tensor input = self.contiguous();
-  uint32_t numel = static_cast<uint32_t>(input.numel());
+  const auto numel = static_cast<uint32_t>(input.numel());
 
   constexpr uint32_t threads_per_group = 256;
   uint32_t num_blocks = (numel + threads_per_group - 1) / threads_per_group;
 
-  // Allocate temporary buffers for prefix sums, block totals, and block offsets
-  Tensor prefix_buf = at::empty({static_cast<int64_t>(numel)}, input.options().dtype(kInt));
-  Tensor block_sums_buf = at::empty({static_cast<int64_t>(num_blocks)}, input.options().dtype(kInt));
-  Tensor block_offsets_buf = at::empty({static_cast<int64_t>(num_blocks)}, input.options().dtype(kInt));
-  Tensor total_nonzero_buf = at::empty({1}, input.options().dtype(kInt));
+  // Single allocation for all temporary int32 buffers:
+  // [prefix (numel) | block_sums (num_blocks) | block_offsets (num_blocks) | total (1)]
+  const auto tmp = at::empty({input.numel() + 2 * num_blocks + 1}, input.options().dtype(kInt));
+  Tensor prefix_buf = tmp.slice(0, 0, numel);
+  Tensor block_sums_buf = tmp.slice(0, numel, numel + num_blocks);
+  Tensor block_offsets_buf = tmp.slice(0, numel + num_blocks, numel + 2 * num_blocks);
+  Tensor total_nonzero_buf = tmp.slice(0, numel + 2 * num_blocks, numel + 2 * num_blocks + 1);
 
   MPSStream* stream = getCurrentMPSStream();
   const auto type_str = scalarToMetalTypeString(input);
 
-  // Phase 1: prefix sum + block totals
+  // Step 1: prefix sum + block totals
   dispatch_sync_with_rethrow(stream->queue(), ^() {
     @autoreleasepool {
-      id<MTLComputeCommandEncoder> computeEncoder = stream->commandEncoder();
+      auto computeEncoder = stream->commandEncoder();
       auto kernel_name = fmt::format("count_nonzero_prefix_sum_{}", type_str);
-      id<MTLComputePipelineState> pso = lib.getPipelineStateForFunc(kernel_name);
+      auto pso = lib.getPipelineStateForFunc(kernel_name);
 
       [computeEncoder setComputePipelineState:pso];
-      mtl_setArgs(computeEncoder, input, prefix_buf, block_sums_buf, numel);
+      mtl_setArgs(computeEncoder, input, prefix_buf, block_sums_buf);
       [computeEncoder dispatchThreads:MTLSizeMake(numel, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(threads_per_group, 1, 1)];
 
-      // Phase 1.5: GPU prefix sum of block_sums → block_offsets + total
-      id<MTLComputePipelineState> pso_blocks = lib.getPipelineStateForFunc("prefix_sum_blocks");
+      // Step 2: GPU prefix sum of block_sums → block_offsets + total
+      auto pso_blocks = lib.getPipelineStateForFunc("prefix_sum_blocks");
       [computeEncoder setComputePipelineState:pso_blocks];
       mtl_setArgs(computeEncoder, block_sums_buf, block_offsets_buf, total_nonzero_buf, num_blocks);
       uint32_t tg_size_blocks = std::min(1024u, ((num_blocks + 31) / 32) * 32);
@@ -366,28 +355,19 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
     }
   });
 
-  // Sync to read back just the total count (1 int instead of all block_sums)
-  dispatch_sync_with_rethrow(stream->queue(), ^() {
-    stream->synchronize(SyncType::COMMIT_AND_WAIT);
-  });
-
-  int64_t total_nonzero = total_nonzero_buf.item<int>();
+  const int64_t total_nonzero = total_nonzero_buf.item<int>();
 
   at::native::resize_output(out_, {total_nonzero, nDim});
-  if (total_nonzero == 0 || out_.numel() == 0) {
+  if (out_.numel() == 0) {
     return out_;
   }
 
   bool contiguous_output = out_.is_contiguous();
   Tensor out = contiguous_output ? out_ : at::empty_like(out_, MemoryFormat::Contiguous);
 
-  std::vector<int64_t> sizes_vec(input.sizes().begin(), input.sizes().end());
-  Tensor sizes_buf = at::empty({nDim}, input.options().dtype(kLong));
-  sizes_buf.copy_(at::from_blob(sizes_vec.data(), {nDim}, at::kLong));
-
   int ndim_int = static_cast<int>(nDim);
 
-  // Phase 2: scatter indices (block_offsets already on GPU)
+  // Step 3: scatter indices (block_offsets already on GPU)
   dispatch_sync_with_rethrow(stream->queue(), ^() {
     @autoreleasepool {
       id<MTLComputeCommandEncoder> computeEncoder = stream->commandEncoder();
@@ -395,7 +375,7 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
       id<MTLComputePipelineState> pso = lib.getPipelineStateForFunc(kernel_name);
 
       [computeEncoder setComputePipelineState:pso];
-      mtl_setArgs(computeEncoder, input, prefix_buf, out, numel, ndim_int, sizes_buf, block_offsets_buf);
+      mtl_setArgs(computeEncoder, input, prefix_buf, out, ndim_int, input.sizes(), block_offsets_buf);
       [computeEncoder dispatchThreads:MTLSizeMake(numel, 1, 1)
                 threadsPerThreadgroup:MTLSizeMake(threads_per_group, 1, 1)];
     }
@@ -409,12 +389,6 @@ Tensor& nonzero_out_mps(const Tensor& self, Tensor& out_) {
 }
 
 Tensor nonzero_mps(const Tensor& self) {
-  if (self.is_complex()) {
-    TORCH_WARN_ONCE("MPS: nonzero op is not supported for complex datatypes ",
-                    "Falling back on CPU. This may have performance implications.");
-    return nonzero_fallback(self);
-  }
-
   Tensor out = at::empty({0}, self.options().dtype(kLong));
   return nonzero_out_mps(self, out);
 }

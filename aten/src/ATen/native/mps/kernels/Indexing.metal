@@ -794,25 +794,34 @@ INSTANTIATE_INDEX_FILL_FROM_MASK(half2)
 
 // Nonzero kernel implementation using prefix-sum + scatter approach.
 //
-// Phase 1 (count_nonzero_prefix_sum): Each threadgroup processes a chunk of the
-// flattened input. Within each threadgroup we compute an exclusive prefix sum
-// of the nonzero flags. The total count for each threadgroup is written to a
-// small auxiliary buffer (block_sums). The prefix sum values are written to a
-// temporary buffer (prefix) so phase 2 can look up output positions.
+// Step 1 (count_nonzero_prefix_sum): Each threadgroup computes an exclusive
+// prefix sum of the nonzero flags over its chunk. Per-threadgroup totals are
+// written to block_sums.
 //
-// Between phases the host reads back the block_sums, computes a CPU-side prefix
-// sum to get per-block offsets, and allocates the output tensor.
+// Step 2 (prefix_sum_blocks): A single threadgroup computes the exclusive
+// prefix sum of block_sums → block_offsets and writes the total nonzero count
+// to a 1-element buffer. The host reads back only that single int, then
+// allocates the output tensor.
 //
-// Phase 2 (scatter_nonzero_indices): Each thread with a nonzero element writes
+// Step 3 (scatter_nonzero_indices): Each thread with a nonzero element writes
 // its multi-dimensional indices into the output at the position determined by
-// block_offset + prefix[flat_idx].
+// block_offsets[tgid] + prefix[tid].
+
+template <typename T, enable_if_t<!is_complex_v<T>, bool> = true>
+inline bool is_nonzero(T val) {
+  return val != T(0);
+}
+
+template <typename T, enable_if_t<is_complex_v<T>, bool> = true>
+inline bool is_nonzero(T val) {
+  return val.x != 0 || val.y != 0;
+}
 
 template <typename T>
 kernel void count_nonzero_prefix_sum(
     const device T* input [[buffer(0)]],
     device int* prefix [[buffer(1)]],
     device int* block_sums [[buffer(2)]],
-    constant uint& numel [[buffer(3)]],
     uint tid [[thread_position_in_grid]],
     uint lid [[thread_position_in_threadgroup]],
     uint tgsize [[threads_per_threadgroup]],
@@ -821,10 +830,7 @@ kernel void count_nonzero_prefix_sum(
     uint simd_group_id [[simdgroup_index_in_threadgroup]]) {
   uint num_simds = (tgsize + simdgroup_size - 1) / simdgroup_size;
 
-  int flag = 0;
-  if (tid < numel) {
-    flag = (input[tid] != T(0)) ? 1 : 0;
-  }
+  int flag = is_nonzero(input[tid]) ? 1 : 0;
 
   // Inclusive prefix sum within SIMD group using shuffle
   int val = flag;
@@ -866,9 +872,7 @@ kernel void count_nonzero_prefix_sum(
 
   int exclusive_val = val - flag + simdgroup_offsets[simd_group_id];
 
-  if (tid < numel) {
-    prefix[tid] = exclusive_val;
-  }
+  prefix[tid] = exclusive_val;
 
   if (lid == tgsize - 1) {
     block_sums[tgid] =
@@ -876,7 +880,7 @@ kernel void count_nonzero_prefix_sum(
   }
 }
 
-// Phase 1.5: exclusive prefix sum of block_sums → block_offsets, and write
+// Step 2: exclusive prefix sum of block_sums → block_offsets, and write
 // total nonzero count to a 1-element buffer.  Runs in a single threadgroup
 // (num_blocks <= 32*32 = 1024 for numel < INT_MAX with TG_SIZE = 256).
 kernel void prefix_sum_blocks(
@@ -945,15 +949,12 @@ kernel void scatter_nonzero_indices(
     const device T* input [[buffer(0)]],
     const device int* prefix [[buffer(1)]],
     device int64_t* output [[buffer(2)]],
-    constant uint& numel [[buffer(3)]],
-    constant int& ndim [[buffer(4)]],
-    constant int64_t* sizes [[buffer(5)]],
-    constant int* block_offsets [[buffer(6)]],
+    constant int& ndim [[buffer(3)]],
+    constant int64_t* sizes [[buffer(4)]],
+    constant int* block_offsets [[buffer(5)]],
     uint tid [[thread_position_in_grid]],
     uint tgid [[threadgroup_position_in_grid]]) {
-  if (tid >= numel)
-    return;
-  if (input[tid] == T(0))
+  if (!is_nonzero(input[tid]))
     return;
 
   int pos = block_offsets[tgid] + prefix[tid];
@@ -973,7 +974,6 @@ kernel void scatter_nonzero_indices(
       const device DTYPE* input [[buffer(0)]],                               \
       device int* prefix [[buffer(1)]],                                      \
       device int* block_sums [[buffer(2)]],                                  \
-      constant uint& numel [[buffer(3)]],                                    \
       uint tid [[thread_position_in_grid]],                                  \
       uint lid [[thread_position_in_threadgroup]],                           \
       uint tgsize [[threads_per_threadgroup]],                               \
@@ -986,10 +986,9 @@ kernel void scatter_nonzero_indices(
       const device DTYPE* input [[buffer(0)]],                               \
       const device int* prefix [[buffer(1)]],                                \
       device int64_t* output [[buffer(2)]],                                  \
-      constant uint& numel [[buffer(3)]],                                    \
-      constant int& ndim [[buffer(4)]],                                      \
-      constant int64_t* sizes [[buffer(5)]],                                 \
-      constant int* block_offsets [[buffer(6)]],                             \
+      constant int& ndim [[buffer(3)]],                                      \
+      constant int64_t* sizes [[buffer(4)]],                                 \
+      constant int* block_offsets [[buffer(5)]],                             \
       uint tid [[thread_position_in_grid]],                                  \
       uint tgid [[threadgroup_position_in_grid]])
 
@@ -1002,3 +1001,5 @@ REGISTER_NONZERO_KERNELS(short);
 REGISTER_NONZERO_KERNELS(char);
 REGISTER_NONZERO_KERNELS(uchar);
 REGISTER_NONZERO_KERNELS(bool);
+REGISTER_NONZERO_KERNELS(float2);
+REGISTER_NONZERO_KERNELS(half2);
