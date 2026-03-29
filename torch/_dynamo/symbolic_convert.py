@@ -2816,6 +2816,12 @@ class InstructionTranslatorBase(
 
     def DELETE_ATTR(self, inst: Instruction) -> None:
         obj = self.pop()
+        try:
+            attr_var = obj.var_getattr(self, inst.argval)  # type: ignore[arg-type]
+            if isinstance(attr_var, TensorVariable):
+                self._maybe_emit_sync_dealloc(attr_var)
+        except Exception:
+            pass
         VariableTracker.build(self, delattr).call_function(
             self,  # type: ignore[arg-type]
             [obj, VariableTracker.build(self, inst.argval)],
@@ -3370,6 +3376,12 @@ class InstructionTranslatorBase(
 
     def DELETE_SUBSCR(self, inst: Instruction) -> None:
         obj, key = self.popn(2)
+        try:
+            item_var = obj.call_method(self, "__getitem__", [key], {})
+            if isinstance(item_var, TensorVariable):
+                self._maybe_emit_sync_dealloc(item_var)
+        except Exception:
+            pass
         obj.call_method(self, "__delitem__", [key], {})
 
     def BUILD_TUPLE(self, inst: Instruction) -> None:
