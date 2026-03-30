@@ -1722,77 +1722,174 @@ class TestViewOps(DTensorContinuousTestBase):
         self.assertEqual(unflattened._local_tensor, expected_local)
 
     def test_strided_shard_propagates_through_pointwise(self):
-        """Single-dim strategy ops should propagate _StridedShard without redistribution."""
-        mesh = init_device_mesh(self.device_type, (self.world_size,))
-        for shard_dim in [1, 2]:
-            shape = (4, self.world_size * 2, 6)
-            full = torch.randn(*shape, device=self.device_type)
-            dt = distribute_tensor(full, mesh, [Shard(shard_dim)])
-            dt_flat = dt.flatten(0, 1)
-            flat_full = full.flatten(0, 1)
+        """Single-dim strategy ops should propagate _StridedShard without redistribution.
 
-            self.assertIsInstance(dt_flat.placements[0], _StridedShard)
-
-            comm_mode = CommDebugMode()
-
-            # Pointwise unary: _StridedShard preserved, zero comms
-            with comm_mode:
-                result = torch.relu(dt_flat)
-            self.assertEqual(result.full_tensor(), torch.relu(flat_full))
-            self.assertIsInstance(result.placements[0], _StridedShard)
-            self.assertEqual(comm_mode.get_total_counts(), 0)
-
-            # Pointwise binary: same
-            with comm_mode:
-                result = dt_flat + 1.0
-            self.assertEqual(result.full_tensor(), flat_full + 1.0)
-            self.assertIsInstance(result.placements[0], _StridedShard)
-            self.assertEqual(comm_mode.get_total_counts(), 0)
-
-            # Matmul (single-dim strategy takes priority for mm)
-            weight = torch.randn(shape[2], 5, device=self.device_type)
-            dt_w = distribute_tensor(weight, mesh, [Replicate()])
-            with comm_mode:
-                result = dt_flat @ dt_w
-            self.assertEqual(result.full_tensor(), flat_full @ weight)
-            self.assertIsInstance(result.placements[0], _StridedShard)
-            self.assertEqual(comm_mode.get_total_counts(), 0)
-
-    def test_strided_shard_redistributes_for_reduction(self):
-        """Verify _StridedShard redistribution behavior for reductions:
-        - Reduction on shard dim: redistribution happens, result correct
-        - Reduction on non-shard dim: _StridedShard preserved, no redistribution
+        Uses a 1D mesh. Only Shard(1) produces _StridedShard after
+        flatten(0, 1); Shard on dims outside the flatten range just shifts
+        the dim number.
         """
         mesh = init_device_mesh(self.device_type, (self.world_size,))
-        for shard_dim in [1, 2]:
-            shape = (4, self.world_size * 2, 6)
-            full = torch.randn(*shape, device=self.device_type)
-            dt = distribute_tensor(full, mesh, [Shard(shard_dim)])
-            dt_flat = dt.flatten(0, 1)
-            flat_full = full.flatten(0, 1)
+        shape = (4, self.world_size * 2, 6)
+        full = torch.randn(*shape, device=self.device_type)
+        dt = distribute_tensor(full, mesh, [Shard(1)])
+        dt_flat = dt.flatten(0, 1)
 
-            self.assertIsInstance(dt_flat.placements[0], _StridedShard)
+        self.assertIsInstance(dt_flat.placements[0], _StridedShard)
 
-            comm_mode = CommDebugMode()
+        comm_mode = CommDebugMode()
 
-            # Reduction on shard dim (dim 0): redistribution must happen
-            with comm_mode:
-                result = dt_flat.sum(dim=0)
-            self.assertEqual(result.full_tensor(), flat_full.sum(dim=0))
-            self.assertGreater(comm_mode.get_total_counts(), 0)
+        flat_full = full.flatten(0, 1)
 
-            # Full reduction: redistribution must happen
-            with comm_mode:
-                result = dt_flat.sum()
-            self.assertEqual(result.full_tensor(), flat_full.sum())
-            self.assertGreater(comm_mode.get_total_counts(), 0)
+        # Pointwise unary: _StridedShard preserved, zero comms
+        with comm_mode:
+            result = torch.relu(dt_flat)
+        self.assertIsInstance(result.placements[0], _StridedShard)
+        self.assertEqual(comm_mode.get_total_counts(), 0)
+        self.assertEqual(result.full_tensor(), torch.relu(flat_full))
 
-            # Reduction on non-shard dim: _StridedShard preserved
-            with comm_mode:
-                result = dt_flat.sum(dim=-1)
-            self.assertEqual(result.full_tensor(), flat_full.sum(dim=-1))
-            self.assertIsInstance(result.placements[0], _StridedShard)
-            self.assertEqual(comm_mode.get_total_counts(), 0)
+        # Pointwise binary: same
+        with comm_mode:
+            result = dt_flat + 1.0
+        self.assertIsInstance(result.placements[0], _StridedShard)
+        self.assertEqual(comm_mode.get_total_counts(), 0)
+        self.assertEqual(result.full_tensor(), flat_full + 1.0)
+
+        # Matmul (single-dim strategy takes priority for mm)
+        weight = torch.randn(shape[2], 5, device=self.device_type)
+        dt_w = distribute_tensor(weight, mesh, [Replicate()])
+        with comm_mode:
+            result = dt_flat @ dt_w
+        self.assertIsInstance(result.placements[0], _StridedShard)
+        self.assertEqual(comm_mode.get_total_counts(), 0)
+        self.assertEqual(result.full_tensor(), flat_full @ weight)
+
+    def test_strided_shard_reduction_behavior(self):
+        """Verify _StridedShard behavior for reductions on a 1D mesh.
+
+        map_placements_after_reduction handles Shard | _StridedShard natively:
+        reduction on shard dim produces Partial locally (0 comms), reduction on
+        non-shard dim preserves _StridedShard.
+        """
+        mesh = init_device_mesh(self.device_type, (self.world_size,))
+        shape = (4, self.world_size * 2, 6)
+        full = torch.randn(*shape, device=self.device_type)
+        dt = distribute_tensor(full, mesh, [Shard(1)])
+        dt_flat = dt.flatten(0, 1)
+        flat_full = full.flatten(0, 1)
+
+        self.assertIsInstance(dt_flat.placements[0], _StridedShard)
+
+        comm_mode = CommDebugMode()
+
+        # Reduction on shard dim: produces Partial locally, no comms
+        with comm_mode:
+            result = dt_flat.sum(dim=0)
+        self.assertIsInstance(result.placements[0], Partial)
+        self.assertEqual(comm_mode.get_total_counts(), 0)
+        # Partial output has no _StridedShard, so full_tensor() works
+        self.assertEqual(result.full_tensor(), flat_full.sum(dim=0))
+
+        # Full reduction: same — Partial output, no comms during op
+        with comm_mode:
+            result = dt_flat.sum()
+        self.assertIsInstance(result.placements[0], Partial)
+        self.assertEqual(comm_mode.get_total_counts(), 0)
+        self.assertEqual(result.full_tensor(), flat_full.sum())
+
+        # Reduction on non-shard dim: _StridedShard preserved
+        with comm_mode:
+            result = dt_flat.sum(dim=-1)
+        self.assertIsInstance(result.placements[0], _StridedShard)
+        self.assertEqual(comm_mode.get_total_counts(), 0)
+        self.assertEqual(result.full_tensor(), flat_full.sum(dim=-1))
+
+    def _make_strided_shard_2d(self):
+        """Create a DTensor with _StridedShard on a 2D mesh via flatten.
+
+        Returns (mesh, dt_flat, flat_full) where dt_flat has placements
+        [_StridedShard(dim=0, sf=2), Shard(0)] on mesh (ws//2, 2).
+        """
+        mesh = init_device_mesh(self.device_type, (self.world_size // 2, 2))
+        shape = (2, self.world_size, 6)
+        full = torch.randn(*shape, device=self.device_type)
+        dt = distribute_tensor(full, mesh, [Shard(1), Shard(0)])
+        dt_flat = dt.flatten(0, 1)
+        flat_full = full.flatten(0, 1)
+        return mesh, dt_flat, flat_full
+
+    def test_strided_shard_propagates_through_pointwise_2d(self):
+        """Single-dim strategy ops propagate _StridedShard on a 2D mesh.
+
+        Unlike the 1D case, full_tensor() works here because the shard-order
+        decoding can match _StridedShard(sf=2) against mesh.size(1)=2.
+        """
+        mesh, dt_flat, flat_full = self._make_strided_shard_2d()
+
+        self.assertIsInstance(dt_flat.placements[0], _StridedShard)
+
+        comm_mode = CommDebugMode()
+
+        # Pointwise unary
+        with comm_mode:
+            result = torch.relu(dt_flat)
+        self.assertIsInstance(result.placements[0], _StridedShard)
+        self.assertEqual(comm_mode.get_total_counts(), 0)
+        self.assertEqual(result.full_tensor(), torch.relu(flat_full))
+
+        # Pointwise binary
+        with comm_mode:
+            result = dt_flat + 1.0
+        self.assertIsInstance(result.placements[0], _StridedShard)
+        self.assertEqual(comm_mode.get_total_counts(), 0)
+        self.assertEqual(result.full_tensor(), flat_full + 1.0)
+
+        # Matmul (single-dim strategy)
+        weight = torch.randn(6, 5, device=self.device_type)
+        dt_w = distribute_tensor(weight, mesh, [Replicate(), Replicate()])
+        with comm_mode:
+            result = dt_flat @ dt_w
+        self.assertIsInstance(result.placements[0], _StridedShard)
+        self.assertEqual(comm_mode.get_total_counts(), 0)
+        self.assertEqual(result.full_tensor(), flat_full @ weight)
+
+    def test_strided_shard_reduction_behavior_2d(self):
+        """Verify _StridedShard reduction behavior on a 2D mesh with full_tensor() verification."""
+        mesh, dt_flat, flat_full = self._make_strided_shard_2d()
+
+        self.assertIsInstance(dt_flat.placements[0], _StridedShard)
+
+        comm_mode = CommDebugMode()
+
+        # Reduction on shard dim: produces Partial
+        with comm_mode:
+            result = dt_flat.sum(dim=0)
+        self.assertIsInstance(result.placements[0], Partial)
+        self.assertEqual(result.full_tensor(), flat_full.sum(dim=0))
+
+        # Full reduction
+        with comm_mode:
+            result = dt_flat.sum()
+        self.assertIsInstance(result.placements[0], Partial)
+        self.assertEqual(result.full_tensor(), flat_full.sum())
+
+        # Reduction on non-shard dim: _StridedShard preserved
+        with comm_mode:
+            result = dt_flat.sum(dim=-1)
+        self.assertIsInstance(result.placements[0], _StridedShard)
+        self.assertEqual(comm_mode.get_total_counts(), 0)
+        self.assertEqual(result.full_tensor(), flat_full.sum(dim=-1))
+
+    def test_strided_shard_redistribution(self):
+        """Verify _StridedShard -> Replicate redistribution on a 2D mesh."""
+        mesh, dt_flat, flat_full = self._make_strided_shard_2d()
+
+        self.assertIsInstance(dt_flat.placements[0], _StridedShard)
+
+        comm_mode = CommDebugMode()
+        with comm_mode:
+            result = dt_flat.redistribute(mesh, [Replicate(), Replicate()])
+        self.assertEqual(result._local_tensor, flat_full)
+        self.assertGreater(comm_mode.get_total_counts(), 0)
 
     def test_view_redistribution(self):
         """
