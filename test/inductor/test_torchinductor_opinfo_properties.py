@@ -241,7 +241,6 @@ INDUCTOR_NUMERICS_OPTIONS = {
     "emulate_precision_casts": True,
     "eager_numerics.division_rounding": True,
     "eager_numerics.disable_ftz": True,
-    "eager_numerics.use_pytorch_libdevice": True,
 }
 
 

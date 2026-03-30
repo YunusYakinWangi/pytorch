@@ -83,8 +83,7 @@ class TestFullyShardDTensor(FSDPTest):
             loss.backward()
             optim.step()
 
-            loss_cmp = loss.full_tensor() if isinstance(loss, DTensor) else loss
-            self.assertEqual(ref_loss, loss_cmp)
+            self.assertEqual(ref_loss, loss)
 
         for (n1, p1), (n2, p2) in zip(
             ref_model.named_parameters(), model.named_parameters(), strict=True

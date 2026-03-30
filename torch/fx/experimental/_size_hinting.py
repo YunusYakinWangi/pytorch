@@ -23,11 +23,6 @@ from torch.utils._sympy.numbers import int_oo
 
 log = logging.getLogger(__name__)
 
-# Maximum number of free symbols in an expression before we skip
-# sympy.factor() in optimization_hint process for unbacked.
-# Factoring polynomials with many variables is expensive.
-SYMPY_FACTOR_MAX_FREE_SYMBOLS = 50
-
 if TYPE_CHECKING:
     from torch.fx.experimental.symbolic_shapes import ShapeEnv
 
@@ -302,7 +297,9 @@ def _sub_unbacked_exprs(shape_env: ShapeEnv, expr: sympy.Expr) -> sympy.Expr:
         new_expr = expr.subs(replacements)
         if new_expr == expr:
             break
-        if len(new_expr.free_symbols) <= SYMPY_FACTOR_MAX_FREE_SYMBOLS:
+        # Limit sympy.factor() to expressions with <= 200 free symbols,
+        # as factoring polynomials with many variables is expensive.
+        if len(new_expr.free_symbols) <= 200:
             expr = sympy.factor(new_expr)
         else:
             expr = new_expr
@@ -394,10 +391,9 @@ def _optimization_hint_base(
     if has_free_unbacked_symbols(expr):
         # Make sure to substitute with the factored version
         # e.g. 10*(s0 + u0) instead of 10*s0 + 10*u0
-        if (
-            isinstance(original, sympy.Expr)
-            and len(original.free_symbols) <= SYMPY_FACTOR_MAX_FREE_SYMBOLS
-        ):
+        # Limit sympy.factor() to expressions with <= 200 free symbols,
+        # as factoring polynomials with many variables is expensive.
+        if isinstance(original, sympy.Expr) and len(original.free_symbols) <= 200:
             original = sympy.factor(original)
         expr = _sub_unbacked_exprs(shape_env, original)
 

@@ -32,7 +32,6 @@ from torch.testing._internal.common_dtype import (
     all_types_and,
     all_types_and_complex_and,
     all_types_complex_float8_and,
-    highest_precision_float,
 )
 from torch.testing._internal.common_utils import (
     DeterministicGuard,
@@ -1218,7 +1217,7 @@ class TestIndexing(TestCase):
 
     @onlyNativeDeviceTypes
     def test_index_put_accumulate_duplicate_indices(self, device):
-        dtype = highest_precision_float(device)
+        dtype = torch.float if device.startswith("mps") else torch.double
         for i in range(1, 512):
             # generate indices by random walk, this will create indices with
             # lots of duplicates interleaved with each other

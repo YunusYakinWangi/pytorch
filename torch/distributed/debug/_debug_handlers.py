@@ -228,10 +228,9 @@ class PySpyHandler(DebugHandler):
         return {"pyspy_dump.html": PYSPY_DUMP_TEMPLATE}
 
     def _handle(self, req: HTTPRequestHandler) -> bytes:
-        query = req.get_raw_query()
-        if "nonblocking" not in query:
-            query = f"nonblocking=1&{query}" if query else "nonblocking=1"
-        addrs, resps = fetch_all("pyspy_dump", query, timeout=self.fetch_timeout)
+        addrs, resps = fetch_all(
+            "pyspy_dump", req.get_raw_query(), timeout=self.fetch_timeout
+        )
         return req.frontend.render_template(
             "pyspy_dump.html",
             addrs=addrs,
@@ -239,9 +238,7 @@ class PySpyHandler(DebugHandler):
         )
 
     def dump(self) -> str | None:
-        addrs, resps = fetch_all(
-            "pyspy_dump", "nonblocking=1", timeout=self.fetch_timeout
-        )
+        addrs, resps = fetch_all("pyspy_dump", timeout=self.fetch_timeout)
         parts: list[str] = []
         summary = format_fetch_summary(addrs, resps)
         if summary:

@@ -20,7 +20,6 @@
     set_device_idx
     current_device_index
     current_device_idx
-    get_device_capability
     set_stream
     current_stream
     synchronize
@@ -51,7 +50,6 @@
     :nosignatures:
 
      empty_cache
-     empty_host_cache
      get_memory_info
      max_memory_allocated
      max_memory_reserved
