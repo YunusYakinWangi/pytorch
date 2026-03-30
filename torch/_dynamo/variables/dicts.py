@@ -1516,6 +1516,18 @@ class SetVariable(ConstDictVariable):
             )
         return super().call_method(tx, name, args, kwargs)
 
+    def contains_impl(
+        self, tx: "InstructionTranslator", item: VariableTracker
+    ) -> VariableTracker:
+        # https://github.com/python/cpython/blob/8e9d21c64b65edda99a0d38e8d23545b17f8455e/Objects/setobject.c#L2501-L2520
+        # Unlike most container types, set allows membership testing with a set
+        # key, even though it is not hashable.
+        # if isinstance(item, SetVariable) and self.python_type() is set:
+        if isinstance(item, SetVariable) and item.python_type() is set:
+            frozenset_item = variables.FrozensetVariable(item.items)
+            return super().contains_impl(tx, frozenset_item)
+        return super().contains_impl(tx, item)
+
     def python_type_var(self) -> "BuiltinVariable":
         return variables.BuiltinVariable(set)
 
