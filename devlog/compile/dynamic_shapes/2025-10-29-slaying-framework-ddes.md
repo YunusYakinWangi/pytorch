@@ -69,3 +69,9 @@ A big thank you to Brian Hirsh ([@bdhirsh](https://github.com/bdhirsh)) for the 
 Pian Pawakapan ([@pianpwk](https://github.com/pianpwk)) deserves special recognition for addressing DDEs across several operations — notably slicing, stride ordering, expand — and for leading the exportability benchmark, identifying crucial DDE sources along the way.
 
 Finally, Colin Peppler ([@colinpeppler](https://github.com/colinpeppler)) has been instrumental in continuously reporting and tracking user DDE issues in addition to addressing many DDEs in many ops.
+
+## References
+
+- [Guard-Free Dynamic Shapes — original initiative post](./2025-07-08-guard-free-dynamic-shapes.md)
+- [`torch/fx/experimental/symbolic_shapes.py`](../../../torch/fx/experimental/symbolic_shapes.py) — symbolic shape infrastructure
+- [Backed to Unbacked — broader context](./2026-01-20-backed-to-unbacked.md)
