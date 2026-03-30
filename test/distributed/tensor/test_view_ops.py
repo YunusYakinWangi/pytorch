@@ -2077,6 +2077,21 @@ class TestViewOps(DTensorContinuousTestBase):
         expected = torch.nn.functional.embedding(full_idx.flatten(0, 1), emb.weight)
         self.assertEqual(result.full_tensor(), expected)
 
+    def test_strided_shard_cat(self):
+        """Verify _StridedShard correctness through cat on non-shard dim."""
+        mesh = init_device_mesh(self.device_type, (self.world_size,))
+        shape = (4, self.world_size * 2, 6)
+        full = torch.randn(*shape, device=self.device_type)
+        dt = distribute_tensor(full, mesh, [Shard(1)])
+        dt_flat = dt.flatten(0, 1)
+
+        self.assertIsInstance(dt_flat.placements[0], _StridedShard)
+
+        # cat along non-shard dim
+        result = torch.cat([dt_flat, dt_flat], dim=-1)
+        expected = torch.cat([full.flatten(0, 1), full.flatten(0, 1)], dim=-1)
+        self.assertEqual(result.full_tensor(), expected)
+
     def test_view_redistribution(self):
         """
         This test is added to demonstrate "incorrect" view ops behavior if redistribution happens.
