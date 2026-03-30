@@ -7526,11 +7526,6 @@ class Scheduler:
 
             self.enter_context(node)
 
-            # Emit deferred alignment copies for inputs first used by this node
-            V.graph.wrapper_code.codegen_deferred_alignment_copies(
-                dep.name for dep in node.read_writes.reads
-            )
-
             # pyrefly: ignore [unbound-name]
             if config.size_asserts:
                 V.graph.wrapper_code.codegen_deferred_input_asserts(

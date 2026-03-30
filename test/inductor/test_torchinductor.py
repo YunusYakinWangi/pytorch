@@ -13344,43 +13344,6 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
     @skip_if_not_triton
     @unittest.skipIf(
         config.cpp_wrapper,
-        "Deferred alignment copies are not generated for cpp_wrapper",
-    )
-    def test_alignment_copy_deferred_to_first_use(self):
-        def fn(x, y, z):
-            a = torch.mm(x, y)
-            b = torch.mm(a, z)
-            return b
-
-        x = torch.randn(16, 32, device=self.device)
-        y = torch.randn(32, 64, device=self.device)
-        z = torch.randn(64, 8, device=self.device)
-
-        _, code = run_and_get_code(torch.compile(fn), x, y, z)
-        # z's alignment check should appear between the two mm calls:
-        # first mm (uses x, y) -> alignment clone (for z) -> second mm (uses z)
-        FileCheck().check("extern_kernels.mm(").check("clone_preserve_strides").check(
-            "extern_kernels.mm("
-        ).run(code[0])
-
-    @requires_gpu()
-    @skip_if_not_triton
-    @torch._inductor.config.patch(cpp_wrapper=True)
-    def test_alignment_copy_not_emitted_for_cpp_wrapper(self):
-        def fn(x, y):
-            return torch.mm(x, y)
-
-        x = torch.randn(16, 32, device=self.device)
-        y = torch.randn(32, 64, device=self.device)
-
-        _, code = run_and_get_code(torch.compile(fn), x, y)
-        # cpp_wrapper should NOT contain Python-syntax alignment copies
-        self.assertNotIn("clone_preserve_strides", code[0])
-
-    @requires_gpu()
-    @skip_if_not_triton
-    @unittest.skipIf(
-        config.cpp_wrapper,
         "Inductor does not generate size/stride asserts for cpp_wrapper",
     )
     def test_input_asserts_deferred_to_first_use(self):
