@@ -791,14 +791,11 @@ def cpu_count() -> int:
     Prefers ``os.sched_getaffinity`` (respects cgroups / taskset) and
     falls back to ``os.cpu_count``.
     """
-    try:
+    # os.process_cpu_count was added in CPython 3.13, see
+    # https://docs.python.org/3/library/os.html#os.process_cpu_count
+    if hasattr(os, "sched_getaffinity"):
         return len(os.sched_getaffinity(0))
-    except (AttributeError, OSError):
-        pass
-    cpu_count = os.cpu_count()
-    if cpu_count is not None:
-        return cpu_count
-    raise RuntimeError("Could not determine the number of CPUs")
+    return os.cpu_count()
 
 
 def _get_available_device_type():
