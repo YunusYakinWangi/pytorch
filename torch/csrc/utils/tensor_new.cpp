@@ -1765,7 +1765,9 @@ Tensor asarray(
       requires_grad.value_or(tensor.defined() ? tensor.requires_grad() : false);
   if (return_requires_grad && !requires_grad) {
     TORCH_WARN_ONCE(
-        "Unspecified requires_grad now defaults to obj.requires_grad, not False!")
+        "torch.asarray: unspecified requires_grad now defaults to obj.requires_grad "
+        "instead of False. Pass requires_grad=False explicitly to get the old behavior "
+        "and silence this warning.")
   }
 
 #ifdef USE_NUMPY
