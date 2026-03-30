@@ -2463,7 +2463,9 @@ class OutputGraph(OutputGraphCommon):
                 # The grad_fn was already consumed by backward/autograd.grad
                 # within this graph. Auto-detach instead of graph breaking since
                 # the tensor can't be backward'd again anyway.
-                rv[i] = var.call_method(tx, "detach", [], {})
+                rv[i] = var.call_method(
+                    tx, "detach", [], {}
+                )  # pyrefly: ignore[bad-argument-type]
 
     def _check_requires_grad_intermediate_outputs(
         self, rv: list["VariableTracker"], tx: "InstructionTranslatorBase"

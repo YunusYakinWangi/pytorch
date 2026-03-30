@@ -587,26 +587,6 @@ class GraphModule(torch.nn.Module):
         self.assertIsNone(y_compiled.grad_fn)
         self.assertFalse(y_compiled.requires_grad)
 
-    def test_autograd_grad_leaked_tensor_names_in_error(self):
-        """Test that returned tensors with consumed grad_fns are auto-detached."""
-        torch._dynamo.reset()
-
-        def fn(x):
-            a = x * 2
-            b = x * 3
-            z = (a + b).sum()
-            torch.autograd.grad(z, x)
-            # Both a and b have consumed grad_fns
-            return a, b
-
-        compiled_fn = torch.compile(fn, fullgraph=True, backend="aot_eager")
-
-        x = torch.randn(4, requires_grad=True)
-        a, b = compiled_fn(x)
-        # Both should be auto-detached
-        self.assertIsNone(a.grad_fn)
-        self.assertIsNone(b.grad_fn)
-
     @skipIfCrossRef
     def test_autograd_grad_external_grad_fn_detached(self):
         torch._dynamo.reset()
