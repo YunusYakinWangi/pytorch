@@ -25,7 +25,7 @@ import torch._functorch.config
 _orig_find_spec = importlib.util.find_spec
 
 
-def _no_numba_find_spec(name, *a, **kw):  # type: ignore[no-untyped-def]
+def _no_numba_find_spec(name: str, *a: object, **kw: object) -> object:
     if name == "numba":
         return None
     return _orig_find_spec(name, *a, **kw)
