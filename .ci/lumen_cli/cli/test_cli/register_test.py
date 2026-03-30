@@ -97,6 +97,13 @@ def _register_lint_commands(subparsers: argparse._SubParsersAction) -> None:
         default=[],
         help="override plan inputs, e.g. --input changed_files='src/foo.py src/bar.py'",
     )
+    parser.add_argument(
+        "--env",
+        metavar="KEY=VALUE",
+        action="append",
+        default=[],
+        help="override plan env vars, e.g. --env ADDITIONAL_LINTRUNNER_ARGS='--skip CLANGTIDY --all-files'",
+    )
     parser.add_argument("--re", action="store_true", default=False, help="submit to Remote Execution")
     parser.add_argument("--pr", type=int, help="PR number (for --re, auto-detected if omitted)")
     parser.add_argument("--commit", help="commit SHA (for --re, skips PR detection)")
