@@ -23,7 +23,6 @@ import tempfile
 import textwrap
 import time
 import unittest
-import warnings
 from collections.abc import (
     Callable,
     Collection,
@@ -1758,14 +1757,6 @@ def get_tma_workspace_arg(
     )
 
 
-def get_default_kpack(block_k: int = 16) -> int:
-    if not torch.version.hip:
-        return 0
-    if "gfx942" in torch.cuda.get_device_properties(0).gcnArchName and block_k <= 16:
-        return 1
-    return 2
-
-
 def _use_template_for_gpu(
     layout: Layout, allowed_layout_dtypes: list[torch.dtype]
 ) -> bool:
@@ -1959,16 +1950,12 @@ def can_use_tma(
 def use_triton_tma_template(
     *matrices: IRNode, output_layout: Layout, add_guards: bool = False
 ) -> bool:
-    if not config.triton.enable_persistent_tma_matmul:
-        return False
-    if not all(len(m.get_size()) == 2 for m in matrices):
-        return False
-    # On AMD (HIP), TMA is not available but we still use non-TMA persistent
-    # kernels, so skip the TMA compatibility checks.
-    if torch.version.hip is not None:
-        return True
     layout = output_layout if config.triton.enable_template_tma_store else None
-    return can_use_tma(*matrices, output_layout=layout, add_guards=add_guards)
+    return (
+        all(len(m.get_size()) == 2 for m in matrices)
+        and can_use_tma(*matrices, output_layout=layout, add_guards=add_guards)
+        and config.triton.enable_persistent_tma_matmul
+    )
 
 
 def use_triton_blackwell_tma_template(
@@ -2141,9 +2128,9 @@ def use_cutlass_template(layout: Layout, m: int, n: int, k: int) -> bool:
     # for the compiled CUTLASS .so, similar to how the triton branch uses
     # static CUfunction + loadKernel for non-AOT mode.
     if V.graph.cpp_wrapper and not V.graph.aot_mode:
-        warnings.warn(
+        log.warning(
             "CUTLASS backend is not supported with non-AOT cpp_wrapper mode. "
-            "Skipping CUTLASS backend.",
+            "Skipping CUTLASS backend."
         )
         return False
 
@@ -4332,8 +4319,7 @@ def snode_args_kwargs(snode: BaseSchedulerNode) -> tuple[list[Any], dict[str, An
 
     def _is_tensor_ir(x) -> bool:  # type: ignore[no-untyped-def]
         return isinstance(x, torch._inductor.ir.IRNode) and not isinstance(
-            x,
-            (torch._inductor.ir.GeneratorState, torch._inductor.ir.OpaqueObjectState),
+            x, torch._inductor.ir.GeneratorState
         )
 
     flat_args = [

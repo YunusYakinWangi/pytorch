@@ -33,6 +33,7 @@ c10d::ReduceOp to_reduce_op(const std::string& reduce_op) {
 at::Tensor allocate_all_gather_output(
     const at::Tensor& input,
     int64_t group_size) {
+  TORCH_CHECK(input.is_contiguous());
   auto output_size = input.sizes().vec();
   if (output_size.empty()) {
     output_size.push_back(group_size);
@@ -47,6 +48,7 @@ at::Tensor allocate_all_gather_output(
 at::Tensor allocate_reduce_scatter_output(
     const at::Tensor& input,
     const int64_t group_size) {
+  TORCH_CHECK(input.is_contiguous());
   auto output_size = input.sizes().vec();
   if (output_size[0] % group_size != 0) {
     LOG(WARNING) << "The first dimension of the reduce_scatter input ("
@@ -165,8 +167,8 @@ std::vector<at::Tensor> all_gather_into_tensor_coalesced(
     c10::intrusive_ptr<c10d::ProcessGroup> group) {
   std::vector<at::Tensor> outputs;
   outputs.reserve(inputs.size());
-  for (auto& tensor : inputs) {
-    tensor = tensor.contiguous();
+  for (const auto& tensor : inputs) {
+    TORCH_CHECK(tensor.is_contiguous());
     outputs.push_back(allocate_all_gather_output(tensor, group_size));
   }
 
@@ -181,6 +183,7 @@ at::Tensor all_gather_into_tensor(
     const at::Tensor& input,
     int64_t group_size,
     c10::intrusive_ptr<c10d::ProcessGroup> group) {
+  TORCH_CHECK(input.is_contiguous());
   auto real_input = input.is_complex() ? at::view_as_real(input) : input;
   std::vector<at::Tensor> inputs{real_input};
   auto output =
@@ -193,10 +196,10 @@ at::Tensor& all_gather_into_tensor_out(
     int64_t group_size,
     c10::intrusive_ptr<c10d::ProcessGroup> group,
     at::Tensor& output) {
-  auto contig_input = input.contiguous();
+  TORCH_CHECK(input.is_contiguous());
   c10d::AllgatherOptions opts;
 
-  auto work = group->_allgather_base(output, contig_input, opts);
+  auto work = group->_allgather_base(output, input, opts);
   c10d::register_work(output, work);
   return output;
 }
@@ -249,8 +252,8 @@ std::vector<at::Tensor> reduce_scatter_tensor_coalesced(
   opts.reduceOp = to_reduce_op(reduce_op);
   std::vector<at::Tensor> outputs;
   outputs.reserve(inputs.size());
-  for (auto& tensor : inputs) {
-    tensor = tensor.contiguous();
+  for (const auto& tensor : inputs) {
+    TORCH_CHECK(tensor.is_contiguous());
     outputs.push_back(allocate_reduce_scatter_output(tensor, group_size));
   }
 
@@ -293,9 +296,10 @@ at::Tensor reduce_scatter_tensor(
     std::string reduce_op,
     int64_t group_size,
     c10::intrusive_ptr<c10d::ProcessGroup> group) {
+  TORCH_CHECK(input.is_contiguous());
   if (input.is_complex()) {
     auto real_input = at::view_as_real(input);
-    std::vector<at::Tensor> inputs{std::move(real_input)};
+    std::vector<at::Tensor> inputs{real_input};
     return at::view_as_complex(reduce_scatter_tensor_coalesced(
         inputs, std::move(reduce_op), group_size, std::move(group))[0]);
   }
@@ -321,10 +325,10 @@ at::Tensor reduce_scatter_tensor_out(
     int64_t group_size,
     c10::intrusive_ptr<c10d::ProcessGroup> group,
     at::Tensor& output) {
-  auto contig_input = input.contiguous();
-  if (contig_input.is_complex()) {
+  TORCH_CHECK(input.is_contiguous());
+  if (input.is_complex()) {
     TORCH_CHECK(output.is_complex())
-    auto real_input = at::view_as_real(contig_input);
+    auto real_input = at::view_as_real(input);
     std::vector<at::Tensor> inputs{std::move(real_input)};
     auto real_output = at::view_as_real(output);
     std::vector<at::Tensor> outputs{std::move(real_output)};
@@ -335,7 +339,7 @@ at::Tensor reduce_scatter_tensor_out(
         std::move(group),
         outputs)[0]);
   }
-  std::vector<at::Tensor> inputs{std::move(contig_input)};
+  std::vector<at::Tensor> inputs{std::move(input)};
   std::vector<at::Tensor> outputs{std::move(output)};
   return reduce_scatter_tensor_coalesced_out(
       inputs, std::move(reduce_op), group_size, std::move(group), outputs)[0];
@@ -368,16 +372,16 @@ at::Tensor all_to_all_single(
     input_split_sizes.emplace_back(size.expect_int());
   }
 
-  auto contig_input = input.contiguous();
-  std::vector<int64_t> output_sizes = contig_input.sizes().vec();
+  TORCH_CHECK(input.is_contiguous());
+  std::vector<int64_t> output_sizes = input.sizes().vec();
   output_sizes[0] = std::accumulate(
       output_split_sizes.begin(), output_split_sizes.end(), int64_t(0));
-  auto output = contig_input.new_empty(output_sizes);
+  auto output = input.new_empty(output_sizes);
 
   auto work = group->alltoall_base(
       output,
       // NOLINTNEXTLINE(cppcoreguidelines-pro-type-const-cast)
-      const_cast<at::Tensor&>(contig_input),
+      const_cast<at::Tensor&>(input),
       output_split_sizes,
       input_split_sizes);
   c10d::register_work(output, work);

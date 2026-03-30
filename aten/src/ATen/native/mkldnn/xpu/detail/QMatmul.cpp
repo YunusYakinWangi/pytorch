@@ -345,14 +345,8 @@ struct ScaleSpec {
       int64_t outer_dim,
       int64_t inner_dim,
       const std::string& arg_type) const {
-    // TensorWise: mask=0, groups={} -> single scale
-    if (groups.empty()) {
-      TORCH_INTERNAL_ASSERT(
-          mask == 0,
-          "Empty groups only valid for TensorWise (mask=0), got mask=",
-          mask);
+    if (groups == dnnl::memory::dims{1, 1})
       return 1; // tensorwise scaling
-    }
 
     TORCH_CHECK(
         arg_type == "src" || arg_type == "wei",
@@ -405,8 +399,8 @@ inline ScaleSpec make_scale_spec(
   if (scaling_type == at::blas::ScalingType::TensorWise) {
     // Scale tensorwise. The same as `--attr-scales=common`.
     // mask=0 : scale whole tensor
-    // groups={}: indicates that there is only one group for scaling
-    return {0, {}, dnnl::memory::data_type::f32};
+    // groups={1, 1}: indicates that there is only one group for scaling
+    return {0, {1, 1}, dnnl::memory::data_type::f32};
   } else {
     // (scaling_type == at::blas::ScalingType::RowWise)
     // Scale RowWise. The same as `--attr-scales=per_dim_01`.
@@ -485,7 +479,7 @@ sycl::event scaled_matmul(
   // scale_result tensor currently only supports scalar(TensorWise Scaling).
   bool with_dst_scale = scale_result && scale_result->defined();
   if (with_dst_scale) {
-    op_attr.set_scales(DNNL_ARG_DST, 0, {}, dnnl::memory::data_type::f32);
+    op_attr.set_scales(DNNL_ARG_DST, 0, {1}, dnnl::memory::data_type::f32);
   }
 
   op_attr.set_scratchpad_mode(dnnl::scratchpad_mode::user);
