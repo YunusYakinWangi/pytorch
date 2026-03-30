@@ -11,7 +11,7 @@ from itertools import combinations
 from random import Random
 from shutil import rmtree
 from threading import Event, Lock
-from typing import Any, TYPE_CHECKING, Union
+from typing import Any, TYPE_CHECKING
 from typing_extensions import TypeVar
 from unittest.mock import patch
 
@@ -635,13 +635,13 @@ class LocksTest(TestMixin, TestCase):
         finally:
             executor.shutdown()
 
-    def is_lock(self, lock_or_flock: Union[Lock, FileLock]) -> bool:
+    def is_lock(self, lock_or_flock: Lock | FileLock) -> bool:
         return hasattr(lock_or_flock, "locked")
 
-    def is_flock(self, lock_or_flock: Union[Lock, FileLock]) -> bool:
+    def is_flock(self, lock_or_flock: Lock | FileLock) -> bool:
         return hasattr(lock_or_flock, "is_locked")
 
-    def lock_or_flock_locked(self, lock_or_flock: Union[Lock, FileLock]) -> bool:
+    def lock_or_flock_locked(self, lock_or_flock: Lock | FileLock) -> bool:
         if self.is_lock(lock_or_flock):
             return lock_or_flock.locked()
         elif self.is_flock(lock_or_flock):
@@ -691,7 +691,7 @@ class LocksTest(TestMixin, TestCase):
         - Different lock types (Lock vs FileLock) behave consistently with their respective APIs
         """
 
-        def inner(lock_or_flock: Union[Lock, FileLock], timeout: int) -> None:
+        def inner(lock_or_flock: Lock | FileLock, timeout: int) -> None:
             if self.is_lock(lock_or_flock):
                 lock: Lock = lock_or_flock
                 if acquisition_mode == "safe":
@@ -718,12 +718,13 @@ class LocksTest(TestMixin, TestCase):
                 raise NotImplementedError
             self.assertFalse(self.lock_or_flock_locked(lock_or_flock))
 
-        assert lock_typename in ["Lock", "FileLock"]
+        if lock_typename not in ["Lock", "FileLock"]:
+            raise AssertionError(f"Unexpected lock_typename: {lock_typename}")
         flock_fpath: Path = (
             impls._OnDiskCacheImpl()._cache_dir
             / f"testing-locks-instance-{self.random_string}.lock"
         )
-        lock_or_flock: Union[Lock, FileLock] = (
+        lock_or_flock: Lock | FileLock = (
             Lock() if lock_typename == "Lock" else FileLock(str(flock_fpath))
         )
         lock_exception_type: type = (
@@ -741,7 +742,12 @@ class LocksTest(TestMixin, TestCase):
             raise NotImplementedError
 
         with self.executor() as executor:
-            assert lock_timeout in ["BLOCKING", "NON_BLOCKING", "BLOCKING_WITH_TIMEOUT"]
+            if lock_timeout not in [
+                "BLOCKING",
+                "NON_BLOCKING",
+                "BLOCKING_WITH_TIMEOUT",
+            ]:
+                raise AssertionError(f"Unexpected lock_timeout: {lock_timeout}")
             lock_or_flock_future: Future[None] = executor.submit(
                 inner,
                 lock_or_flock,
@@ -1297,9 +1303,11 @@ class InterfacesTest(TestMixin, TestCase):
             test_filepath = tmp_file.name
             dump_data = {
                 "cache_size": 2,
-                "cache_entries": {
-                    "key1": {"params": {"x": 1}, "result": 10},
-                    "key2": {"params": {"x": 2}, "result": 20},
+                "collections": {
+                    "null": {
+                        "key1": {"params": {"x": 1}, "result": 10},
+                        "key2": {"params": {"x": 2}, "result": 20},
+                    },
                 },
             }
             json.dump(dump_data, tmp_file)
@@ -1401,7 +1409,7 @@ class InterfacesTest(TestMixin, TestCase):
         """Test that PersistentMemoizer loads cache from sub_dir nested structure.
 
         Verifies that when sub_dir is set, the PersistentMemoizer loads entries
-        from the nested cache_entries[sub_dir] structure.
+        from the nested collections[sub_dir] structure.
         """
         import json
         import os
@@ -1415,7 +1423,7 @@ class InterfacesTest(TestMixin, TestCase):
             test_filepath = tmp_file.name
             dump_data = {
                 "cache_size": 2,
-                "cache_entries": {
+                "collections": {
                     "test_subdir": {
                         "nested_key1": {"params": {"x": 1}, "result": 100},
                         "nested_key2": {"params": {"x": 2}, "result": 200},
@@ -1459,7 +1467,7 @@ class InterfacesTest(TestMixin, TestCase):
         """Test that PersistentMemoizer loads from root when sub_dir is empty.
 
         Verifies that when sub_dir is empty string, entries are loaded from
-        the root cache_entries level (not from any nested structure).
+        collections["null"] (the root collection).
         """
         import json
         import os
@@ -1470,11 +1478,15 @@ class InterfacesTest(TestMixin, TestCase):
             mode="w", suffix=".json", delete=False
         ) as tmp_file:
             test_filepath = tmp_file.name
+            # Note: "null" is the JSON representation of Python None
+            # When sub_dir is empty string (""), the Memoizer's sub_key is None
             dump_data = {
                 "cache_size": 3,
-                "cache_entries": {
-                    "root_key1": {"params": {"x": 1}, "result": 10},
-                    "root_key2": {"params": {"x": 2}, "result": 20},
+                "collections": {
+                    "null": {
+                        "root_key1": {"params": {"x": 1}, "result": 10},
+                        "root_key2": {"params": {"x": 2}, "result": 20},
+                    },
                     "some_subdir": {
                         "nested_key": {"params": {"x": 3}, "result": 30},
                     },
@@ -1527,10 +1539,16 @@ class InterfacesTest(TestMixin, TestCase):
             test_filepath = tmp_file.name
             # Simulate a cache entry for compute(5) -> 10
             cache_key = interfaces._BaseMemoizer._make_key(None, 5)
+            # Note: "null" is the JSON representation of Python None (no sub_key)
             dump_data = {
                 "cache_size": 1,
-                "cache_entries": {
-                    cache_key: {"params": {"args": (5,), "kwargs": {}}, "result": 10},
+                "collections": {
+                    "null": {
+                        cache_key: {
+                            "params": {"args": (5,), "kwargs": {}},
+                            "result": 10,
+                        },
+                    },
                 },
             }
             json.dump(dump_data, tmp_file)
@@ -1588,12 +1606,15 @@ class InterfacesTest(TestMixin, TestCase):
         with open(memoizer._shared_cache_filepath) as f:
             data = json.load(f)
 
-        self.assertIn("cache_entries", data)
+        self.assertIn("collections", data)
         self.assertIn("cache_size", data)
         self.assertEqual(data["cache_size"], 2)
 
+        # Note: "null" is the JSON representation of Python None (no sub_key)
+        self.assertIn("null", data["collections"])
+
         # Verify entries have correct format
-        for entry in data["cache_entries"].values():
+        for entry in data["collections"]["null"].values():
             self.assertIn("params", entry)
             self.assertIn("result", entry)
 
@@ -1603,7 +1624,7 @@ class InterfacesTest(TestMixin, TestCase):
         """Test that _dump_to_disk uses sub_key for nested structure.
 
         Verifies that when a Memoizer is initialized with a sub_key,
-        the cache entries are stored under cache_entries[sub_key].
+        the cache entries are stored under collections[sub_key].
         """
         # Setup: create a memoizer with sub_key and cache a value
         sub_key = "test_sub_key"
@@ -1622,11 +1643,11 @@ class InterfacesTest(TestMixin, TestCase):
         with open(memoizer._shared_cache_filepath) as f:
             data = json.load(f)
 
-        self.assertIn("cache_entries", data)
-        self.assertIn(sub_key, data["cache_entries"])
+        self.assertIn("collections", data)
+        self.assertIn(sub_key, data["collections"])
 
         # The sub_key should contain the cache entries
-        sub_entries = data["cache_entries"][sub_key]
+        sub_entries = data["collections"][sub_key]
         self.assertEqual(len(sub_entries), 1)
 
         # Verify entry format
@@ -1670,7 +1691,8 @@ class InterfacesTest(TestMixin, TestCase):
             data = json.load(f)
 
         self.assertEqual(data["cache_size"], 2)
-        self.assertEqual(len(data["cache_entries"]), 2)
+        # Note: "null" is the JSON representation of Python None (no sub_key)
+        self.assertEqual(len(data["collections"]["null"]), 2)
 
     @patch_on_disk_cache_base_dir
     @set_caching_module_enabled(True)
@@ -1722,7 +1744,7 @@ class InterfacesTest(TestMixin, TestCase):
         with open(memoizer._shared_cache_filepath) as f:
             data = json.load(f)
 
-        self.assertIn("cache_entries", data)
+        self.assertIn("collections", data)
         self.assertEqual(data["cache_size"], 1)
 
     @patch_on_disk_cache_base_dir
@@ -1749,8 +1771,8 @@ class InterfacesTest(TestMixin, TestCase):
         with open(memoizer._shared_cache_filepath) as f:
             data = json.load(f)
 
-        # Get the single entry
-        entries = data["cache_entries"]
+        # Get the single entry (under "null" since no sub_key was set)
+        entries = data["collections"]["null"]
         self.assertEqual(len(entries), 1)
 
         entry = next(iter(entries.values()))
@@ -1789,12 +1811,12 @@ class InterfacesTest(TestMixin, TestCase):
         with open(memoizer1._shared_cache_filepath) as f:
             data = json.load(f)
 
-        self.assertIn("feature_a", data["cache_entries"])
-        self.assertIn("feature_b", data["cache_entries"])
+        self.assertIn("feature_a", data["collections"])
+        self.assertIn("feature_b", data["collections"])
 
         # Verify each sub_key has one entry with correct result
-        feature_a_entries = data["cache_entries"]["feature_a"]
-        feature_b_entries = data["cache_entries"]["feature_b"]
+        feature_a_entries = data["collections"]["feature_a"]
+        feature_b_entries = data["collections"]["feature_b"]
 
         self.assertEqual(len(feature_a_entries), 1)
         self.assertEqual(len(feature_b_entries), 1)
@@ -2155,9 +2177,10 @@ class ShouldPadMemoizerTest(TestMixin, TestCase):
 
         return mock_match
 
+    @patch("torch._prims_common.is_contiguous_or_false", return_value=True)
     @patch_on_disk_cache_base_dir
     @set_caching_module_enabled(True)
-    def test_should_pad_memoizer_caches_result(self) -> None:
+    def test_should_pad_memoizer_caches_result(self, mock_is_contiguous) -> None:
         """Test that the should_pad_memoizer caches function results.
 
         Verifies that when a function decorated with should_pad_memoizer.memoize
@@ -2199,10 +2222,11 @@ class ShouldPadMemoizerTest(TestMixin, TestCase):
         self.assertTrue(result1)
         self.assertTrue(result2)
 
+    @patch("torch._prims_common.is_contiguous_or_false", return_value=True)
     @patch_on_disk_cache_base_dir
     @set_caching_module_enabled(True)
     def test_should_pad_memoizer_different_shapes_different_cache_entries(
-        self,
+        self, mock_is_contiguous
     ) -> None:
         """Test that different tensor shapes result in different cache entries.
 
@@ -2250,10 +2274,11 @@ class ShouldPadMemoizerTest(TestMixin, TestCase):
         self.assertFalse(result_small)  # 8 <= 10
         self.assertTrue(result_large)  # 12 > 10
 
+    @patch("torch._prims_common.is_contiguous_or_false", return_value=True)
     @patch_on_disk_cache_base_dir
     @set_caching_module_enabled(True)
     def test_should_pad_memoizer_different_dtypes_different_cache_entries(
-        self,
+        self, mock_is_contiguous
     ) -> None:
         """Test that different tensor dtypes result in different cache entries.
 
@@ -2299,10 +2324,11 @@ class ShouldPadMemoizerTest(TestMixin, TestCase):
         self.assertTrue(result_fp32)
         self.assertFalse(result_fp16)
 
+    @patch("torch._prims_common.is_contiguous_or_false", return_value=True)
     @patch_on_disk_cache_base_dir
     @set_caching_module_enabled(True)
     def test_should_pad_memoizer_different_ops_different_cache_entries(
-        self,
+        self, mock_is_contiguous
     ) -> None:
         """Test that different operations result in different cache entries.
 
@@ -2347,9 +2373,12 @@ class ShouldPadMemoizerTest(TestMixin, TestCase):
         self.assertTrue(result_mm)
         self.assertFalse(result_addmm)
 
+    @patch("torch._prims_common.is_contiguous_or_false", return_value=True)
     @patch_on_disk_cache_base_dir
     @set_caching_module_enabled(True)
-    def test_should_pad_memoizer_replays_from_disk_cache(self) -> None:
+    def test_should_pad_memoizer_replays_from_disk_cache(
+        self, mock_is_contiguous
+    ) -> None:
         """Test that the memoizer replays results from disk cache after memory clear.
 
         Verifies that PersistentMemoizer correctly stores results to disk and
@@ -2392,9 +2421,12 @@ class ShouldPadMemoizerTest(TestMixin, TestCase):
         self.assertEqual(call_count, 1)  # Function should NOT be called again
         self.assertTrue(result2)
 
+    @patch("torch._prims_common.is_contiguous_or_false", return_value=True)
     @patch_on_disk_cache_base_dir
     @set_caching_module_enabled(False)
-    def test_should_pad_memoizer_disabled_does_not_cache(self) -> None:
+    def test_should_pad_memoizer_disabled_does_not_cache(
+        self, mock_is_contiguous
+    ) -> None:
         """Test that the memoizer does not cache when caching is disabled.
 
         Verifies that when IS_CACHING_MODULE_ENABLED is False, the function
@@ -2433,9 +2465,10 @@ class ShouldPadMemoizerTest(TestMixin, TestCase):
         self.assertTrue(result1)
         self.assertTrue(result2)
 
+    @patch("torch._prims_common.is_contiguous_or_false", return_value=True)
     @patch_on_disk_cache_base_dir
     @set_caching_module_enabled(True)
-    def test_should_pad_memoizer_with_input_tensor(self) -> None:
+    def test_should_pad_memoizer_with_input_tensor(self, mock_is_contiguous) -> None:
         """Test that the memoizer correctly handles the optional input tensor.
 
         Verifies that different input tensors (for addmm) result in different
@@ -2479,9 +2512,12 @@ class ShouldPadMemoizerTest(TestMixin, TestCase):
         self.assertTrue(result_with_input)
         self.assertFalse(result_without_input)
 
+    @patch("torch._prims_common.is_contiguous_or_false", return_value=True)
     @patch_on_disk_cache_base_dir
     @set_caching_module_enabled(True)
-    def test_should_pad_params_encoder_produces_consistent_keys(self) -> None:
+    def test_should_pad_params_encoder_produces_consistent_keys(
+        self, mock_is_contiguous
+    ) -> None:
         """Test that the encoder produces consistent keys for the same inputs.
 
         Verifies that calling the encoder with the same tensor metadata produces
@@ -2509,9 +2545,12 @@ class ShouldPadMemoizerTest(TestMixin, TestCase):
         self.assertEqual(encoded1["mat1"]["shape"], tuple(mat1.shape))
         self.assertEqual(encoded1["mat2"]["shape"], tuple(mat2.shape))
 
+    @patch("torch._prims_common.is_contiguous_or_false", return_value=True)
     @patch_on_disk_cache_base_dir
     @set_caching_module_enabled(True)
-    def test_should_pad_memoizer_same_shape_different_data_uses_cache(self) -> None:
+    def test_should_pad_memoizer_same_shape_different_data_uses_cache(
+        self, mock_is_contiguous
+    ) -> None:
         """Test that tensors with the same metadata but different data share cache.
 
         Verifies that the memoizer caches based on tensor metadata (shape, stride,
