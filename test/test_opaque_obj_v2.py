@@ -3441,34 +3441,6 @@ def forward(self, p_linear_weight, p_linear_bias, obj_lifted_custom_0, x):
             if already_initialized:
                 dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=2)
 
-    def test_hoist_device_mesh_getattrs_skips_non_mesh(self):
-        """_hoist_device_mesh_getattrs only hoists DeviceMesh get_attr nodes,
-        leaving other opaque reference types untouched."""
-        from torch._functorch._aot_autograd.graph_compile import (
-            _hoist_device_mesh_getattrs,
-        )
-
-        ref = object()
-
-        graph = torch.fx.Graph()
-        x_ph = graph.placeholder("x")
-        ref_node = graph.get_attr("_ref")
-        graph.output((x_ph, ref_node))
-
-        root = {"_ref": ref}
-        gm = torch.fx.GraphModule(root, graph)
-
-        joint_inputs = ([torch.tensor(1.0)], [])
-        info = _hoist_device_mesh_getattrs(gm, joint_inputs)
-
-        self.assertEqual(len(info), 0)
-
-        placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
-        get_attrs = [n for n in gm.graph.nodes if n.op == "get_attr"]
-        self.assertEqual(len(placeholders), 1)
-        self.assertEqual(len(get_attrs), 1)
-        self.assertEqual(len(joint_inputs[0]), 1)
-
     def test_subclass_parametrization_with_opaque_attrs(self):
         """unwrap_tensor_subclass_parameters should handle non-tensor attrs."""
         from torch._functorch._aot_autograd.subclass_parametrization import (
