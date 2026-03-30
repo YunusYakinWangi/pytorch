@@ -21,15 +21,16 @@
 #
 # For more information, see the RFC: https://github.com/pytorch/rfcs/pull/90
 
-L1:
-    - org1/repo1
-    - org2/repo2
-
-L2:
-    - org3/repo3
-
-L3:
-    - org4/repo4 @oncall1,oncall2
-
-L4:
-    - org5/repo5: @oncall1,oncall2
+# Example:
+#
+# L1:
+#     - org1/downstream-repo1
+#
+# L2:
+#     - org2/downstream-repo2
+#
+# L3:
+#     - org3/downstream-repo3:@oncall1,oncall2
+#
+# L4:
+#     - org4/downstream-repo4:@oncall1,oncall2
