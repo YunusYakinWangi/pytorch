@@ -31,5 +31,3 @@ performance analyses, directional proposals, and lessons learned.
 3. Use [`_template.md`](./_template.md) as a starting point.
 4. Open a PR.  Reviewers check technical accuracy and readability.
 5. Merge.  Done.
-
-See [`proposal.md`](./proposal.md) for full rationale.
