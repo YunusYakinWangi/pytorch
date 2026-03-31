@@ -133,7 +133,7 @@ def _hoist_device_mesh_getattrs(
     These end up in torchbind_constants and fail to pickle. By converting them to
     placeholders, both forward and backward treat them as function arguments.
     At runtime, a wrapper derives the submeshes from the parent DeviceMesh
-    already present in the args (via Dynamo hoisting + DTensor flatten).
+    already present in the args (via aot autograd runtime wrapping).
 
     Only hoists DeviceMesh instances. Extends joint_inputs[0] with the hoisted
     values and returns picklable metadata for runtime submesh derivation.
@@ -217,7 +217,7 @@ def _find_parent_device_mesh(args: list[Any]) -> Any:
     """
     Find the DeviceMesh with the most dimensions among function args.
 
-    At runtime, Dynamo hoisting + DTensor flatten ensure that the parent
+    At runtime, aot autograd runtime wrapping ensures that the parent
     DeviceMesh is among the function arguments. This helper finds it so we
     can derive submeshes for hoisted DeviceMesh nodes.
     """
