@@ -3441,6 +3441,50 @@ def forward(self, p_linear_weight, p_linear_bias, obj_lifted_custom_0, x):
             if already_initialized:
                 dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=2)
 
+    @unittest.skipIf(not dist.is_available(), "requires distributed")
+    def test_hoist_device_mesh_getattrs_hoists_mesh(self):
+        """_hoist_device_mesh_getattrs converts DeviceMesh get_attr nodes into
+        placeholders and appends the mesh value to joint_inputs."""
+        from torch._functorch._aot_autograd.graph_compile import (
+            _hoist_device_mesh_getattrs,
+        )
+        from torch.distributed.device_mesh import DeviceMesh
+        from torch.testing._internal.distributed.fake_pg import FakeStore
+
+        already_initialized = dist.is_initialized()
+        if already_initialized:
+            dist.destroy_process_group()
+
+        dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=2)
+        try:
+            mesh = DeviceMesh("cpu", torch.arange(2))
+
+            graph = torch.fx.Graph()
+            x_ph = graph.placeholder("x")
+            mesh_node = graph.get_attr("_mesh")
+            graph.output((x_ph, mesh_node))
+
+            root = {"_mesh": mesh}
+            gm = torch.fx.GraphModule(root, graph)
+
+            joint_inputs = ([torch.tensor(1.0)], [])
+            info = _hoist_device_mesh_getattrs(gm, joint_inputs)
+
+            self.assertEqual(len(info), 1)
+
+            placeholders = [n for n in gm.graph.nodes if n.op == "placeholder"]
+            get_attrs = [n for n in gm.graph.nodes if n.op == "get_attr"]
+            # get_attr replaced by a new placeholder
+            self.assertEqual(len(placeholders), 2)
+            self.assertEqual(len(get_attrs), 0)
+            # mesh value appended to joint_inputs
+            self.assertEqual(len(joint_inputs[0]), 2)
+            self.assertIs(joint_inputs[0][1], mesh)
+        finally:
+            dist.destroy_process_group()
+            if already_initialized:
+                dist.init_process_group("fake", store=FakeStore(), rank=0, world_size=2)
+
     def test_hoist_device_mesh_getattrs_skips_non_mesh(self):
         """_hoist_device_mesh_getattrs only hoists DeviceMesh get_attr nodes,
         leaving other opaque reference types untouched."""
