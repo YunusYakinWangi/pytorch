@@ -70,6 +70,7 @@ def _codegen_unwrap_subclass(
     meta: SubclassCreationMeta,
     var: str,
     indent: int = 1,
+    include_symints: bool = True,
 ) -> None:
     """Emit code to recursively unwrap a single subclass input."""
     for attr, attr_meta in meta.attrs.items():
@@ -84,7 +85,16 @@ def _codegen_unwrap_subclass(
                 state.emit(
                     f"{inner_var} = {_safe_attr_access(var, attr)}", indent=indent
                 )
-                _codegen_unwrap_subclass(state, attr_meta, inner_var, indent=indent)
+                _codegen_unwrap_subclass(
+                    state,
+                    attr_meta,
+                    inner_var,
+                    indent=indent,
+                    include_symints=include_symints,
+                )
+
+    if not include_symints:
+        return
 
     # Emit symint extraction
     size_placeholders = _compute_placeholders(meta.outer_size)
@@ -321,6 +331,72 @@ def codegen_backward_subclass_wrap(
     source, globals_dict = _codegen_subclass_wrap_source(out_metas)
     return _compile_and_exec_source(
         source, globals_dict, "wrap_fn", "backward_subclass_wrapper"
+    )
+
+
+def _codegen_subclass_unwrap_source(
+    inp_metas: list[PlainTensorMeta | SubclassCreationMeta],
+    include_symints: bool = False,
+) -> tuple[str, dict[str, object]]:
+    """Generate source for unwrapping subclass inputs into flat tensors.
+
+    This is a subset of _codegen_subclass_wrapper_source that only
+    generates the input unwrapping part, used for the backward prologue.
+    Returns (source, globals_dict).
+    """
+    state = _CodegenState()
+
+    state.emit("def unwrap_fn(args):", indent=0)
+    state.emit("unwrapped_args = []")
+
+    for i, meta in enumerate(inp_metas):
+        if isinstance(meta, PlainTensorMeta):
+            state.emit(f"unwrapped_args.append(args[{i}])")
+        else:
+            inp_var = state.fresh_name("_inp")
+            type_name = state.add_global(
+                state.fresh_name("_expected_type"),
+                meta.original_subclass_type or type(meta.original_subclass),
+            )
+            state.emit(f"{inp_var} = args[{i}]")
+            state.emit(
+                f"assert type({inp_var}) is {type_name}, "
+                f"f'expected {{{type_name}}}, got {{type({inp_var})}}'",
+            )
+            _codegen_unwrap_subclass(
+                state,
+                meta,
+                inp_var,
+                indent=1,
+                include_symints=include_symints,
+            )
+
+    state.emit("return unwrapped_args")
+
+    source = "\n".join(state.lines)
+    return source, state.globals
+
+
+def codegen_backward_subclass_unwrap(
+    inp_metas: list[PlainTensorMeta | SubclassCreationMeta] | None = None,
+) -> Callable[..., object]:
+    """Generate a specialized function for unwrapping backward non-tangent subclass inputs.
+
+    When inp_metas is None, generates an identity function (all non-tangent
+    backward args are plain tensors in AOT dispatch, since the compiled
+    forward operates on unwrapped inner tensors).
+    """
+    if inp_metas is not None:
+        source, globals_dict = _codegen_subclass_unwrap_source(
+            inp_metas,
+            include_symints=False,
+        )
+    else:
+        source = "def unwrap_fn(args):\n    return list(args)"
+        globals_dict: dict[str, object] = {}
+
+    return _compile_and_exec_source(
+        source, globals_dict, "unwrap_fn", "backward_subclass_unwrap"
     )
 
 
