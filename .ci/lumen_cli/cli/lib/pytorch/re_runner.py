@@ -90,13 +90,16 @@ def submit_command(
     resolver = CommitResolver(REPO)
     resolved = resolver.resolve(pr, commit)
 
+    tail = ["run_script"]
+    if idle_timeout:
+        tail.append("debug_session")
+    tail.append("upload_outputs")
+
     modules_list = (
         ["header", "find_script", "git_clone", "git_checkout"]
         + bootstrap
-        + ["run_script", "upload_outputs"]
+        + tail
     )
-    if idle_timeout:
-        modules_list.append("debug_session")
     seen: set[str] = set()
     modules = [m for m in modules_list if not (m in seen or seen.add(m))]
 

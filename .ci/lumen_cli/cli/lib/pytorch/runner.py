@@ -121,8 +121,8 @@ class PytorchTestRunner:
         self.no_follow = getattr(args, "no_follow", False)
         self.show_hint = getattr(args, "show_hint", False)
         self.interactive = getattr(args, "interactive", None)
-        if self.interactive is not None and self.interactive > 180:
-            raise ValueError("--interactive max is 180 minutes (3 hours)")
+        if self.interactive is not None and self.interactive > 240:
+            raise ValueError("--interactive max is 240 minutes (4 hours)")
 
     def run(self) -> None:
         if self.group_id not in LINT_PLANS:
