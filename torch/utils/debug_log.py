@@ -79,12 +79,18 @@ def debug_grad_log(tag, *tensors, ranks=None):
 
     Example::
 
-        >>> x = torch.randn(4, requires_grad=True)
-        >>> y = torch.randn(4, requires_grad=True)
+        >>> import logging
+        >>> handler = logging.StreamHandler()
+        >>> logger = logging.getLogger("torch.utils.debug_log")
+        >>> logger.addHandler(handler)
+        >>> logger.setLevel(logging.INFO)
+        >>> x = torch.tensor([1.0], requires_grad=True)
+        >>> y = torch.tensor([1.0], requires_grad=True)
         >>> z = x * 2 + y * 3
-        >>> debug_grad_log("inputs", x, y)
+        >>> debug_grad_log("check", x, y)
         >>> z.sum().backward()
-        [rank 0][inputs][bwd] t0_grad_norm=... t1_grad_norm=...
+        [rank 0][check][bwd] t0_grad_norm=2.0000 t1_grad_norm=3.0000
+        >>> logger.removeHandler(handler)
     """
     return None
 
