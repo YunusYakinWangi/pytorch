@@ -5335,14 +5335,20 @@ class TritonTemplateCallerBase(ChoiceCaller):
         raise NotImplementedError
 
 
+_NVUniversalGemmCallerClass: type | None = None
+
+
 def _is_output_plannable_nvgemm_choice(choice: "ChoiceCaller") -> bool:
     """Check if a choice is an NVUniversalGemmCaller (output-plannable since it writes to out_ptr0)."""
-    try:
-        from torch._inductor.codegen.nv_universal_gemm import NVUniversalGemmCaller
+    global _NVUniversalGemmCallerClass
+    if _NVUniversalGemmCallerClass is None:
+        try:
+            from torch._inductor.codegen.nv_universal_gemm import NVUniversalGemmCaller
 
-        return isinstance(choice, NVUniversalGemmCaller)
-    except ImportError:
-        return False
+            _NVUniversalGemmCallerClass = NVUniversalGemmCaller
+        except ImportError:
+            return False
+    return isinstance(choice, _NVUniversalGemmCallerClass)
 
 
 class MultiTemplateBuffer(TritonTemplateBuffer):

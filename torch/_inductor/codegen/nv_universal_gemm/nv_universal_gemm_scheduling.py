@@ -37,14 +37,6 @@ _BENCHMARK_KERNEL_PREFIX = "nv_gemm_"
 EPILOGUE_FN_NAME = "_epilogue_fn"
 
 
-def _sizes_equal(size_a: list, size_b: list) -> bool:
-    """Compare size lists element-wise. Explicit about iteration to avoid
-    ambiguity with Python list comparison on sympy expressions."""
-    if len(size_a) != len(size_b):
-        return False
-    return all(a == b for a, b in zip(size_a, size_b))
-
-
 class NVUniversalGemmScheduling(BaseScheduling):
     """
     Scheduling implementation for NVIDIA Universal GEMM kernels.
@@ -127,7 +119,10 @@ class NVUniversalGemmScheduling(BaseScheduling):
                     best_nvgemm = None
                     best_time = float("inf")
                     for choice, timing in choice_timings.items():
-                        if isinstance(choice, NVUniversalGemmCaller) and timing < best_time:
+                        if (
+                            isinstance(choice, NVUniversalGemmCaller)
+                            and timing < best_time
+                        ):
                             best_time = timing
                             best_nvgemm = choice
                     if best_nvgemm is None:
@@ -200,7 +195,8 @@ class NVUniversalGemmScheduling(BaseScheduling):
 
         ir_node = gemm_template_node.node
 
-        # Epilogue fusion only supported for plain GEMM, not grouped/scaled
+        # Epilogue fusion only supported for plain GEMM, not grouped/scaled,
+        # and only when an EFC kernel is available.
         if isinstance(ir_node, NVUniversalGemmBuffer):
             if ir_node.variant != GemmVariant.GEMM:
                 log.debug(
@@ -208,26 +204,6 @@ class NVUniversalGemmScheduling(BaseScheduling):
                     ir_node.variant.op_name,
                 )
                 return False
-        elif isinstance(ir_node, MultiTemplateBuffer):
-            # For MultiTemplateBuffer, verify that NVGEMM EFC choices are plain GEMM
-            try:
-                choice_timings = ir_node.choice_timings()
-                has_non_gemm_efc = any(
-                    isinstance(choice, NVUniversalGemmCaller)
-                    and choice.supports_epilogue_fusion
-                    and choice.variant != GemmVariant.GEMM
-                    for choice in choice_timings.keys()
-                )
-                if has_non_gemm_efc:
-                    log.debug(
-                        "NVGEMM epilogue fusion: MultiTemplateBuffer has non-GEMM EFC choices"
-                    )
-                    return False
-            except (RuntimeError, ValueError):
-                return False
-
-        # Check if the kernel supports epilogue fusion
-        if isinstance(ir_node, NVUniversalGemmBuffer):
             if not ir_node.supports_epilogue_fusion:
                 log.debug(
                     "NVGEMM epilogue fusion: kernel %s does not support epilogue fusion",
@@ -235,18 +211,22 @@ class NVUniversalGemmScheduling(BaseScheduling):
                 )
                 return False
         elif isinstance(ir_node, MultiTemplateBuffer):
-            # For MultiTemplateBuffer, check if ANY NVGEMM choice supports epilogue fusion.
-            # Unlike Triton (where all kernels support fusion), NVGEMM has both EFC and
-            # non-EFC kernels. The autotuning winner might be non-EFC (faster unfused),
-            # but we still want to attempt fusion if any EFC kernel exists. The actual
-            # fusion benchmarking in speedup_by_fusion will compare fused EFC vs unfused.
+            # Check that at least one EFC choice exists AND
+            # that all EFC choices are plain GEMM (not grouped/scaled).
             try:
-                choice_timings = ir_node.choice_timings()
-                has_efc_choice = any(
-                    isinstance(choice, NVUniversalGemmCaller)
-                    and choice.supports_epilogue_fusion
-                    for choice in choice_timings.keys()
-                )
+                has_efc_choice = False
+                for choice in ir_node.choice_timings():
+                    if not (
+                        isinstance(choice, NVUniversalGemmCaller)
+                        and choice.supports_epilogue_fusion
+                    ):
+                        continue
+                    has_efc_choice = True
+                    if choice.variant != GemmVariant.GEMM:
+                        log.debug(
+                            "NVGEMM epilogue fusion: MultiTemplateBuffer has non-GEMM EFC choices"
+                        )
+                        return False
                 if not has_efc_choice:
                     log.debug(
                         "NVGEMM epilogue fusion: no EFC kernel available in choices"
@@ -270,7 +250,9 @@ class NVUniversalGemmScheduling(BaseScheduling):
                 return False
 
             # Size must match the GEMM output
-            if not _sizes_equal(node.get_size(), ir_node.get_size()):
+            if not V.graph.sizevars.statically_known_list_equals(
+                node.get_size(), ir_node.get_size()
+            ):
                 log.debug(
                     "NVGEMM epilogue fusion: size mismatch %s vs %s",
                     node.get_size(),
@@ -290,10 +272,14 @@ class NVUniversalGemmScheduling(BaseScheduling):
                 if read_buf is None:
                     continue
                 read_size = read_buf.get_size()
-                if not _sizes_equal(read_size, gemm_size):
+                if not V.graph.sizevars.statically_known_list_equals(
+                    read_size, gemm_size
+                ):
                     log.debug(
                         "NVGEMM epilogue fusion: read buffer %s size %s != GEMM size %s (broadcast not supported)",
-                        rd.name, read_size, gemm_size,
+                        rd.name,
+                        read_size,
+                        gemm_size,
                     )
                     return False
                 if hasattr(read_buf, "get_stride"):
@@ -338,9 +324,7 @@ class NVUniversalGemmScheduling(BaseScheduling):
                 trial_removed_buffers,
             )
         except NotImplementedError as e:
-            log.debug(
-                "NVGEMM epilogue fusion: unsupported EVT operation: %s", e
-            )
+            log.debug("NVGEMM epilogue fusion: unsupported EVT operation: %s", e)
             return False
 
         return True
@@ -548,7 +532,9 @@ class NVUniversalGemmScheduling(BaseScheduling):
 
         assert src_code is not None
         # Replace placeholder with generic name for benchmarking
-        src_code = src_code.replace(str(Placeholder.KERNEL_NAME), _BENCHMARK_KERNEL_PREFIX)
+        src_code = src_code.replace(
+            str(Placeholder.KERNEL_NAME), _BENCHMARK_KERNEL_PREFIX
+        )
 
         # Add benchmarking helpers for epilogue fusion benchmarking
         if benchmark_kernel:

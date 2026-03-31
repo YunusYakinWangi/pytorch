@@ -35,12 +35,6 @@ def _build_kernel_cache() -> dict[str, Any]:
     return cache
 
 
-def _build_and_set_kernel_cache() -> None:
-    """Build and set the global kernel cache. Caller must hold _cache_lock."""
-    global _kernel_by_name_cache
-    _kernel_by_name_cache = _build_kernel_cache()
-
-
 def get_compatible_kernels(
     args: Any,
     cc: int,
@@ -142,6 +136,8 @@ def get_efc_kernel_with_epilogue(
     Returns:
         The configured EFC kernel, or None if not found.
     """
+    global _kernel_by_name_cache
+
     if not epilogue_source:
         epilogue_source = str(epilogue_args) if epilogue_args is not None else ""
 
@@ -154,12 +150,10 @@ def get_efc_kernel_with_epilogue(
             log.debug("EFC kernel with epilogue found in cache: %s", efc_kernel_name)
             return _efc_epilogue_cache[cache_key]
 
-        # get_kernel_by_name uses its own double-checked locking, but we're
-        # already holding _cache_lock so we access the cache directly.
         if _kernel_by_name_cache is None:
-            _build_and_set_kernel_cache()
+            _kernel_by_name_cache = _build_kernel_cache()
 
-        base_kernel = _kernel_by_name_cache.get(efc_kernel_name) if _kernel_by_name_cache else None
+        base_kernel = _kernel_by_name_cache.get(efc_kernel_name)
         if base_kernel is None:
             log.debug("Base EFC kernel not found: %s", efc_kernel_name)
             return None

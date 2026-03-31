@@ -2,6 +2,7 @@
 
 
 import logging
+import re
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -570,7 +571,8 @@ class TestNVUniversalGemmEpilogueFusion(TestCase):
         ):
             result, code_list = run_and_get_code(torch.compile(fn), *args)
         code = "\n".join(code_list)
-        nvgemm_selected = "async_compile.nv_universal_gemm" in code
+        # Only the autotuning winner gets a .run() call in the wrapper body.
+        nvgemm_selected = bool(re.search(r"nv_universal_gemm_\w+\.run\(", code))
         epilogue_fused = EPILOGUE_FN_NAME in code and "EpilogueArguments" in code
         return result, code, nvgemm_selected, epilogue_fused
 
