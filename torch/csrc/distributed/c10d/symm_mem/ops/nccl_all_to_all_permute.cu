@@ -63,10 +63,10 @@ __device__ inline void copy_bytes_vec16_aligned(
 
 } // namespace
 
-#define A2A_MAX_SLOTS 64           // max group size (p)
-#define A2A_MAX_CTAS_PER_SLOT 16   // max CTAs assigned to one slot's rows
-#define A2A_THREADS_PER_CTA 128
-#define A2A_MAX_CTA_COUNT (A2A_MAX_SLOTS * A2A_MAX_CTAS_PER_SLOT)
+constexpr int A2A_MAX_SLOTS = 64;           // max group size (p)
+constexpr int A2A_MAX_CTAS_PER_SLOT = 16;   // max CTAs assigned to one slot's rows
+constexpr int A2A_THREADS_PER_CTA = 128;
+constexpr int A2A_MAX_CTA_COUNT = A2A_MAX_SLOTS * A2A_MAX_CTAS_PER_SLOT;
 
 // Grid: dim3(p, ctas_per_slot).
 //   blockIdx.x = peer_idx — LSA peer to read from (matches output slot index)
