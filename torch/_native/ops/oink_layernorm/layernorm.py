@@ -51,6 +51,8 @@ def _native_layer_norm_impl(
 
 
 def _register_oink_layernorm() -> None:
+    if not cu.runtime_available():
+        return
     fallback = torch.library.get_kernel("aten::native_layer_norm", "CUDA")
     cu.register_op_override(
         "aten",
