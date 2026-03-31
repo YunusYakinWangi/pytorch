@@ -965,6 +965,12 @@ class _TorchDynamoContext:
 
         @functools.wraps(fn)
         def compile_wrapper(*args: Any, **kwargs: Any) -> Any:
+            # NB: function calls here could change global state (e.g. random state)
+            # and that can result in different behavior between eager and compiled!
+            # In particular, we don't have control over internal functions like justknobs_check
+            # called in _maybe_set_eval_frame.
+            # Unlike in eval_frame_cpp.cpp/convert_frame.py, we don't attempt to restore global state
+            # due to additional overhead costs.
             prior = set_eval_frame(None)
             prior_eval_frame_override: _EvalFrameOverride | None = None
             if self.fullgraph:
@@ -1570,6 +1576,7 @@ def _optimize(
             hooks=hooks,
             rebuild_ctx=rebuild_ctx,
             package=package,
+            recompile_limit=recompile_limit,
             isolated_region=isolated_region,
         )
 
@@ -2448,6 +2455,7 @@ def _optimize_assert(
     export_constraints: Any | None = None,
     dynamic: bool | None = None,
     package: CompilePackage | None = None,
+    recompile_limit: int | None = None,
     isolated_region: bool = False,
 ) -> OptimizeContext:
     """
@@ -2479,6 +2487,7 @@ def _optimize_assert(
             export=export,
             export_constraints=export_constraints,
             package=package,
+            recompile_limit=recompile_limit,
             isolated_region=isolated_region,
         ),
         hooks,
