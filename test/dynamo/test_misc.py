@@ -385,7 +385,9 @@ graph():
 
         class YoloMode(TorchDispatchMode):
             def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-                out = torch.compile(func, backend=backend)(*args, **kwargs)
+                out = torch.compile(func, backend=backend, fullgraph=True)(
+                    *args, **kwargs
+                )
                 return out
 
         x = torch.randn(5)
@@ -405,7 +407,7 @@ graph():
 
         x = torch.ones(5)
         with YoloMode():
-            out = torch.compile(torch.add, backend=backend)(x, x)
+            out = torch.compile(torch.add, backend=backend, fullgraph=True)(x, x)
 
         self.assertEqual(out.sum().item(), 5.0)
         self.assertEqual(len(backend.graphs), 0)
@@ -425,7 +427,7 @@ graph():
 
         x = torch.ones(5)
         with YoloMode():
-            out = torch.compile(torch.add, backend=backend)(x, x)
+            out = torch.compile(torch.add, backend=backend, fullgraph=True)(x, x)
 
         self.assertEqual(len(backend.graphs), 1)
 
@@ -438,9 +440,9 @@ graph():
 
         class YoloMode2(TorchDispatchMode):
             def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-                out = torch.compile(lambda x, y: func(x, y), backend=backend3)(
-                    *args, **kwargs
-                )
+                out = torch.compile(
+                    lambda x, y: func(x, y), backend=backend3, fullgraph=True
+                )(*args, **kwargs)
                 return out
 
         class YoloMode(TorchDispatchMode):
@@ -449,12 +451,16 @@ graph():
                     return func(*args, **kwargs)
 
                 random_fn(func, *args, **kwargs)
-                out = torch.compile(torch.add, backend=backend2)(args[0], args[1])
+                out = torch.compile(torch.add, backend=backend2, fullgraph=True)(
+                    args[0], args[1]
+                )
                 return out
 
         x = torch.ones(5)
         with YoloMode(), YoloMode2():
-            torch.compile(lambda x, y: torch.add(x, y), backend=backend)(x, x)
+            torch.compile(
+                lambda x, y: torch.add(x, y), fullgraph=True, backend=backend
+            )(x, x)
 
         self.assertEqual(len(backend2.graphs), 1)
         self.assertEqual(len(backend3.graphs), 0)
@@ -469,9 +475,9 @@ graph():
 
         class YoloMode2(TorchDispatchMode):
             def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-                out = torch.compile(lambda x, y: func(x, y), backend=backend3)(
-                    *args, **kwargs
-                )
+                out = torch.compile(
+                    lambda x, y: func(x, y), backend=backend3, fullgraph=True
+                )(*args, **kwargs)
                 return out
 
             @classmethod
@@ -480,7 +486,9 @@ graph():
 
         class YoloMode(TorchDispatchMode):
             def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-                out = torch.compile(torch.add, backend=backend2)(args[0], args[1])
+                out = torch.compile(torch.add, backend=backend2, fullgraph=True)(
+                    args[0], args[1]
+                )
                 return out
 
             @classmethod
@@ -489,7 +497,9 @@ graph():
 
         x = torch.ones(5)
         with YoloMode(), YoloMode2():
-            torch.compile(lambda x, y: torch.add(x, y), backend=backend)(x, x)
+            torch.compile(
+                lambda x, y: torch.add(x, y), fullgraph=True, backend=backend
+            )(x, x)
 
         self.assertEqual(len(backend2.graphs), 1)
         self.assertEqual(len(backend3.graphs), 1)
@@ -504,9 +514,9 @@ graph():
 
         class YoloMode2(TorchDispatchMode):
             def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-                out = torch.compile(lambda x, y: func(x, y), backend=backend3)(
-                    *args, **kwargs
-                )
+                out = torch.compile(
+                    lambda x, y: func(x, y), backend=backend3, fullgraph=True
+                )(*args, **kwargs)
                 return out
 
             @classmethod
@@ -515,12 +525,16 @@ graph():
 
         class YoloMode(TorchDispatchMode):
             def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-                out = torch.compile(torch.add, backend=backend2)(args[0], args[1])
+                out = torch.compile(torch.add, backend=backend2, fullgraph=True)(
+                    args[0], args[1]
+                )
                 return out
 
         x = torch.ones(5)
         with YoloMode(), YoloMode2():
-            torch.compile(lambda x, y: torch.add(x, y), backend=backend)(x, x)
+            torch.compile(
+                lambda x, y: torch.add(x, y), fullgraph=True, backend=backend
+            )(x, x)
 
         self.assertEqual(len(backend2.graphs), 1)
         self.assertEqual(len(backend3.graphs), 0)
@@ -533,7 +547,9 @@ graph():
         backend = torch._dynamo.testing.EagerAndRecordGraphs()
 
         with YoloMode2(), YoloMode():
-            torch.compile(lambda x, y: torch.add(x, y), backend=backend)(x, x)
+            torch.compile(
+                lambda x, y: torch.add(x, y), fullgraph=True, backend=backend
+            )(x, x)
 
         self.assertEqual(len(backend2.graphs), 1)
         self.assertEqual(len(backend3.graphs), 1)
@@ -554,7 +570,9 @@ graph():
                 return False
 
             def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-                out = torch.compile(func, backend=backend)(*args, **kwargs)
+                out = torch.compile(func, backend=backend, fullgraph=True)(
+                    *args, **kwargs
+                )
                 return out
 
         x = torch.randn(5)
@@ -1669,7 +1687,7 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
 
     def test_typing_dict(self):
         def fn(d):
-            return d[T] + 0
+            return d[T]
 
         d = {T: torch.randn(3)}
         r1 = fn(d)
@@ -2510,7 +2528,7 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
 
     def test_structseq1(self):
         def fn(x, y):
-            return torch.return_types.max((x + 0, y))
+            return torch.return_types.max((x, y))
 
         x = torch.randn(3, 2)
         y = torch.randn(2, 4)
@@ -2932,7 +2950,6 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
                 pass
 
         def fn(obj):
-            _ = torch.randn(1) + 0
             obj.desc = "hello"
             obj.__dict__["_internal"] = "direct"
             return obj.desc
@@ -2955,7 +2972,6 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
 
         @torch.compile(fullgraph=True, backend="eager")
         def fn(mapping):
-            _ = torch.randn(1) + 0
             mapping.__dict__["custom_attr"] = 42
             return mapping.__dict__["custom_attr"]
 
@@ -2974,7 +2990,6 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
 
         @torch.compile(fullgraph=True, backend="eager")
         def fn(d):
-            _ = torch.randn(1) + 0
             # Pattern: check if attribute exists in __dict__
             if "tracker" not in d.__dict__:
                 d.__dict__["tracker"] = []
@@ -2996,7 +3011,6 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
 
         @torch.compile(fullgraph=True, backend="eager")
         def fn(mapping):
-            _ = torch.randn(1) + 0
             # Lazy initialization in __dict__
             if not hasattr(mapping, "_cache"):
                 mapping.__dict__["_cache"] = {}
@@ -3028,7 +3042,6 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
 
         @torch.compile(fullgraph=True, backend="eager")
         def fn(m):
-            _ = torch.randn(1) + 0
             m.value = 100
             return m.value
 
@@ -3047,7 +3060,6 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
 
         @torch.compile(fullgraph=True, backend="eager")
         def fn(mapping):
-            _ = torch.randn(1) + 0
             # Multiple accesses to __dict__
             mapping.__dict__["a"] = 1
             mapping.__dict__["b"] = mapping.__dict__["a"] + 1
@@ -3569,7 +3581,6 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
     def test_numpy_readonly(self):
         @torch.compile(fullgraph=True, backend="eager")
         def fn(x):
-            _ = torch.randn(1) + 0
             return x
 
         x = np.broadcast_to(np.arange(3), (2, 3))
@@ -4617,7 +4628,6 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
             x: torch.Tensor
 
         def fn2(x) -> None:
-            _ = x + 0
             b = B(x)
             return b
 
@@ -4630,7 +4640,7 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         self.assertTrue(same(obj21.x, x2))
         self.assertTrue(same(obj22.x, x2))
         self.assertTrue(same(obj21.x, obj22.x))
-        self.assertEqual(cnts.frame_count, 1)
+        self.assertEqual(cnts.frame_count, 0)
 
         @dataclasses.dataclass(frozen=True)
         class C:
@@ -5474,7 +5484,6 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         cnts = torch._dynamo.testing.CompileCounter()
 
         def fn():
-            _ = torch.randn(1) + 0
             return torch.Size([10, 8]).numel()
 
         opt_fn = torch.compile(fn, backend=cnts, fullgraph=True)
@@ -5485,7 +5494,6 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         cnts = torch._dynamo.testing.CompileCounter()
 
         def fn(x):
-            _ = x + 0
             return x.size().numel()
 
         opt_fn = torch.compile(fn, backend=cnts, fullgraph=True)
@@ -5879,12 +5887,11 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
 
         counter = CompileCounter()
 
+        @torch._dynamo.optimize_assert(counter)
         def fn():
-            _ = torch.randn(1) + 0
             return Foo.__subclasses__()
 
-        counter = CompileCounter()
-        subs_of_foo_optim = torch.compile(fn, backend=counter, fullgraph=True)()
+        subs_of_foo_optim = fn()
 
         self.assertEqual(len(subs_of_foo_reg), 2)
         self.assertEqual(subs_of_foo_reg, subs_of_foo_optim)
@@ -5915,19 +5922,18 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         sub_of_foo_subclass_var_reg = subs_of_foo_reg[0].__subclasses__()
 
         sub_of_foo_subclass_var_optim = []
+        counter = CompileCounter()
 
+        @torch._dynamo.optimize_assert(counter)
         def fn():
-            _ = torch.randn(1) + 0
             return Foo.__subclasses__()
 
+        @torch._dynamo.optimize_assert(counter)
         def fn_single(subs_of_foo_optim):
-            _ = torch.randn(1) + 0
             return subs_of_foo_optim[0].__subclasses__()
 
-        subs_of_foo_optim = torch.compile(fn, backend="eager", fullgraph=True)()
-        sub_of_foo_subclass_var_optim = torch.compile(
-            fn_single, backend="eager", fullgraph=True
-        )(subs_of_foo_optim)
+        subs_of_foo_optim = fn()
+        sub_of_foo_subclass_var_optim = fn_single(subs_of_foo_optim)
 
         self.assertEqual(len(sub_of_foo_subclass_var_optim), 1)
         self.assertEqual(sub_of_foo_subclass_var_optim, sub_of_foo_subclass_var_reg)
@@ -5937,7 +5943,6 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
             pass
 
         def fn():
-            _ = torch.randn(1) + 0
             return "another_fn" in str(another_fn)
 
         opt_fn = torch.compile(fn, fullgraph=True, backend="eager")
@@ -6212,7 +6217,6 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
 
     def test_inline_local_dict_clear(self):
         def f(d):
-            _ = torch.randn(1) + 0
             d.clear()
             return d
 
@@ -6228,7 +6232,6 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
                 self.a = {"a": torch.randn(2, 2), "b": torch.randn(2, 2)}
 
             def forward(self):
-                _ = torch.randn(1) + 0
                 self.a.clear()
                 return self.a
 
@@ -6864,7 +6867,6 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
 
         @torch.compile(backend="eager", fullgraph=True)
         def fn():
-            _ = torch.randn(1) + 0
             return list(mod.named_parameters())
 
         params = fn()
@@ -6883,7 +6885,6 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
 
         @torch.compile(backend="eager", fullgraph=True)
         def fn1():
-            _ = torch.randn(1) + 0
             return list(mod.named_parameters(prefix="foo"))
 
         params = fn1()
@@ -10467,7 +10468,6 @@ def ___make_guard_fn():
 
     def test_fn_hasattr__name__1(self):
         def fn():
-            _ = torch.randn(1) + 0
             foo = lambda x: x + 1
             return hasattr(foo, "__name__")
 
@@ -10483,7 +10483,6 @@ def ___make_guard_fn():
             return torch.sin(x)
 
         def fn():
-            _ = torch.randn(1) + 0
             return hasattr(bar, "__name__")
 
         compiled_fn = torch.compile(backend="eager", fullgraph=True)(fn)
@@ -10500,7 +10499,6 @@ def ___make_guard_fn():
         baz = functools.partial(bar, y=4)
 
         def fn():
-            _ = torch.randn(1) + 0
             return hasattr(baz, "__name__")
 
         compiled_fn = torch.compile(backend="eager", fullgraph=True)(fn)
@@ -10515,7 +10513,6 @@ def ___make_guard_fn():
 
         # Test various constant types
         def fn():
-            _ = torch.randn(1) + 0
             # String constant
             s = "hello"
             result1 = hasattr(s, "upper")  # True
@@ -11427,7 +11424,6 @@ def ___make_guard_fn():
 
         @torch.compile(backend="eager", fullgraph=True)
         def fn(t):
-            _ = t + 0
             try:
                 # Try to consume the generator
                 gen = generator_with_stop_iteration()
@@ -11867,7 +11863,6 @@ def ___make_guard_fn():
         counters.clear()
 
         def fn(l):
-            _ = torch.randn(1) + 0
             return [(k, list(g)) for k, g in itertools.groupby(l)]
 
         l = [1, 2, 2, 3, 4, 4, 4, 1, 2]
@@ -11898,7 +11893,6 @@ def ___make_guard_fn():
         counters.clear()
 
         def fn(l):
-            _ = torch.randn(1) + 0
             a, b = itertools.tee(l)
             return list(a), list(b)
 
@@ -13210,7 +13204,6 @@ fn
             return x * y
 
         def fn():
-            _ = torch.randn(1) + 0
             results = []
             for _ in range(10):
                 sig1 = inspect.signature(target_func)
@@ -13253,7 +13246,6 @@ fn
         obj = MyClass()
 
         def fn():
-            _ = torch.randn(1) + 0
             results = []
             for _ in range(10):
                 sig1 = inspect.signature(obj.method_a)
@@ -13660,7 +13652,6 @@ fn
                 self._value = new_value * 2
 
         def fn(b):
-            _ = torch.randn(1) + 0
             b.value = 5
             return b.value
 
@@ -14214,7 +14205,6 @@ fn
             backend="eager",
         )
         def fn(x):
-            _ = x + 0
             return id(x)
 
         inputs = (torch.randn(3, 2),)
@@ -14259,8 +14249,8 @@ fn
         )
         def fn(x, y):
             if y is not None:
-                x = x + y
-            return x + 0
+                x += y
+            return x
 
         fn(torch.randn(3, 2), None)
 

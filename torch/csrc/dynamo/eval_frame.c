@@ -730,6 +730,11 @@ bool is_skip_guard_eval_unsafe = false;
 // -1 means inactive, >= 0 means active with that many compiled frames.
 int fullgraph_compiled_frame_count = -1;
 
+// When true and fullgraph_compiled_frame_count > 0, sub-frames under fullgraph
+// compilation will error (via get_fail_callback) instead of being silently
+// skipped.
+bool fullgraph_error_on_nested_compile = false;
+
 // Set the fullgraph compiled frame counter and return the old value.
 // If setting to >= 0 (activating) and already active, no-op.
 static PyObject* set_fullgraph_compiled_frame_count_py(
@@ -748,6 +753,22 @@ static PyObject* set_fullgraph_compiled_frame_count_py(
   return PyLong_FromLong(old);
 }
 
+// Set fullgraph_error_on_nested_compile and return the old value.
+static PyObject* set_fullgraph_error_on_nested_compile_py(
+    PyObject* dummy,
+    PyObject* arg) {
+  if (arg != Py_False && arg != Py_True) {
+    PyErr_SetString(PyExc_TypeError, "expected True/False");
+    return NULL;
+  }
+  bool old = fullgraph_error_on_nested_compile;
+  fullgraph_error_on_nested_compile = arg == Py_True;
+  if (old) {
+    Py_RETURN_TRUE;
+  }
+  Py_RETURN_FALSE;
+}
+
 static PyMethodDef _methods[] = {
     {"set_eval_frame", set_eval_frame_py, METH_O, NULL},
     {"set_skip_guard_eval_unsafe", set_skip_guard_eval_unsafe, METH_O, NULL},
@@ -763,6 +784,10 @@ static PyMethodDef _methods[] = {
     {"raise_sigtrap", raise_sigtrap, METH_NOARGS, NULL},
     {"set_fullgraph_compiled_frame_count",
      set_fullgraph_compiled_frame_count_py,
+     METH_O,
+     NULL},
+    {"set_fullgraph_error_on_nested_compile",
+     set_fullgraph_error_on_nested_compile_py,
      METH_O,
      NULL},
     {NULL, NULL, 0, NULL}};

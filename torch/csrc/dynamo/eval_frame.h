@@ -33,6 +33,7 @@ THPPyInterpreterFrame* THPPyInterpreterFrame_New(
 
 extern bool is_skip_guard_eval_unsafe;
 extern int fullgraph_compiled_frame_count;
+extern bool fullgraph_error_on_nested_compile;
 
 void clear_old_frame_if_python_312_plus(
     PyThreadState* tstate,

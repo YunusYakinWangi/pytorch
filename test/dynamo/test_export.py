@@ -110,7 +110,7 @@ class ExportTests(torch._dynamo.test_case.TestCase):
         def func(x, y):
             return x
 
-        opt_func = torch.compile(func, backend="eager", dynamic=True)
+        opt_func = torch.compile(func, backend="eager", fullgraph=True, dynamic=True)
         real_result = opt_func(*inps)
 
         torch._dynamo.reset()
@@ -147,7 +147,7 @@ def forward(self, x, y):
         def func(x, y):
             return y
 
-        opt_func = torch.compile(func, backend="eager", dynamic=True)
+        opt_func = torch.compile(func, backend="eager", fullgraph=True, dynamic=True)
         real_result = opt_func(*inps)
 
         torch._dynamo.reset()
@@ -723,7 +723,7 @@ def forward(self, x, y):
         def func(x, y):
             return x
 
-        opt_func = torch.compile(func, backend="eager", dynamic=True)
+        opt_func = torch.compile(func, backend="eager", fullgraph=True, dynamic=True)
         real_result = opt_func(*inps)
 
         torch._dynamo.reset()
@@ -751,7 +751,7 @@ def forward(self, x, y):
         def func(x, y):
             return y
 
-        opt_func = torch.compile(func, backend="eager", dynamic=True)
+        opt_func = torch.compile(func, backend="eager", fullgraph=True, dynamic=True)
         real_result = opt_func(*inps)
 
         torch._dynamo.reset()

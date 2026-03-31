@@ -56,12 +56,11 @@ from torch import _guards
 
 # see discussion at https://github.com/pytorch/pytorch/issues/120699
 from torch._C._dynamo.eval_frame import (  # noqa: F401
-    _EvalFrameOverride,
     reset_code,
     set_code_exec_strategy,
     set_eval_frame,
-    set_eval_frame_override,
     set_fullgraph_compiled_frame_count,
+    set_fullgraph_error_on_nested_compile,
     set_guard_complete_hook,
     set_guard_error_hook,
     set_skip_guard_eval_unsafe,
@@ -722,12 +721,6 @@ def guard_collectives_hook(guard_eval_result: bool) -> bool:
 _not_set = object()
 
 
-def _get_eval_frame_override() -> _EvalFrameOverride:
-    if torch._dynamo.config.error_on_dynamo_callback_in_fullgraph_compiled_code:
-        return _EvalFrameOverride.ERROR
-    return _EvalFrameOverride.SKIP
-
-
 class _TorchDynamoContext:
     def __init__(
         self,
@@ -969,11 +962,11 @@ class _TorchDynamoContext:
             # Unlike in eval_frame_cpp.cpp/convert_frame.py, we don't attempt to restore global state
             # due to additional overhead costs.
             prior = set_eval_frame(None)
-            prior_eval_frame_override: _EvalFrameOverride | None = None
+            prior_error_on_nested_compile: bool | None = None
             fullgraph_count_enabled = False
             if self.fullgraph:
-                prior_eval_frame_override = set_eval_frame_override(
-                    _get_eval_frame_override()
+                prior_error_on_nested_compile = set_fullgraph_error_on_nested_compile(
+                    torch._dynamo.config.error_on_dynamo_callback_in_fullgraph_compiled_code
                 )
                 if not self.export:
                     fullgraph_count_enabled = set_fullgraph_compiled_frame_count(0) < 0
@@ -1059,19 +1052,18 @@ class _TorchDynamoContext:
                     set_eval_frame(None)
                     if fullgraph_count_enabled and call_succeeded:
                         count = set_fullgraph_compiled_frame_count(-1)
-                        from torch._higher_order_ops.utils import _in_hop_compile
-
-                        if not _in_hop_compile() and count == 0:
+                        if count == 0:
                             raise RuntimeError(
                                 "torch.compile with fullgraph=True found no compiled frames. "
                                 "The frame was likely skipped (e.g., a non-infra torch dispatch "
-                                "mode was active, dynamo was disabled, or the function had "
-                                "no tensor operations to compile)."
+                                "mode was active, dynamo was disabled, or the frame was skipped."
                             )
                     if prior_error_on_graph_break is not None:
                         _set_error_on_graph_break(prior_error_on_graph_break)
-                    if prior_eval_frame_override is not None:
-                        set_eval_frame_override(prior_eval_frame_override)
+                    if prior_error_on_nested_compile is not None:
+                        set_fullgraph_error_on_nested_compile(
+                            prior_error_on_nested_compile
+                        )
                     torch._C._functorch.pop_dynamic_layer_stack_and_undo_to_depth(
                         saved_dynamic_layer_stack_depth
                     )

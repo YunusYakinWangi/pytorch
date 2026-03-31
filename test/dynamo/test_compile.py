@@ -333,21 +333,12 @@ class FullgraphTests(TestCase):
             with self.assertRaisesRegex(RuntimeError, "found no compiled frames"):
                 torch.compile(fn, backend="eager", fullgraph=True)(x)
 
-    def test_fullgraph_errors_on_empty_graph(self):
+    def test_fullgraph_empty_graph_no_error(self):
         def fn(x):
             return len(x)
 
         x = torch.randn(5)
-        with self.assertRaises(RuntimeError):
-            torch.compile(fn, backend="eager", fullgraph=True)(x)
-
-    def test_error_on_graph_break_empty_graph_no_error(self):
-        def fn(x):
-            return len(x)
-
-        x = torch.randn(5)
-        with torch._dynamo.error_on_graph_break(True):
-            result = torch.compile(fn, backend="eager")(x)
+        result = torch.compile(fn, backend="eager", fullgraph=True)(x)
         self.assertEqual(result, 5)
 
     def test_fullgraph_exported_module_no_error(self):
@@ -357,7 +348,8 @@ class FullgraphTests(TestCase):
 
         m = M()
         x = torch.randn(5)
-        result = torch.compile(m, backend="eager", fullgraph=True)(x)
+        exported = torch.export.export(m, (x,))
+        result = exported.module()(x)
         self.assertEqual(result, x + 1)
 
 
