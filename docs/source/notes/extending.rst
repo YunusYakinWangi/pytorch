@@ -158,31 +158,43 @@ class attributes:
   argument instead of individual args in an immutable tuple. This allows backward
   to free individual grads mid-execution by removing them from the list, reducing
   peak memory. When enabled, the backward calling convention changes from
-  ``backward(ctx, *grads)`` to ``backward(ctx, grads)`` where ``grads`` is a list.
+  ``backward(ctx, *grads) -> Tuple[Tensor, ...]`` to ``backward(ctx, grads) -> Tuple[Tensor, ...]`` where ``grads`` is a list.
   The default is ``False``.
 
-Here is an example using ``boxed_grads_call`` to free grad tensors as soon as they are
-no longer needed, reducing peak memory during backward::
+Here is an example using ``boxed_grads_call`` to reduce peak memory in the backward
+pass of a QKV projection — a common building block of transformer models. The forward
+pass projects an input into three separate tensors (Q, K, V), so backward receives
+three gradients. Without ``boxed_grads_call``, all three grad tensors are held alive
+for the entire backward call because they are unpacked from an immutable tuple.
+With ``boxed_grads_call``, each grad can be freed as soon as it is consumed, so peak
+memory is reduced by up to 2/3 of the total grad memory::
 
-    class MultiStageBackward(Function):
+    class QKVProjection(Function):
+        """Projects input x into Q, K, V: q = x @ w_q, k = x @ w_k, v = x @ w_v."""
         boxed_grads_call = True
 
         @staticmethod
-        def forward(ctx, x, weight):
-            ctx.save_for_backward(x, weight)
-            return x.mm(weight)
+        def forward(ctx, x, w_q, w_k, w_v):
+            ctx.save_for_backward(x, w_q, w_k, w_v)
+            return x.mm(w_q), x.mm(w_k), x.mm(w_v)
 
         @staticmethod
         def backward(ctx, grads):
-            grad_output = grads[0]
-            grads[0] = None  # Free grad_output reference from the list
+            x, w_q, w_k, w_v = ctx.saved_tensors
+            grad_x = torch.zeros_like(x)
+            grad_weights = []
 
-            x, weight = ctx.saved_tensors
-            grad_x = grad_output.mm(weight.t())
-            grad_weight = x.t().mm(grad_output)
-            del grad_output  # Now grad_output can be freed
+            # Process each grad independently and free it immediately.
+            # Without boxed_grads_call, all three grads would stay alive
+            # until backward returns, tripling peak grad memory.
+            for i, w in enumerate((w_q, w_k, w_v)):
+                grad_out = grads[i]
+                grads[i] = None      # Release reference in the caller's list
+                grad_x += grad_out.mm(w.t())
+                grad_weights.append(x.t().mm(grad_out))
+                del grad_out         # grad_out can now be freed by the runtime
 
-            return grad_x, grad_weight
+            return grad_x, *grad_weights
 
 **Step 3:** If your :class:`~Function` does not support double backward
 you should explicitly declare this by decorating backward with the
