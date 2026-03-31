@@ -2,7 +2,7 @@
 set -eu
 : "${IDLE_TIMEOUT:?IDLE_TIMEOUT must be set}"
 
-env > /tmp/.lumen_env
+export -p > /tmp/.lumen_env
 echo "cd $PWD && source /tmp/.lumen_env" >> /root/.bashrc
 echo 'trap "touch /tmp/.lumen_done" EXIT' >> /root/.bashrc
 
