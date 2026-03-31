@@ -167,7 +167,6 @@ dtensor_fails = {
     xfail("exponential"),
     xfail("geometric"),
     xfail("log_normal"),
-    xfail("multinomial"),
     xfail("nn.functional.alpha_dropout"),
     xfail("nn.functional.dropout"),
     xfail("normal"),
@@ -263,6 +262,7 @@ dtensor_fails = {
 
 dtensor_multi_threaded_fails = {
     xfail("full_like"),
+    xfail("multinomial"),
     xfail("nn.functional.dropout2d"),
     xfail("nn.functional.dropout3d"),
     xfail("nn.functional.huber_loss"),
@@ -1049,11 +1049,11 @@ class TestUnbackedDTensorOps(TestDTensorOps):
 # allclose, which cannot work for ops that produce different random numbers
 # on each shard.
 single_dim_strategy_random_skips = {
-    xfail("bernoulli"),
+    skip("bernoulli"),
     xfail("exponential"),
     xfail("geometric"),
     xfail("log_normal"),
-    xfail("multinomial"),
+    skip("multinomial"),
     xfail("nn.functional.alpha_dropout"),
     xfail("nn.functional.dropout"),
     xfail("normal"),
