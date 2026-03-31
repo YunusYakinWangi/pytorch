@@ -709,10 +709,6 @@ class InvokeLeafFunctionAutogradOp(torch.autograd.Function):
         # Collects gradients from all requires_grad tensor inputs via
         # per-tensor register_hook and fires the user hook exactly once
         # when all gradients are available.
-        #
-        # Note: register_multi_grad_hook would be cleaner but doesn't work
-        # under AOT autograd tracing (_will_engine_execute_node is not
-        # supported during autograd.grad()).
         hook_real = getattr(real_fn_callable, "_leaf_hook_real_fn", None)
         hook_fake = getattr(real_fn_callable, "_leaf_hook_fake_fn", None)
         if hook_real is not None:
