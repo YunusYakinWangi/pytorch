@@ -80,7 +80,9 @@ class NbIndexTests(TestCase):
         def fn(x):
             return operator.index(obj)
 
-        self.assertEqual(torch.compile(fn, backend="eager", fullgraph=True)(torch.tensor(0)), 42)
+        self.assertEqual(
+            torch.compile(fn, backend="eager", fullgraph=True)(torch.tensor(0)), 42
+        )
 
     def test_user_defined_dunder_index(self):
         class MyInt:
@@ -95,7 +97,9 @@ class NbIndexTests(TestCase):
         def fn(x):
             return obj.__index__()
 
-        self.assertEqual(torch.compile(fn, backend="eager", fullgraph=True)(torch.tensor(0)), 7)
+        self.assertEqual(
+            torch.compile(fn, backend="eager", fullgraph=True)(torch.tensor(0)), 7
+        )
 
     def test_user_defined_no_index_raises(self):
         class NoIndex:
@@ -135,7 +139,9 @@ class NbIndexTests(TestCase):
             lst = [10, 20, 30]
             return lst[idx]
 
-        self.assertEqual(torch.compile(fn, backend="eager", fullgraph=True)(torch.tensor(0)), 20)
+        self.assertEqual(
+            torch.compile(fn, backend="eager", fullgraph=True)(torch.tensor(0)), 20
+        )
 
     def test_tuple_subscript_with_user_defined_index(self):
         class MyIdx:
@@ -148,7 +154,9 @@ class NbIndexTests(TestCase):
             t = (10, 20, 30)
             return t[idx]
 
-        self.assertEqual(torch.compile(fn, backend="eager", fullgraph=True)(torch.tensor(0)), 30)
+        self.assertEqual(
+            torch.compile(fn, backend="eager", fullgraph=True)(torch.tensor(0)), 30
+        )
 
     def test_list_subscript_with_no_index_raises(self):
         class NoIndex:
@@ -165,6 +173,92 @@ class NbIndexTests(TestCase):
 
         result = torch.compile(fn, backend="eager", fullgraph=True)(torch.tensor(0))
         self.assertIn("cannot be interpreted as an integer", result)
+
+    def test_user_defined_staticmethod_index(self):
+        class StaticIdx:
+            @staticmethod
+            def __index__():
+                return 3
+
+        obj = StaticIdx()
+
+        def fn(x):
+            return operator.index(obj)
+
+        self.assertEqual(
+            torch.compile(fn, backend="eager", fullgraph=True)(torch.tensor(0)), 3
+        )
+
+    def test_user_defined_classmethod_index(self):
+        class ClassIdx:
+            @classmethod
+            def __index__(cls):
+                return 4
+
+        obj = ClassIdx()
+
+        def fn(x):
+            return operator.index(obj)
+
+        self.assertEqual(
+            torch.compile(fn, backend="eager", fullgraph=True)(torch.tensor(0)), 4
+        )
+
+    def test_custom_getitem_with_user_defined_index(self):
+        class MyIdx:
+            def __index__(self):
+                return 1
+
+        class MyContainer:
+            def __init__(self, data):
+                self.data = data
+
+            def __getitem__(self, idx):
+                return self.data[idx]
+
+        idx = MyIdx()
+        container = MyContainer([10, 20, 30])
+
+        def fn(x):
+            return container[idx]
+
+        self.assertEqual(
+            torch.compile(fn, backend="eager", fullgraph=True)(torch.tensor(0)), 20
+        )
+
+    def test_dict_getitem_with_non_indexable(self):
+        class NoIndex:
+            pass
+
+        obj = NoIndex()
+
+        def fn(x):
+            d = {obj: 42}
+            return d[obj]
+
+        self.assertEqual(
+            torch.compile(fn, backend="eager", fullgraph=True)(torch.tensor(0)), 42
+        )
+
+    def test_list_getitem_non_indexable_matches_cpython(self):
+        class NoIndex:
+            pass
+
+        obj = NoIndex()
+
+        def fn(x):
+            try:
+                return [10, 20][obj]
+            except TypeError:
+                return "caught"
+
+        # Both CPython and Dynamo should raise TypeError and catch it
+        eager_result = fn(torch.tensor(0))
+        compiled_result = torch.compile(fn, backend="eager", fullgraph=True)(
+            torch.tensor(0)
+        )
+        self.assertEqual(eager_result, "caught")
+        self.assertEqual(compiled_result, "caught")
 
 
 if __name__ == "__main__":

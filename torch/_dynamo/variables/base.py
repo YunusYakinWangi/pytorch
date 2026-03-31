@@ -920,10 +920,13 @@ class VariableTracker(metaclass=VariableTrackerMeta):
         The base implementation raises TypeError, matching CPython's behavior
         when tp_as_number->nb_index is NULL (_PyIndex_Check fails).
         """
-        msg = variables.ConstantVariable.create(
-            f"'{self.python_type_name()}' object cannot be interpreted as an integer"
+        raise_observed_exception(
+            TypeError,
+            tx,
+            args=[
+                f"'{self.python_type_name()}' object cannot be interpreted as an integer"
+            ],
         )
-        raise_observed_exception(TypeError, tx, args=[msg])
 
     def __init__(
         self,

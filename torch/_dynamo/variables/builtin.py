@@ -78,6 +78,7 @@ from ..utils import (
     proxy_args_kwargs,
     raise_args_mismatch,
     set_methods,
+    specialize_symnode,
     str_methods,
     tensortype_to_dtype,
 )
@@ -1872,8 +1873,6 @@ class BuiltinVariable(VariableTracker):
             )
         # Specialize SymNodeVariable to a constant first, matching CPython's
         # PyNumber_Index which forces a concrete int.
-        from ..utils import specialize_symnode
-
         arg = specialize_symnode(arg)
         return arg.nb_index_impl(tx)
 
