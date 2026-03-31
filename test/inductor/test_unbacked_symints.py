@@ -868,12 +868,12 @@ class TestUnbackedSymints(InductorTestCase):
         with self.assertRaisesRegex(TypeError, "val to be an int"):
             torch._dynamo.override_optimization_hint(42, "hello")
 
-    @dynamo_config.patch({"capture_scalar_outputs": True})
     def test_override_optimization_hint_rejects_derived_expression(self, device):
         """Test that override_optimization_hint rejects derived expressions like u0 + 1."""
-        t = torch.tensor([5], device=device)
-        torch._dynamo.decorators.mark_unbacked(t, 0)
-        u = t.item()
+        from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
+        shape_env = ShapeEnv()
+        u = shape_env.create_unbacked_symint()
         v = u + 1  # derived expression: u0 + 1
         with self.assertRaisesRegex(ValueError, "single unbacked symbol"):
             torch._dynamo.override_optimization_hint(v, 42)
