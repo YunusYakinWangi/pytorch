@@ -1468,9 +1468,15 @@ def slice_(x, dim=0, start=0, end=sys.maxsize, step=1, clamp=True):
         # a resolved start_index means the offset is computable directly
         # (base_offset + start * stride), so dynamo wouldn't allocate an
         # unbacked symbol for it.
+        # Note: current_node may be None when slice_ is called from template
+        # rendering (e.g. cpp_template_kernel.slice_nd) rather than FX graph
+        # lowering, so we handle that.
+        current_node = V.graph.current_node
         node_unbacked_bindings = resolve_unbacked_bindings(
             V.graph.sizevars.shape_env,
-            V.graph.current_node.meta.get("unbacked_bindings", {}),
+            current_node.meta.get("unbacked_bindings", {})
+            if current_node is not None
+            else {},
         )
         if node_unbacked_bindings:
             for sym, keypath in node_unbacked_bindings.items():
@@ -1479,6 +1485,9 @@ def slice_(x, dim=0, start=0, end=sys.maxsize, step=1, clamp=True):
                     b_size.name = V.graph.register_buffer(b_size)
                     V.graph.register_operation(b_size)
                 elif keypath == (CallMethodKey("storage_offset"),):
+                    # Not handled yet — would require materializing the
+                    # tensor layout. Unlikely to be hit because a resolved
+                    # start_index means the offset is computable directly.
                     raise AssertionError(
                         "Unexpected storage_offset unbacked binding when both "
                         "start and end indices are resolved"
