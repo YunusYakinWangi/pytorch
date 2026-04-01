@@ -246,8 +246,14 @@ def get_placement_from_reduction_op(reduction_op: ReductionOpType) -> Placement:
 # ---------------------------------------------------------------------------
 
 
-class _ShardExceptDimStrategy:
-    """Single-dim strategy that shards on every dim except an active dim.
+def _shard_except_dim_strategy(
+    n_placements: int,
+    op: torch._ops.OpOverload,
+    args_schema: tuple[Any, ...],
+    kwargs_schema: dict[str, Any],
+    active_dim: int,
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    """Build single-dim strategies that shard on every dim except an active dim.
 
     Used by sort-like ops (sort, topk, cummax, cummin), scan ops (cumsum, cumprod,
     logcumsumexp), and softmax-like ops. All outputs and inputs get the same sharding
@@ -255,28 +261,18 @@ class _ShardExceptDimStrategy:
 
     Args:
         n_placements: Total number of placements per rule (outputs + inputs).
+        active_dim: The dim to exclude from sharding (e.g. sort dim, softmax dim).
     """
-
-    def __init__(self, n_placements: int) -> None:
-        self.n_placements = n_placements
-
-    def __call__(
-        self,
-        op: torch._ops.OpOverload,
-        args_schema: tuple[Any, ...],
-        kwargs_schema: dict[str, Any],
-        active_dim: int,
-    ) -> list[list[Placement | _ShardingPlaceholder]]:
-        input_meta = args_schema[0]
-        if not isinstance(input_meta, TensorMeta):
-            raise AssertionError(f"Expected TensorMeta, got {type(input_meta)}")
-        ndim = len(input_meta.shape)
-        active_dim = normalize_dim(active_dim, ndim)
-        strategies: list[list[Placement | _ShardingPlaceholder]] = []
-        for d in range(ndim):
-            if d != active_dim:
-                strategies.append([_ShardingPlaceholder(d)] * self.n_placements)
-        return strategies
+    input_meta = args_schema[0]
+    if not isinstance(input_meta, TensorMeta):
+        raise AssertionError(f"Expected TensorMeta, got {type(input_meta)}")
+    ndim = len(input_meta.shape)
+    active_dim = normalize_dim(active_dim, ndim)
+    strategies: list[list[Placement | _ShardingPlaceholder]] = []
+    for d in range(ndim):
+        if d != active_dim:
+            strategies.append([_ShardingPlaceholder(d)] * n_placements)
+    return strategies
 
 
 def _shard_non_reduction_dim(
@@ -571,6 +567,34 @@ def argmax_argmin_strategy(op_schema: OpSchema) -> OpStrategy:
     )
 
 
+# Category A: Sort-like and scan ops
+# Scan: 1 output + 1 input = 2 placements
+_SCAN_N_PLACEMENTS = 2
+# Sort-like: 2 outputs (values, indices) + 1 input = 3 placements
+_SORT_LIKE_N_PLACEMENTS = 3
+# Softmax forward: 1 output + 1 input = 2 placements
+_SOFTMAX_FWD_N_PLACEMENTS = 2
+# Softmax backward: 1 output + 2 inputs = 3 placements
+_SOFTMAX_BWD_N_PLACEMENTS = 3
+
+
+# @register_single_dim_strategy(
+#     [aten.cumsum.default, aten.cumprod.default, aten.logcumsumexp.default],
+#     schema_info=RuntimeSchemaInfo(1),
+# )
+def scan_single_dim_strategy(
+    op: torch._ops.OpOverload,
+    args_schema: tuple[Any, ...],
+    kwargs_schema: dict[str, Any],
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    dim = args_schema[1]
+    if not isinstance(dim, int):
+        raise AssertionError(f"Expected int, got {type(dim)}")
+    return _shard_except_dim_strategy(
+        _SCAN_N_PLACEMENTS, op, args_schema, kwargs_schema, active_dim=dim
+    )
+
+
 @register_op_strategy(
     [aten.cumsum.default, aten.cumprod.default, aten.logcumsumexp.default],
     schema_info=RuntimeSchemaInfo(1),
@@ -662,6 +686,21 @@ def kthvalue_strategy(
             ]
         )
     return strategies
+
+
+# @register_single_dim_strategy(
+#     [aten.cummax.default, aten.cummin.default],
+#     schema_info=RuntimeSchemaInfo(1),
+# )
+def cummax_cummin_single_dim_strategy(
+    op: torch._ops.OpOverload,
+    args_schema: tuple[Any, ...],
+    kwargs_schema: dict[str, Any],
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    dim = cast(int, args_schema[1])
+    return _shard_except_dim_strategy(
+        _SORT_LIKE_N_PLACEMENTS, op, args_schema, kwargs_schema, active_dim=dim
+    )
 
 
 @register_op_strategy(
@@ -976,6 +1015,26 @@ def pooling_strategy(op_schema: OpSchema) -> OpStrategy:
     )
 
 
+# Category F: Softmax-like ops
+# @register_single_dim_strategy(
+#     [aten._log_softmax.default, aten._softmax.default, aten._safe_softmax.default],
+#     schema_info=RuntimeSchemaInfo(1),
+# )
+def softmax_single_dim_strategy(
+    op: torch._ops.OpOverload,
+    args_schema: tuple[Any, ...],
+    kwargs_schema: dict[str, Any],
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    softmax_dim = cast(int, args_schema[1])
+    return _shard_except_dim_strategy(
+        _SOFTMAX_FWD_N_PLACEMENTS,
+        op,
+        args_schema,
+        kwargs_schema,
+        active_dim=softmax_dim,
+    )
+
+
 @register_op_strategy(
     [aten._log_softmax.default, aten._softmax.default, aten._safe_softmax.default],
     schema_info=RuntimeSchemaInfo(1),
@@ -1013,6 +1072,28 @@ def softmax_strategy(op_schema: OpSchema) -> OpStrategy:
         )
 
     return output_strategy
+
+
+# @register_single_dim_strategy(
+#     [
+#         aten._log_softmax_backward_data.default,
+#         aten._softmax_backward_data.default,
+#     ],
+#     schema_info=RuntimeSchemaInfo(2),
+# )
+def softmax_backward_single_dim_strategy(
+    op: torch._ops.OpOverload,
+    args_schema: tuple[Any, ...],
+    kwargs_schema: dict[str, Any],
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    softmax_dim = cast(int, args_schema[2])
+    return _shard_except_dim_strategy(
+        _SOFTMAX_BWD_N_PLACEMENTS,
+        op,
+        args_schema,
+        kwargs_schema,
+        active_dim=softmax_dim,
+    )
 
 
 @register_op_strategy(
@@ -1708,6 +1789,54 @@ def layer_norm_bwd_strategy(op_schema: OpSchema) -> OpStrategy:
 )
 def fused_rms_norm_bwd_strategy(op_schema: OpSchema) -> OpStrategy:
     return _common_norm_backward_strategy(op_schema, rms_norm=True)
+
+
+# @register_single_dim_strategy(
+#     [aten.topk.default],
+#     schema_info=RuntimeSchemaInfo(2),
+# )
+def topk_single_dim_strategy(
+    op: torch._ops.OpOverload,
+    args_schema: tuple[Any, ...],
+    kwargs_schema: dict[str, Any],
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    topk_dim = cast(int, args_schema[2]) if len(args_schema) > 2 else -1
+    return _shard_except_dim_strategy(
+        _SORT_LIKE_N_PLACEMENTS, op, args_schema, kwargs_schema, active_dim=topk_dim
+    )
+
+
+# @register_single_dim_strategy(
+#     aten.sort.default,
+#     schema_info=RuntimeSchemaInfo(1),
+# )
+def sort_default_single_dim_strategy(
+    op: torch._ops.OpOverload,
+    args_schema: tuple[Any, ...],
+    kwargs_schema: dict[str, Any],
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    sort_dim = cast(int, args_schema[1]) if len(args_schema) > 1 else -1
+    return _shard_except_dim_strategy(
+        _SORT_LIKE_N_PLACEMENTS, op, args_schema, kwargs_schema, active_dim=sort_dim
+    )
+
+
+# @register_single_dim_strategy(
+#     aten.sort.stable,
+#     schema_info=RuntimeSchemaInfo(
+#         1,
+#         static_kwargkey=["dim", "descending", "stable"],
+#     ),
+# )
+def sort_stable_single_dim_strategy(
+    op: torch._ops.OpOverload,
+    args_schema: tuple[Any, ...],
+    kwargs_schema: dict[str, Any],
+) -> list[list[Placement | _ShardingPlaceholder]]:
+    sort_dim = cast(int, kwargs_schema.get("dim", -1))
+    return _shard_except_dim_strategy(
+        _SORT_LIKE_N_PLACEMENTS, op, args_schema, kwargs_schema, active_dim=sort_dim
+    )
 
 
 def sort_strategy(op_schema: OpSchema, sort_dim: int) -> OpStrategy:
