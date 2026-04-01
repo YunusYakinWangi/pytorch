@@ -75,6 +75,13 @@ class TestStatelessRNGKeySplit(TestCase):
         splits2 = random.split(key2, 4)
         self.assertNotEqual(splits1, splits2)
 
+    def test_offset_zero_vs_one_produce_different_splits(self, device):
+        key1 = random.key(42, device=device)
+        key2 = torch.tensor([42, 1], dtype=torch.uint64, device=device)
+        splits1 = random.split(key1, 4)
+        splits2 = random.split(key2, 4)
+        self.assertNotEqual(splits1, splits2)
+
     def test_batched(self, device):
         key = random.key(42, device=device)
         keys = random.split(key, 4)  # (4, 2)
@@ -119,19 +126,6 @@ class TestStatelessRNGKeySplit(TestCase):
             random.split(key, 0)
         with self.assertRaises(RuntimeError):
             random.split(key, -1)
-
-    def test_offsets_are_4_aligned(self, device):
-        key = random.key(42, device=device)
-        splits = random.split(key, 1000)
-        offsets = splits[:, 1].to(torch.int64)
-        self.assertTrue((offsets % 4 == 0).all())
-
-    def test_batched_offsets_are_4_aligned(self, device):
-        key = random.key(42, device=device)
-        keys = random.split(key, 8)
-        splits = random.split(keys, 100)
-        offsets = splits[..., 1].to(torch.int64)
-        self.assertTrue((offsets % 4 == 0).all())
 
     def test_error_batched_last_dim_not_2(self, device):
         key = torch.tensor([[42, 0, 1], [43, 0, 1]], dtype=torch.uint64, device=device)
@@ -209,19 +203,6 @@ class TestStatelessRNGKeyFoldIn(TestCase):
         key = random.key(42)  # CPU key
         with self.assertRaises(RuntimeError):
             random.fold_in(key, 0)
-
-    def test_offsets_are_4_aligned(self, device):
-        key = random.key(42, device=device)
-        for data in range(20):
-            folded = random.fold_in(key, data)
-            self.assertEqual(folded[1].item() % 4, 0)
-
-    def test_batched_offsets_are_4_aligned(self, device):
-        key = random.key(42, device=device)
-        keys = random.split(key, 100)
-        folded = random.fold_in(keys, 7)
-        offsets = folded[:, 1].to(torch.int64)
-        self.assertTrue((offsets % 4 == 0).all())
 
     def test_error_batched_last_dim_not_2(self, device):
         key = torch.tensor([[42, 0, 1], [43, 0, 1]], dtype=torch.uint64, device=device)
