@@ -162,38 +162,39 @@ auto PyNode::apply(variable_list&& inputs) -> variable_list {
   THPObjectPtr pyInputs(to_py_args(inputs, &_device_guard));
   inputs.clear();
 
+  THPObjectPtr r;
   if (py_fn->boxed_grads_call) {
-    // Move grad tensors from the immutable args tuple into a _BoxedGradsList
-    // (a list subclass marker type) and pass it as a single argument. This
-    // lets backward pop/clear individual grads to free memory mid-execution.
-    // BackwardCFunction.apply checks for _BoxedGradsList to distinguish
-    // engine-boxed grads from user-provided plain lists.
-    static PyObject* boxed_grad_list_cls = []() {
-      THPObjectPtr module(PyImport_ImportModule("torch.autograd.function"));
-      if (!module)
-        throw_python_error();
-      PyObject* cls = PyObject_GetAttrString(module.get(), "_BoxedGradsList");
-      if (!cls)
-        throw_python_error();
-      return cls;
-    }();
-    THPObjectPtr gradsList(
-        PyObject_CallOneArg(boxed_grad_list_cls, pyInputs.get()));
+    // Move grad tensors from the immutable args tuple into a plain list
+    // and call apply_boxed instead of apply. This lets backward pop/clear
+    // individual grads to free memory mid-execution, because the mutable
+    // list (not the C++ tuple) is the only container holding grad refs.
+    auto num_inputs = PyTuple_GET_SIZE(pyInputs.get());
+    THPObjectPtr gradsList(PyList_New(num_inputs));
     if (!gradsList)
       throw_python_error();
+    for (Py_ssize_t i = 0; i < num_inputs; i++) {
+      PyObject* item = PyTuple_GET_ITEM(pyInputs.get(), i);
+      Py_INCREF(item);
+      PyList_SET_ITEM(gradsList.get(), i, item);
+    }
+    // Release the tuple so its refs to individual grads are dropped
+    pyInputs = nullptr;
 
-    // Replace pyInputs with a single-element tuple containing the grads list
     THPObjectPtr boxedArgs(PyTuple_New(1));
     if (!boxedArgs)
       throw_python_error();
     PyTuple_SET_ITEM(boxedArgs.get(), 0, gradsList.release());
-    pyInputs = std::move(boxedArgs);
-  }
 
-  THPObjectPtr apply_fn(PyObject_GetAttrString(obj, "apply"));
-  if (!apply_fn)
-    throw_python_error();
-  THPObjectPtr r(PyObject_CallObject(apply_fn, pyInputs.get()));
+    THPObjectPtr apply_fn(PyObject_GetAttrString(obj, "apply_boxed"));
+    if (!apply_fn)
+      throw_python_error();
+    r = THPObjectPtr(PyObject_CallObject(apply_fn, boxedArgs.get()));
+  } else {
+    THPObjectPtr apply_fn(PyObject_GetAttrString(obj, "apply"));
+    if (!apply_fn)
+      throw_python_error();
+    r = THPObjectPtr(PyObject_CallObject(apply_fn, pyInputs.get()));
+  }
   pyInputs = nullptr;
   if (!r)
     throw_python_error();

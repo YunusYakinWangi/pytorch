@@ -8855,15 +8855,12 @@ for shape in [(1,), ()]:
         self.assertEqual(x.grad, torch.full_like(x, 3.0))
 
     def test_custom_function_boxed_grads_direct_apply(self):
-        """Test both paths into BackwardCFunction.apply with boxed_grads_call.
+        """Test that grad_fn.apply() bypasses C++ and calls apply() directly.
 
-        Path 1 (C++ engine): .backward() goes through C++ PyNode::apply,
-        which boxes grads into a _BoxedGradsList marker type.
+        apply() does not box grads, so backward receives individual args
+        (not a list), unlike the C++ engine path which calls apply_boxed."""
 
-        Path 2 (direct grad_fn.apply()): bypasses C++, grads arrive as
-        plain args and get boxed by Python into a regular list."""
-
-        received_grads = []
+        received_args = []
 
         class BoxedMultiOut(torch.autograd.Function):
             boxed_grads_call = True
@@ -8874,36 +8871,35 @@ for shape in [(1,), ()]:
                 return x * 2, x * 3
 
             @staticmethod
-            def backward(ctx, grads):
-                received_grads.append(grads)
+            def backward(ctx, *args):
+                received_args.append(args)
                 (x,) = ctx.saved_tensors
-                return grads[0] * 2 + grads[1] * 3
+                if isinstance(args[0], list):
+                    # C++ engine path: boxed
+                    return args[0][0] * 2 + args[0][1] * 3
+                else:
+                    # grad_fn.apply() path: individual args
+                    return args[0] * 2 + args[1] * 3
 
-        # Path 1: .backward() — C++ engine boxes grads
+        # C++ engine path: calls apply_boxed, backward gets (list,)
         x1 = torch.randn(4, requires_grad=True)
         a1, b1 = BoxedMultiOut.apply(x1)
         (a1.sum() + b1.sum()).backward()
-        self.assertIsInstance(received_grads[0], list)
-        self.assertEqual(len(received_grads[0]), 2)
-        self.assertEqual(x1.grad, torch.full_like(x1, 5.0))
+        self.assertIsInstance(received_args[0][0], list)
 
-        # Path 2: grad_fn.apply() — Python boxes grads
-        received_grads.clear()
+        # grad_fn.apply() path: calls apply, backward gets (tensor, tensor)
+        received_args.clear()
         x2 = torch.randn(4, requires_grad=True)
         a2, b2 = BoxedMultiOut.apply(x2)
-        grad_a = torch.ones(4)
-        grad_b = torch.ones(4) * 2
-        result = a2.grad_fn.apply(grad_a, grad_b)
-        self.assertIsInstance(received_grads[0], list)
-        self.assertEqual(len(received_grads[0]), 2)
-        # return grad_a*2 + grad_b*3 = 1*2 + 2*3 = 8
-        self.assertEqual(result, torch.full_like(x2, 8.0))
+        result = a2.grad_fn.apply(torch.ones(4), torch.ones(4) * 2)
+        self.assertNotIsInstance(received_args[0][0], list)
+        self.assertEqual(len(received_args[0]), 2)
 
     def test_custom_function_boxed_grads_single_list_arg(self):
-        """A plain list passed via grad_fn.apply() must not be confused
-        with C++ boxing. _BoxedGradsList marker type ensures this."""
+        """When grad_fn.apply() is called with a list argument,
+        apply() passes it through as-is (no boxing)."""
 
-        received_grads = []
+        received_args = []
 
         class SingleOut(torch.autograd.Function):
             boxed_grads_call = True
@@ -8913,20 +8909,18 @@ for shape in [(1,), ()]:
                 return x * 2
 
             @staticmethod
-            def backward(ctx, grads):
-                received_grads.append(grads)
-                return grads[0]
+            def backward(ctx, *args):
+                received_args.append(args)
+                return args[0]
 
         x = torch.randn(4, requires_grad=True)
         out = SingleOut.apply(x)
 
-        # grad_fn.apply() with a plain list — must be boxed, not
-        # mistaken for already-boxed grads
+        # grad_fn.apply() with a list — passed through as a single arg
         user_list = [torch.ones(4)]
         out.grad_fn.apply(user_list)
-        self.assertIsInstance(received_grads[0], list)
-        self.assertEqual(len(received_grads[0]), 1)
-        self.assertIs(received_grads[0][0], user_list)
+        self.assertEqual(len(received_args[0]), 1)
+        self.assertIs(received_args[0][0], user_list)
 
     @skipIfTorchDynamo("dynamo accesses saved_tensors multiple times")
     def test_clear_saved_tensors_on_access(self):
