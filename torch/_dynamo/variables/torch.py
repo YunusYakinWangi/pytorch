@@ -1033,9 +1033,7 @@ class TorchInGraphFunctionVariable(BaseTorchVariable):
                 "call_function", torch._C._functorch._grad_increment_nesting
             )
             level = torch._C._functorch._grad_increment_nesting()
-            tx.output.add_cleanup_hook(
-                lambda: torch._C._functorch._grad_decrement_nesting()
-            )
+            tx.output.add_cleanup_hook(torch._C._functorch._grad_decrement_nesting)
             return VariableTracker.build(tx, level)
 
         @register(torch._C._functorch._grad_decrement_nesting)
@@ -1046,9 +1044,7 @@ class TorchInGraphFunctionVariable(BaseTorchVariable):
                 "call_function", torch._C._functorch._grad_decrement_nesting
             )
             level = torch._C._functorch._grad_decrement_nesting()
-            tx.output.add_cleanup_hook(
-                lambda: torch._C._functorch._grad_increment_nesting()
-            )
+            tx.output.add_cleanup_hook(torch._C._functorch._grad_increment_nesting)
             return VariableTracker.build(tx, level)
 
         @register(torch._C._functorch.set_inplace_requires_grad_allowed)
@@ -2410,7 +2406,7 @@ class TorchInGraphFunctionVariable(BaseTorchVariable):
                 raise_observed_exception(
                     type(exc),
                     tx,
-                    args=[VariableTracker.build(tx, a) for a in exc.args],
+                    args=list(exc.args),
                 )
 
         if self.is_tensor_method():
