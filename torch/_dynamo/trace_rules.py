@@ -59,11 +59,9 @@ from .utils import (
 )
 from .variables import (
     BuiltinVariable,
-    DictBuiltinVariable,
     FunctionalCallVariable,
     FunctorchHigherOrderVariable,
     InspectSignatureVariable,
-    IterBuiltinVariable,
     LocalGeneratorFunctionVariable,
     LocalGeneratorObjectVariable,
     NestedUserFunctionVariable,
@@ -567,6 +565,7 @@ torch_c_binding_in_graph_functions = dict.fromkeys(
         "torch._C._cuda_isHistoryEnabled",
         "torch._C._cuda_isInBadFork",
         "torch._C._cuda_jiterator_compile_and_launch_kernel",
+        "torch._C._cuda_lock_mutex",
         "torch._C._cuda_maybeExchangeDevice",
         "torch._C._cuda_memorySnapshot",
         "torch._C._cuda_memoryStats",
@@ -585,6 +584,7 @@ torch_c_binding_in_graph_functions = dict.fromkeys(
         "torch._C._cuda_setStream",
         "torch._C._cuda_sleep",
         "torch._C._cuda_synchronize",
+        "torch._C._cuda_unlock_mutex",
         "torch._C._cudnn_set_conv_benchmark_empty_cache",
         "torch._C._cudnn.getCompileVersion",
         "torch._C._cudnn.getRuntimeVersion",
@@ -2657,6 +2657,7 @@ torch_non_c_binding_in_graph_functions = dict.fromkeys(
         "torch.cuda.jiterator._create_multi_output_jit_fn",
         "torch.cuda.memory_usage",
         "torch.cuda.memory._dump_snapshot",
+        "torch.cuda.memory._free_mutex",
         "torch.cuda.memory._get_current_allocator",
         "torch.cuda.memory._host_allocator",
         "torch.cuda.memory._record_memory_history_impl",
@@ -3996,8 +3997,6 @@ def is_torch(filename: str) -> bool:
 Main entry point for looking up the trace rule (the Dynamo variable) for a given callable object.
 """
 
-BUILTIN_CALLABLES = {dict: DictBuiltinVariable, iter: IterBuiltinVariable}
-
 
 def lookup_callable(obj: Callable[..., Any]) -> type[VariableTracker] | None:
     if not hashable(obj):
@@ -4009,8 +4008,6 @@ def lookup_callable(obj: Callable[..., Any]) -> type[VariableTracker] | None:
         return TorchInGraphFunctionVariable
     if is_polyfilled_callable(obj):
         return PolyfilledFunctionVariable
-    if obj in BUILTIN_CALLABLES:
-        return BUILTIN_CALLABLES[obj]
     if is_builtin_callable(obj):
         return BuiltinVariable
     return None
