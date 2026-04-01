@@ -15,6 +15,8 @@ from collections.abc import Callable
 from unittest import mock
 from unittest.mock import patch
 
+import sympy
+
 import torch
 import torch._inductor.async_compile
 from torch import multiprocessing as mp, nn
@@ -289,6 +291,76 @@ class TestMaxAutotune(TestCase):
         ).check(write_api).run(code[0])
 
         torch.testing.assert_close(c_actual, c_expected, atol=1e-2, rtol=1e-2)
+
+    def test_use_triton_tma_template_rejects_descriptor_offsets_exceeding_int32(self):
+        from torch._inductor.utils import use_triton_tma_template
+
+        int32_max = torch.iinfo(torch.int32).max
+        mat1 = mock.Mock()
+        mat1.get_size.return_value = [128, int32_max + 1]
+        mat2 = mock.Mock()
+        mat2.get_size.return_value = [int32_max + 1, 128]
+        output_layout = mock.Mock()
+        output_layout.size = [128, 128]
+
+        with (
+            config.patch({"triton.enable_persistent_tma_matmul": True}),
+            mock.patch("torch._inductor.utils.can_use_tma", return_value=True),
+        ):
+            self.assertFalse(
+                use_triton_tma_template(mat1, mat2, output_layout=output_layout)
+            )
+
+        mat1.get_size.return_value = [128, int32_max]
+        mat2.get_size.return_value = [int32_max, 128]
+
+        with (
+            config.patch({"triton.enable_persistent_tma_matmul": True}),
+            mock.patch("torch._inductor.utils.can_use_tma", return_value=True),
+        ):
+            self.assertTrue(
+                use_triton_tma_template(mat1, mat2, output_layout=output_layout)
+            )
+
+    def test_descriptor_offsets_fit_in_int32_uses_expected_guarding(self):
+        from torch._inductor.utils import _descriptor_offsets_fit_in_int32
+
+        gm = make_fx(lambda: torch.zeros(2, 3))()
+        graph = GraphLowering(gm)
+        size = sympy.Symbol("s0", integer=True, nonnegative=True)
+
+        with V.set_graph_handler(graph):
+            with (
+                mock.patch.object(
+                    V.graph.sizevars, "statically_known_true", return_value=True
+                ) as statically_known_true,
+                mock.patch.object(
+                    V.graph.sizevars, "guard_or_false", return_value=True
+                ) as guard_or_false,
+            ):
+                self.assertTrue(
+                    _descriptor_offsets_fit_in_int32([size], add_guards=False)
+                )
+                statically_known_true.assert_called_once_with(
+                    sympy.Le(size, torch.iinfo(torch.int32).max)
+                )
+                guard_or_false.assert_not_called()
+
+            with (
+                mock.patch.object(
+                    V.graph.sizevars, "statically_known_true", return_value=True
+                ) as statically_known_true,
+                mock.patch.object(
+                    V.graph.sizevars, "guard_or_false", return_value=True
+                ) as guard_or_false,
+            ):
+                self.assertTrue(
+                    _descriptor_offsets_fit_in_int32([size], add_guards=True)
+                )
+                guard_or_false.assert_called_once_with(
+                    sympy.Le(size, torch.iinfo(torch.int32).max)
+                )
+                statically_known_true.assert_not_called()
 
     @unittest.skipIf(not torch.version.hip, "ROCM only")
     @parametrize("a_transposed", (False, True))
@@ -2930,6 +3002,46 @@ class TestMaxAutotune(TestCase):
 
         expected = torch.mm(a, b)
         torch.testing.assert_close(result, expected, rtol=1e-2, atol=1e-2)
+
+    @fresh_cache()
+    @skipIfXpu
+    @unittest.skipIf(TEST_WITH_ROCM, "Test requires CUDA")
+    @unittest.skipIf(
+        not SM90OrLater, "Requires SM90+ (H100/B200) for sufficient GPU memory"
+    )
+    @largeTensorTest("10 GB", device=GPU_TYPE)
+    def test_max_autotune_mm_persistent_tma_large_input_tensor_int64_indexing(self):
+        """
+        Test persistent TMA mm with input tensor exceeding 2^31 elements.
+        Regression test for https://github.com/pytorch/pytorch/issues/171389.
+        Triton TMA descriptors require 32-bit block offsets even when the
+        surrounding kernel uses int64 indexing.
+        """
+
+        def mm(a, b):
+            return torch.mm(a, b)
+
+        M, K, N = 1280, 65536, 65536
+        a = torch.randn(M, K, device=GPU_TYPE, dtype=torch.float16)
+        b = torch.randn(K, N, device=GPU_TYPE, dtype=torch.float16)
+
+        self.assertTrue(
+            b.numel() > 2**31 - 1,
+            f"Test requires tensor with >2^31 elements, got {b.numel()}",
+        )
+
+        with config.patch(
+            {
+                "max_autotune": True,
+                "max_autotune_gemm_backends": "TRITON",
+                "triton.enable_persistent_tma_matmul": "1",
+                "triton.native_matmul": False,
+                "test_configs.autotune_choice_name_regex": "mm_persistent_tma",
+            }
+        ):
+            result = torch.compile(mm)(a, b)
+
+        torch.testing.assert_close(result, torch.mm(a, b), rtol=1e-2, atol=1e-2)
 
 
 @instantiate_parametrized_tests

@@ -1956,12 +1956,43 @@ def can_use_tma(
     )
 
 
+def _descriptor_offsets_fit_in_int32(
+    sizes: Sequence[sympy.Expr], add_guards: bool = False
+) -> bool:
+    int32_max = torch.iinfo(torch.int32).max
+    if all(isinstance(size, (int, sympy.Integer)) for size in sizes):
+        return all(size <= int32_max for size in sizes)
+
+    from .virtualized import V
+
+    is_in_bounds = (
+        V.graph.sizevars.guard_or_false
+        if add_guards
+        else V.graph.sizevars.statically_known_true
+    )
+    return all(
+        size <= int32_max
+        if isinstance(size, (int, sympy.Integer))
+        else is_in_bounds(sympy.Le(size, int32_max))
+        for size in sizes
+    )
+
+
 def use_triton_tma_template(
     *matrices: IRNode, output_layout: Layout, add_guards: bool = False
 ) -> bool:
     if not config.triton.enable_persistent_tma_matmul:
         return False
     if not all(len(m.get_size()) == 2 for m in matrices):
+        return False
+    if not all(
+        _descriptor_offsets_fit_in_int32(m.get_size(), add_guards=add_guards)
+        for m in matrices
+    ):
+        return False
+    if config.triton.enable_template_tma_store and not _descriptor_offsets_fit_in_int32(
+        output_layout.size, add_guards=add_guards
+    ):
         return False
     # On AMD (HIP), TMA is not available but we still use non-TMA persistent
     # kernels, so skip the TMA compatibility checks.
