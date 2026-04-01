@@ -525,7 +525,7 @@ def make_profile_guided_estimator(
                         "group_size": len(pg_ranks),
                         "stride": _rank_stride(pg_ranks),
                         "pgle_ms": est,
-                        "source": "profile",
+                        "source": profile.last_estimation_source or "profile",
                     }
                 )
             else:

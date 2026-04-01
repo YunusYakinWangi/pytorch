@@ -96,6 +96,18 @@ class SdpaRecord:
 # ---------------------------------------------------------------------------
 
 
+_DTYPE_BYTES: dict[str, int] = {
+    "Float": 4,
+    "Half": 2,
+    "BFloat16": 2,
+    "Double": 8,
+    "Int": 4,
+    "Long": 8,
+    "Char": 1,
+    "Byte": 1,
+}
+
+
 @dataclass
 class ProfileData:
     """Parse Chrome Trace JSON and build lookup tables for kernel runtimes."""
@@ -124,6 +136,12 @@ class ProfileData:
     _sdpa_index: dict[tuple[int, int, int, int, str, bool], float] = field(
         default_factory=dict
     )
+    # Peak observed bandwidth per PG (GB/s), computed from largest messages
+    _pg_peak_bw: dict[tuple[int, ...], float] = field(default_factory=dict)
+    # Stride-based fallback: (stride, group_size) -> peak BW (GB/s)
+    _stride_peak_bw: dict[tuple[int, int], float] = field(default_factory=dict)
+    # Source of last lookup_collective result: "profile" or "pg_bandwidth"
+    last_estimation_source: str = ""
 
     def load(self, trace_path: str) -> None:
         """Load and parse a Chrome Trace JSON file."""
@@ -273,6 +291,22 @@ class ProfileData:
             )
         )
 
+    @staticmethod
+    def _to_output_nelems(norm_name: str, in_nelems: int, group_size: int) -> int:
+        """Convert profile 'In msg nelems' to output-tensor convention.
+
+        The profile records input nelems per collective, but the FX scheduler
+        computes nelems from node.meta["val"] which is the output tensor:
+          all_gather output = input * group_size
+          reduce_scatter output = input / group_size
+          all_reduce output = input (same size)
+        """
+        if "all_gather" in norm_name:
+            return in_nelems * group_size
+        if "reduce_scatter" in norm_name:
+            return max(in_nelems // group_size, 1)
+        return in_nelems
+
     def _build_indices(self) -> None:
         """Build lookup indices from parsed records."""
         coll_idx: dict[tuple[str, tuple[int, ...], str], list[tuple[int, float]]] = (
@@ -288,13 +322,14 @@ class ProfileData:
         for rec in self.collectives:
             norm_name = self._normalize_collective_name(rec.collective_name)
             gs = len(rec.pg_ranks) if rec.pg_ranks else rec.group_size
+            nelems = self._to_output_nelems(norm_name, rec.nelems, gs)
             coll_idx[(norm_name, rec.pg_ranks, rec.dtype)].append(
-                (rec.nelems, rec.duration_us)
+                (nelems, rec.duration_us)
             )
             stride = _rank_stride(rec.pg_ranks)
             if stride is not None:
                 coll_idx_by_stride[(norm_name, stride, gs, rec.dtype)].append(
-                    (rec.nelems, rec.duration_us)
+                    (nelems, rec.duration_us)
                 )
                 pg_sets_by_stride[(stride, gs)].add(rec.pg_ranks)
         # Sort by nelems for interpolation
@@ -331,6 +366,54 @@ class ProfileData:
             sdpa_groups[key].append(rec.duration_us)
         self._sdpa_index = {k: sum(v) / len(v) for k, v in sdpa_groups.items()}
 
+        # Per-PG peak bandwidth: compute bytes/us for each collective observation,
+        # then take the max from the top-N largest messages per PG (where bandwidth
+        # is most representative of hardware speed, not dominated by startup latency).
+        # Uses output-convention bytes (matching _estimate_with_pg_bandwidth).
+        _TOP_N = 5  # consider top N largest messages for peak BW
+        pg_bw_samples: dict[tuple[int, ...], list[tuple[int, float]]] = defaultdict(list)
+        stride_bw_samples: dict[tuple[int, int], list[tuple[int, float]]] = (
+            defaultdict(list)
+        )
+        for rec in self.collectives:
+            if rec.nelems <= 0 or rec.duration_us <= 0:
+                continue
+            norm_name = self._normalize_collective_name(rec.collective_name)
+            gs = len(rec.pg_ranks) if rec.pg_ranks else rec.group_size
+            out_nelems = self._to_output_nelems(norm_name, rec.nelems, gs)
+            elem_bytes = self._dtype_elem_bytes(rec.dtype)
+            total_bytes = out_nelems * elem_bytes
+            bw_gbps = total_bytes / (rec.duration_us * 1e-6) / 1e9  # GB/s
+            pg_bw_samples[rec.pg_ranks].append((total_bytes, bw_gbps))
+            stride = _rank_stride(rec.pg_ranks)
+            if stride is not None:
+                stride_bw_samples[(stride, gs)].append((total_bytes, bw_gbps))
+
+        def _peak_bw_from_samples(
+            samples: list[tuple[int, float]],
+        ) -> float:
+            """Get peak BW from the top-N largest messages."""
+            # Sort by message size descending, take top N, return max BW
+            sorted_samples = sorted(samples, key=lambda x: x[0], reverse=True)
+            top = sorted_samples[:_TOP_N]
+            return max(bw for _, bw in top) if top else 0.0
+
+        self._pg_peak_bw = {
+            pg: _peak_bw_from_samples(samples)
+            for pg, samples in pg_bw_samples.items()
+            if samples
+        }
+        self._stride_peak_bw = {
+            key: _peak_bw_from_samples(samples)
+            for key, samples in stride_bw_samples.items()
+            if samples
+        }
+
+    @staticmethod
+    def _dtype_elem_bytes(dtype: str) -> int:
+        """Return bytes per element for a profile dtype string."""
+        return _DTYPE_BYTES.get(dtype, 2)  # default bf16
+
     @staticmethod
     def _normalize_collective_name(name: str) -> str:
         """Normalize collective name between profile and FX conventions.
@@ -353,6 +436,34 @@ class ProfileData:
     # Lookup methods (return ms or None)
     # -----------------------------------------------------------------------
 
+    # Maximum ratio of target_nelems / max_observed before switching from
+    # log-log extrapolation to bandwidth-based estimation.
+    EXTRAPOLATION_CAP = 2.0
+
+    def _estimate_with_pg_bandwidth(
+        self,
+        pg_ranks: tuple[int, ...],
+        nelems: int,
+        dtype: str,
+    ) -> float | None:
+        """Estimate collective duration using peak observed bandwidth for this PG.
+
+        Used when the target size exceeds the extrapolation cap. Returns ms or None.
+        """
+        bw_gbps = self._pg_peak_bw.get(pg_ranks)
+        if bw_gbps is None or bw_gbps <= 0:
+            # Try stride-based fallback
+            stride = _rank_stride(pg_ranks)
+            gs = len(pg_ranks)
+            if stride is not None:
+                bw_gbps = self._stride_peak_bw.get((stride, gs))
+        if bw_gbps is None or bw_gbps <= 0:
+            return None  # fall through to analytical
+        elem_bytes = self._dtype_elem_bytes(dtype)
+        total_bytes = nelems * elem_bytes
+        dur_ms = total_bytes / (bw_gbps * 1e6)  # GB/s → bytes/ms = 1e6
+        return dur_ms
+
     def lookup_collective(
         self,
         collective_name: str,
@@ -365,7 +476,12 @@ class ProfileData:
         Tries exact rank match first, then falls back to stride-based match
         (same mesh dimension across ranks: e.g. (0,2,4,6) and (1,3,5,7) both
         have stride=2, size=4 → same dimension).
+
+        When the target size exceeds EXTRAPOLATION_CAP * max_observed, uses
+        bandwidth-based estimation from peak observed bandwidth instead of
+        linear extrapolation (which overestimates for large messages).
         """
+        self.last_estimation_source = ""
         norm_name = self._normalize_collective_name(collective_name)
         # Try exact rank match first
         key = (norm_name, pg_ranks, dtype)
@@ -386,10 +502,24 @@ class ProfileData:
         # Exact match
         for n, dur in entries:
             if n == nelems:
+                self.last_estimation_source = "profile"
                 return dur / 1e3  # us -> ms
 
+        # Check extrapolation distance: if target is far beyond observed range,
+        # use bandwidth-based model instead of log-log extrapolation
+        max_observed = max((n for n, _ in entries if n > 0), default=0)
+        if max_observed > 0 and nelems > max_observed * self.EXTRAPOLATION_CAP:
+            est = self._estimate_with_pg_bandwidth(pg_ranks, nelems, dtype)
+            if est is not None:
+                self.last_estimation_source = "pg_bandwidth"
+                return est
+            # Fall through to log-log if no BW data available
+
         # Interpolation in log-log space
-        return self._interpolate_log_log(entries, nelems)
+        result = self._interpolate_log_log(entries, nelems)
+        if result is not None:
+            self.last_estimation_source = "profile"
+        return result
 
     def _interpolate_log_log(
         self, entries: list[tuple[int, float]], target_nelems: int

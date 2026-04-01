@@ -1784,6 +1784,7 @@ def schedule_overlap_bucketing(
     bucket_only_internode_comms=False,
     prioritize_bucketing_during_scheduling: bool = True,
     max_off_bucket_gb: float | None = 0.5,
+    bucket_mode: BucketMode | None = None,
 ) -> torch.fx.GraphModule:
     """Schedule nodes to maximize compute-collective overlap.
 
@@ -1884,7 +1885,10 @@ def schedule_overlap_bucketing(
         bucket_only_internode_comms=bucket_only_internode_comms,
         prioritize_bucketing_during_scheduling=prioritize_bucketing_during_scheduling,
         max_off_bucket_gb=max_off_bucket_gb,
-    ).run()
+    )
+    if bucket_mode is not None:
+        overlap_kwargs["bucket_mode"] = bucket_mode
+    ret = OverlapScheduler(gm, **overlap_kwargs).run()  # type: ignore[arg-type]
     trace_structured(
         "artifact",
         metadata_fn=lambda: {
