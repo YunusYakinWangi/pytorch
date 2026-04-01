@@ -1023,14 +1023,14 @@ class TestScheduleLowering(TestCase):
             pp_degree=2,
             num_microbatches=4,
             with_comms=True,
-            overlap_pp_comm=True,
+            defer_pp_recv=False,
         )
         schedule_ops_no_overlap = get_schedule_ops(
             schedule="Interleaved1F1B",
             pp_degree=2,
             num_microbatches=4,
             with_comms=True,
-            overlap_pp_comm=False,
+            defer_pp_recv=True,
         )
 
         rank0_overlap = schedule_ops_overlap[0]

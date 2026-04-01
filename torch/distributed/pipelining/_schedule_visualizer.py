@@ -38,7 +38,7 @@ def get_schedule_ops(
     num_stages_per_rank: int | None = None,
     add_spacing: bool = False,
     with_comms: bool = False,
-    overlap_pp_comm: bool = True,
+    defer_pp_recv: bool = False,
 ) -> list[list[_Action | None]]:
     """
     Get all actions for a given schedule, pp_degree, and num_microbatches. The actions are returned in a list of lists
@@ -47,9 +47,9 @@ def get_schedule_ops(
     The schedule can be specified as a string which is passed into get_schedule_class() or a _PipelineSchedule instance.
 
     Args:
-        overlap_pp_comm: If True (default), RECV ops are placed as early as possible to overlap
-            P2P communication with computation. If False, RECV ops are deferred to right before
-            the consuming compute op. Only takes effect when with_comms=True.
+        defer_pp_recv: If True, RECV ops are deferred to right before the consuming
+            compute op. If False (default), RECV ops are placed as early as possible to
+            overlap P2P communication with computation. Only takes effect when with_comms=True.
     """
     if add_spacing and with_comms:
         raise ValueError("Cannot add spacing and view comms at the same time")
@@ -102,7 +102,7 @@ def get_schedule_ops(
     all_actions: list[list[_Action | None]] = []
     if with_comms:
         runtime = _PipelineScheduleRuntime(
-            stages, num_microbatches, overlap_pp_comm=overlap_pp_comm
+            stages, num_microbatches, defer_pp_recv=defer_pp_recv
         )
         runtime._prepare_schedule_with_comms(schedule_instance.pipeline_order)
         for rank in range(pp_degree):
