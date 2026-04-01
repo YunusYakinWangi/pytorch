@@ -9,6 +9,10 @@ import torch._dynamo.test_case
 import torch._dynamo.testing
 import torch._logging
 from torch._dynamo.exc import FailOnRecompileLimitHit
+from torch.testing._internal.common_utils import (
+    instantiate_parametrized_tests,
+    parametrize,
+)
 from torch.testing._internal.logging_utils import kwargs_to_settings, log_settings
 
 
@@ -968,6 +972,94 @@ class IsolatedRegionTests(torch._dynamo.test_case.TestCase):
         mode["value"] = "d"
         opt_f(torch.randn(4))
         self.assertEqual(cnt.frame_count, frame_count_after_3)
+
+    def test_isolated_region_same_backend_different_regions(self):
+        """Two isolated regions using the SAME CompileCounter backend.
+        Without proper C++ cache bucketing, the second region would get a
+        cache hit from the first region's entry (same backend, same guards).
+        This verifies the per-region map is actually used."""
+        cnt = torch._dynamo.testing.CompileCounter()
+
+        def f(x):
+            return x.sin()
+
+        opt_a = torch.compile(f, backend=cnt, isolated_region=True)
+        opt_b = torch.compile(f, backend=cnt, isolated_region=True)
+
+        opt_a(torch.randn(3))
+        self.assertEqual(cnt.frame_count, 1)
+
+        # Must compile again — different region, even though same backend
+        opt_b(torch.randn(3))
+        self.assertEqual(cnt.frame_count, 2)
+
+        # Cache hits within each region
+        opt_a(torch.randn(3))
+        opt_b(torch.randn(3))
+        self.assertEqual(cnt.frame_count, 2)
+
+    @parametrize(
+        "backend",
+        ["eager", "aot_eager", "inductor"],
+    )
+    def test_isolated_region_string_backends(self, backend):
+        """Two isolated regions using the same string backend on the same
+        function. Each region compiles independently — verified by cache
+        entry count (2 entries, one per region)."""
+
+        def f(x):
+            return x.sin()
+
+        opt_a = torch.compile(f, backend=backend, isolated_region=True)
+        opt_b = torch.compile(f, backend=backend, isolated_region=True)
+
+        opt_a(torch.randn(3))
+        self.assertEqual(self._num_cache_entries(f), 1)
+
+        opt_b(torch.randn(3))
+        self.assertEqual(self._num_cache_entries(f), 2)
+
+        # Cache hits — no new entries
+        opt_a(torch.randn(3))
+        opt_b(torch.randn(3))
+        self.assertEqual(self._num_cache_entries(f), 2)
+
+    def test_isolated_region_gc_wrapper(self):
+        """When an isolated region's compile wrapper is GC'd, the orphaned
+        cache entries remain on the code object but are harmless. A new
+        torch.compile gets a fresh region_id and compiles independently."""
+        import gc
+
+        cnt = torch._dynamo.testing.CompileCounter()
+
+        def f(x):
+            return x.sin()
+
+        opt_a = torch.compile(f, backend=cnt, isolated_region=True)
+        opt_a(torch.randn(3))
+        self.assertEqual(cnt.frame_count, 1)
+        self.assertEqual(self._num_cache_entries(f), 1)
+
+        # Drop the wrapper and force GC
+        del opt_a
+        gc.collect()
+
+        # Orphaned entry still on the code object
+        self.assertEqual(self._num_cache_entries(f), 1)
+
+        # New compile gets a fresh region — compiles independently,
+        # doesn't reuse the orphaned entry
+        opt_b = torch.compile(f, backend=cnt, isolated_region=True)
+        opt_b(torch.randn(3))
+        self.assertEqual(cnt.frame_count, 2)
+        self.assertEqual(self._num_cache_entries(f), 2)
+
+        # reset() clears everything including orphaned entries
+        torch._dynamo.reset()
+        self.assertEqual(self._num_cache_entries(f), 0)
+
+
+instantiate_parametrized_tests(IsolatedRegionTests)
 
 
 if __name__ == "__main__":

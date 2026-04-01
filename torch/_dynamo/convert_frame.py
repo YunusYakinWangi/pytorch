@@ -577,7 +577,7 @@ def get_compile_id(
     )
 
 
-_next_region_id = 0
+_next_region_id = itertools.count()
 
 
 class ConvertFrameAssert:
@@ -602,9 +602,7 @@ class ConvertFrameAssert:
         self._isolated_region = isolated_region
         self._region_compilation_counts: dict[int, int] = {}
         if isolated_region:
-            global _next_region_id
-            self._region_id = _next_region_id
-            _next_region_id += 1
+            self._region_id = next(_next_region_id)
         else:
             self._region_id = -1
         self._box = ConvertFrameBox()
@@ -2168,6 +2166,7 @@ class ConvertFrame:
         self._hooks = hooks
         self._recompile_limit = recompile_limit
         self._isolated_region = isolated_region
+        self._region_id = self._inner_convert._region_id
 
     @property
     def _clone_with_backend(self) -> Callable[[WrapBackendDebug], ConvertFrame]:

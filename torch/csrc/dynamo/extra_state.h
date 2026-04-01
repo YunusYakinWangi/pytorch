@@ -77,6 +77,8 @@ typedef struct VISIBILITY_HIDDEN ExtraState {
   // this ExtraState.
   std::unique_ptr<std::unordered_map<int64_t, std::list<CacheEntry>>>
       region_cache_map;
+  // Total cache entries across all regions (for O(1) has_any_cache_entries)
+  size_t total_cache_entry_count{0};
   // Frame state to detect dynamic shape dims
   py::dict frame_state;
   // Actions to apply to all frames with this code object

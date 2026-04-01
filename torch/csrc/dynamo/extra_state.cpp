@@ -43,17 +43,7 @@ std::list<CacheEntry>& ExtraState::get_or_create_region_list(
 }
 
 bool ExtraState::has_any_cache_entries() const {
-  if (!this->cache_entry_list.empty()) {
-    return true;
-  }
-  if (this->region_cache_map) {
-    for (const auto& kv : *this->region_cache_map) {
-      if (!kv.second.empty()) {
-        return true;
-      }
-    }
-  }
-  return false;
+  return this->total_cache_entry_count > 0;
 }
 
 void ExtraState::move_to_front(CacheEntry* cache_entry) {
@@ -323,6 +313,7 @@ CacheEntry* create_cache_entry(
   new_iter->_owner = extra_state;
   new_iter->_owner_loc = new_iter;
   new_iter->_owner_list = &region_list;
+  extra_state->total_cache_entry_count++;
   // Set guard_manager references to extra_state and CacheEntry
   // Warning: lifetime is controlled by C++!
   py::handle guard_manager = py::handle(guarded_code).attr("guard_manager");
