@@ -8858,7 +8858,7 @@ for shape in [(1,), ()]:
         """Test both paths into BackwardCFunction.apply with boxed_grads_call.
 
         Path 1 (C++ engine): .backward() goes through C++ PyNode::apply,
-        which boxes grads into a _BoxedGradList marker type.
+        which boxes grads into a _BoxedGradsList marker type.
 
         Path 2 (direct grad_fn.apply()): bypasses C++, grads arrive as
         plain args and get boxed by Python into a regular list."""
@@ -8901,7 +8901,7 @@ for shape in [(1,), ()]:
 
     def test_custom_function_boxed_grads_single_list_arg(self):
         """A plain list passed via grad_fn.apply() must not be confused
-        with C++ boxing. _BoxedGradList marker type ensures this."""
+        with C++ boxing. _BoxedGradsList marker type ensures this."""
 
         received_grads = []
 

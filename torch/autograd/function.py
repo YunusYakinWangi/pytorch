@@ -294,13 +294,13 @@ class _HookMixin:
         return backward_hooks, handle
 
 
-class _BoxedGradList(list):
+class _BoxedGradsList(list):
     """Marker type for grads boxed by the autograd engine in PyNode::apply.
 
-    The autograd engine creates a _BoxedGradList (instead of a plain list)
+    The autograd engine creates a _BoxedGradsList (instead of a plain list)
     when boxing grads for boxed_grads_call=True. BackwardCFunction.apply
     checks for this type to avoid double-boxing — a plain list from user
-    code is never a _BoxedGradList, so there is no ambiguity.
+    code is never a _BoxedGradsList, so there is no ambiguity.
     """
 
 
@@ -326,12 +326,12 @@ class BackwardCFunction(_C._FunctionBase, FunctionCtx, _HookMixin):
         user_fn = vjp_fn if vjp_fn is not Function.vjp else backward_fn
         # When boxed_grads_call is True, backward expects grads as a single
         # mutable list. The C++ engine path (PyNode::apply) already boxes
-        # grads into a _BoxedGradList before calling apply. The direct
+        # grads into a _BoxedGradsList before calling apply. The direct
         # .apply() path (e.g. grad_fn.apply(None, tensor)) does not go
         # through C++, so we box here.
         fwd_cls = self._forward_cls  # type: ignore[attr-defined]  # pyrefly: ignore[missing-attribute]
         if getattr(fwd_cls, "boxed_grads_call", False):
-            if not (len(args) == 1 and isinstance(args[0], _BoxedGradList)):
+            if not (len(args) == 1 and isinstance(args[0], _BoxedGradsList)):
                 args = (list(args),)
         return user_fn(self, *args)
 
