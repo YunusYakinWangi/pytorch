@@ -24,6 +24,7 @@ import contextlib
 import copy
 import dataclasses
 import functools
+import heapq
 import inspect
 import itertools
 import logging
@@ -489,6 +490,145 @@ class ExportMetaData:
         str,
         dict[str, torch.utils._pytree.TreeSpec | torch.utils._pytree.LeafSpec],
     ] = dc_field(default_factory=dict)
+
+
+def _is_safe_to_reorder(node: fx.Node) -> bool:
+    """Check if a node is safe to reorder during graph canonicalization.
+
+    Builds on Node.is_impure() (used by DCE) with two additional checks for
+    cases it doesn't cover: in-place call_method nodes and non-OpOverload
+    state-changing functions detected by a no-node-arguments heuristic.
+    """
+    if node.op == "call_method":
+        # Node.is_impure() returns False for all call_method nodes, but
+        # in-place methods (e.g. .requires_grad_(), .copy_()) mutate state.
+        return not node.target.endswith("_")  # pyrefly: ignore[missing-attribute]
+    if node.op != "call_function":
+        return True
+    # Node.is_impure() covers: mutable OpOverload schemas, effects system,
+    # _side_effectful_functions, and random ops.
+    if node.is_impure():
+        return False
+    # Non-OpOverload call_function targets that take no FX Node arguments are
+    # likely state-changing operations (e.g., _vmap_increment_nesting,
+    # _set_fwd_grad_enabled). Functions consuming tensors are computations.
+    if not isinstance(node.target, torch._ops.OpOverload):
+        return bool(node.all_input_nodes)
+    return True
+
+
+def _canonicalize_graph(graph: fx.Graph) -> fx.Graph:
+    """
+    Reorder graph nodes into a canonical topological order that is deterministic
+    regardless of the order in which nodes were originally traced.
+
+    This ensures that structurally equivalent graphs (e.g., same model traced with
+    different dict iteration orders across distributed ranks) produce identical node
+    names and ordering, which is required for cross-rank synchronization in the AOT
+    partitioner.
+
+    Uses Kahn's algorithm with a canonical tiebreaker:
+    - Placeholders sorted by grapharg source name
+    - get_attr nodes sorted by target
+    - Computation nodes sorted by canonical indices of their inputs
+
+    Nodes that aren't provably pure act as barriers — they are chained in
+    original order, and pure nodes are confined to their barrier segment.
+    """
+    from torch.fx.graph import map_arg
+
+    new_graph = fx.Graph()
+    indeg: dict[fx.Node, int] = dict.fromkeys(graph.nodes, 0)
+
+    # Build standard data-dependency edges
+    for node in graph.nodes:
+        for user in node.users:
+            indeg[user] += 1
+
+    # Nodes that aren't provably pure act as barriers. We partition the graph
+    # into segments separated by barrier nodes and add synthetic edges:
+    #   prev_barrier → reorderable_nodes_in_segment → next_barrier
+    # This prevents reorderable nodes from crossing barrier boundaries while
+    # still allowing canonical reordering within each segment.
+    extra_users: dict[fx.Node, list[fx.Node]] = collections.defaultdict(list)
+    prev_barrier: fx.Node | None = None
+    segment_reorderable: list[fx.Node] = []
+    for node in graph.nodes:
+        if node.op in ("placeholder", "get_attr", "output"):
+            continue
+        if not _is_safe_to_reorder(node):
+            if prev_barrier is not None:
+                extra_users[prev_barrier].append(node)
+                indeg[node] += 1
+            for reorderable in segment_reorderable:
+                extra_users[reorderable].append(node)
+                indeg[node] += 1
+            segment_reorderable = []
+            prev_barrier = node
+        elif prev_barrier is not None:
+            extra_users[prev_barrier].append(node)
+            indeg[node] += 1
+            segment_reorderable.append(node)
+
+    canonical_idx: dict[fx.Node, int] = {}
+    counter = 0
+
+    def _canonical_key(node: fx.Node) -> tuple[Any, ...]:
+        if node.op == "placeholder":
+            grapharg = node.meta.get("grapharg")
+            if grapharg is not None and grapharg.source is not None:
+                source_name = grapharg.source.name
+            else:
+                source_name = ""
+            return (0, source_name)
+        elif node.op == "get_attr":
+            return (1, str(node.target))
+        elif node.op == "output":
+            return (3,)
+        else:
+            input_indices = tuple(canonical_idx[n] for n in node.all_input_nodes)
+            return (2, input_indices)
+
+    def _copy_node(node: fx.Node) -> fx.Node:
+        # Like node_copy but without preserving the original name, so the
+        # new graph's namespace assigns canonical names based on target.
+        args = map_arg(node.args, lambda x: env[x])
+        kwargs = map_arg(node.kwargs, lambda x: env[x])
+        new_node = new_graph.create_node(
+            node.op, node.target, args, kwargs, type_expr=node.type
+        )
+        new_node.meta = copy.copy(node.meta)
+        return new_node
+
+    # Seed the heap with nodes that have no dependencies
+    ready: list[tuple[tuple[Any, ...], int, fx.Node]] = []
+    for node in graph.nodes:
+        if indeg[node] == 0:
+            heapq.heappush(ready, (_canonical_key(node), counter, node))
+            counter += 1
+
+    env: dict[fx.Node, fx.Node] = {}
+
+    while ready:
+        _, _, cur = heapq.heappop(ready)
+        env[cur] = _copy_node(cur)
+        canonical_idx[cur] = len(canonical_idx)
+
+        for user in itertools.chain(cur.users, extra_users.get(cur, ())):
+            indeg[user] -= 1
+            if indeg[user] == 0:
+                heapq.heappush(ready, (_canonical_key(user), counter, user))
+                counter += 1
+
+    if len(new_graph.nodes) != len(graph.nodes):
+        remaining = [n for n in indeg if indeg[n] != 0]
+        raise RuntimeError(
+            f"Canonicalization failed: processed {len(new_graph.nodes)} of "
+            f"{len(graph.nodes)} nodes. Remaining: {remaining}"
+        )
+
+    new_graph._codegen = graph._codegen
+    return new_graph
 
 
 def get_builtins_dict(global_scope: Scope) -> dict[str, Any]:
@@ -2609,6 +2749,8 @@ class OutputGraph(OutputGraphCommon):
 
             # free a bit of memory
             self.real_value_cache.clear()
+
+            self.graph = _canonicalize_graph(self.graph)
 
             gm = _make_graph_module(root, self.graph)
 
