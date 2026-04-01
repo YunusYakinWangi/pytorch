@@ -61,22 +61,16 @@ typedef struct VISIBILITY_HIDDEN ExtraState {
   // function.
   PyCodeObject* orig_code;
   std::list<PrecompileEntry> precompile_entries;
-  // Default cache list for non-isolated compilations (id == -1).
-  // Used directly when no isolate_recompiles regions exist on this code object.
-  std::list<CacheEntry> cache_entry_list;
-  // Lazily allocated per-compile map for isolate_recompiles support.
-  // Only created when the first isolate_recompiles (id >= 0) is used.
-  // Does NOT include id -1 entries — those stay in cache_entry_list.
+  // Per-compile cache map: isolate_recompiles_id -> list of CacheEntry.
+  // id -1 is the default (non-isolated) bucket. id >= 0 are isolated compiles.
+  // All cache entries live in this map — there is no separate default list.
   //
   // IMPORTANT: CacheEntry::_owner_list holds raw pointers to the std::list
   // values inside this map. The C++ standard guarantees that unordered_map
   // insert/rehash does not invalidate pointers or references to elements,
-  // so these pointers remain valid. However, erasing an entry from this map
-  // would invalidate all _owner_list pointers for that entry's CacheEntries,
-  // leading to use-after-free. Do NOT erase entries for the lifetime of
-  // this ExtraState.
-  std::unique_ptr<std::unordered_map<int64_t, std::list<CacheEntry>>>
-      isolate_recompiles_cache_map;
+  // so these pointers remain valid. Do NOT erase entries from this map for
+  // the lifetime of this ExtraState.
+  std::unordered_map<int64_t, std::list<CacheEntry>> cache_entry_map;
   // Total cache entries across all compile scopes (for O(1)
   // has_any_cache_entries)
   size_t total_cache_entry_count{0};
@@ -86,8 +80,7 @@ typedef struct VISIBILITY_HIDDEN ExtraState {
   FrameExecStrategy strategy{DEFAULT, DEFAULT};
 
   ExtraState(PyCodeObject* orig_code_arg);
-  CacheEntry* get_first_entry();
-  std::list<CacheEntry>& get_or_create_isolate_recompiles_list(int64_t id);
+  std::list<CacheEntry>& cache_entry_list(int64_t isolate_recompiles_id);
   bool has_any_cache_entries() const;
   void move_to_front(CacheEntry* cache_entry);
   void move_to_back(CacheEntry* cache_entry);

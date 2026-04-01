@@ -20,26 +20,12 @@ bool use_lru = true;
 
 Py_ssize_t extra_index = -1;
 
-CacheEntry* ExtraState::get_first_entry() {
-  if (this->cache_entry_list.empty()) {
-    return nullptr;
-  }
-  return &this->cache_entry_list.front();
-}
-
 ExtraState::ExtraState(PyCodeObject* orig_code_arg)
     : orig_code(orig_code_arg) {}
 
-std::list<CacheEntry>& ExtraState::get_or_create_isolate_recompiles_list(
-    int64_t id) {
-  if (id < 0) {
-    return this->cache_entry_list;
-  }
-  if (!this->isolate_recompiles_cache_map) {
-    this->isolate_recompiles_cache_map =
-        std::make_unique<std::unordered_map<int64_t, std::list<CacheEntry>>>();
-  }
-  return (*this->isolate_recompiles_cache_map)[id];
+std::list<CacheEntry>& ExtraState::cache_entry_list(
+    int64_t isolate_recompiles_id) {
+  return this->cache_entry_map[isolate_recompiles_id];
 }
 
 bool ExtraState::has_any_cache_entries() const {
@@ -96,16 +82,9 @@ CacheEntry* extract_cache_entry(
   if (extra_state == nullptr) {
     return nullptr;
   }
-  if (isolate_recompiles_id < 0) {
-    return extra_state->get_first_entry();
-  }
-  if (extra_state->isolate_recompiles_cache_map) {
-    auto it =
-        extra_state->isolate_recompiles_cache_map->find(isolate_recompiles_id);
-    if (it != extra_state->isolate_recompiles_cache_map->end() &&
-        !it->second.empty()) {
-      return &it->second.front();
-    }
+  auto it = extra_state->cache_entry_map.find(isolate_recompiles_id);
+  if (it != extra_state->cache_entry_map.end() && !it->second.empty()) {
+    return &it->second.front();
   }
   return nullptr;
 }
@@ -238,10 +217,11 @@ void lookup(
     }
   }
 
-  if (isolate_recompiles_id < 0) {
-    // Non-isolated: walk the default flat list (zero map overhead)
+  // Look up in this compile scope's bucket
+  auto it = extra_state->cache_entry_map.find(isolate_recompiles_id);
+  if (it != extra_state->cache_entry_map.end()) {
     found = lookup_in_list(
-        extra_state->cache_entry_list,
+        it->second,
         f_locals,
         backend,
         index,
@@ -251,33 +231,17 @@ void lookup(
     if (guard_error) {
       return;
     }
-  } else {
-    // Isolated compile: look up in the isolate_recompiles bucket
-    if (extra_state->isolate_recompiles_cache_map) {
-      auto it = extra_state->isolate_recompiles_cache_map->find(
-          isolate_recompiles_id);
-      if (it != extra_state->isolate_recompiles_cache_map->end()) {
-        found = lookup_in_list(
-            it->second,
-            f_locals,
-            backend,
-            index,
-            is_skip_guard_eval_unsafe,
-            &guard_error,
-            maybe_cached_code);
-        if (guard_error) {
-          return;
-        }
-      }
-    }
+  }
 
-    // Global fallback: if no hit in the isolated bucket, also check the
-    // default cache_entry_list (non-isolated entries). This allows isolated
-    // compiles to reuse compilations from non-isolated torch.compile() calls
-    // on the same code object, provided the backend and guards match.
-    if (found == nullptr) {
+  // Global fallback: if an isolated compile (id >= 0) has no hit in its own
+  // bucket, also check the default bucket (id -1). This allows isolated
+  // compiles to reuse compilations from non-isolated torch.compile() calls
+  // on the same code object, provided the backend and guards match.
+  if (found == nullptr && isolate_recompiles_id >= 0) {
+    auto default_it = extra_state->cache_entry_map.find(-1);
+    if (default_it != extra_state->cache_entry_map.end()) {
       found = lookup_in_list(
-          extra_state->cache_entry_list,
+          default_it->second,
           f_locals,
           backend,
           index,
@@ -306,18 +270,18 @@ CacheEntry* create_cache_entry(
     PyObject* guarded_code,
     PyObject* backend) {
   int64_t id = get_current_isolate_recompiles_id();
-  auto& region_list = extra_state->get_or_create_isolate_recompiles_list(id);
+  auto& entries = extra_state->cache_entry_list(id);
   std::list<CacheEntry>::iterator new_iter;
   if (use_lru) {
-    region_list.emplace_front(guarded_code, backend);
-    new_iter = region_list.begin();
+    entries.emplace_front(guarded_code, backend);
+    new_iter = entries.begin();
   } else {
-    region_list.emplace_back(guarded_code, backend);
-    new_iter = std::prev(region_list.end());
+    entries.emplace_back(guarded_code, backend);
+    new_iter = std::prev(entries.end());
   }
   new_iter->_owner = extra_state;
   new_iter->_owner_loc = new_iter;
-  new_iter->_owner_list = &region_list;
+  new_iter->_owner_list = &entries;
   extra_state->total_cache_entry_count++;
   // Set guard_manager references to extra_state and CacheEntry
   // Warning: lifetime is controlled by C++!
@@ -337,14 +301,9 @@ py::list _debug_get_cache_entry_list(const py::handle& code_obj) {
   ExtraState* extra = get_extra_state(code);
   py::list result;
   if (extra != nullptr) {
-    for (CacheEntry& e : extra->cache_entry_list) {
-      result.append(py::cast(e, py::return_value_policy::reference));
-    }
-    if (extra->isolate_recompiles_cache_map) {
-      for (auto& kv : *extra->isolate_recompiles_cache_map) {
-        for (CacheEntry& e : kv.second) {
-          result.append(py::cast(e, py::return_value_policy::reference));
-        }
+    for (auto& kv : extra->cache_entry_map) {
+      for (CacheEntry& e : kv.second) {
+        result.append(py::cast(e, py::return_value_policy::reference));
       }
     }
   }
