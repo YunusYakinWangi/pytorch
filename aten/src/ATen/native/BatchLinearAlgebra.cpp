@@ -3852,19 +3852,13 @@ Tensor& linalg_solve_triangular_out(
   // X* = (A, B)* = (A*, B*).
   //
   // We recommend looking at [Main logic] first,
-  // and at the methods therein afterwards.
+  // and then at the methods therein.
 
-  bool out_fully_owned = false;
-  if (out.numel() == 0) {
-    // Empty implies full ownership of out.
-    // This means we can alter its stride structure and play transposition tricks.
-    out_fully_owned = true;
-  } else {
-    TORCH_CHECK(
-      out.sizes() == B_.sizes(),
-      "torch.linalg.solve_triangular: ",
-      "expected `out`.shape=", B_.sizes(), ", but got ", out.sizes(), " instead"
-    );
+  // FIXME: this is inherited from the previous version.
+  // This silently re-strides out if out.shape != B.shape.
+  if (resize_output_check(out, B_.sizes())) {
+    out.resize_(B_.transpose(-2, -1).sizes(), MemoryFormat::Contiguous);
+    out.transpose_(-2, -1);
   }
 
   // Prepare A to be BLAS-compliant.
@@ -3886,6 +3880,21 @@ Tensor& linalg_solve_triangular_out(
       ));
     }
   }(A_);
+
+  auto pOut = [&]() -> c10::MaybeOwned<Tensor> {
+    // Out is borrowed when
+    // - out is empty, or
+    // - out.is_same(B), or
+    // - out is a BLAS-compatible (here: contiguous rows or cols and no memory overlaps across all dims).
+    if ((out.numel() == 0) || out.is_same(B_) || (isColMajorLike(out) || isRowMajorLike(out))) {
+      return c10::MaybeOwned<Tensor>::borrowed(out);
+    } else {
+      return c10::MaybeOwned<Tensor>::owned(at::empty({0}, A.options()));
+    }
+  }();
+  // Empty out with out.shape != B.sizes implies full ownership.
+  // This means we are free to alter its stride structure and conj/neg flags.
+  const bool out_fully_owned = (pOut->numel() == 0) && (pOut->sizes() != B_.sizes());
 
   // NOTE: modifes B in-place
   const auto solve_kernel = [&left, &upper, &unitriangular](
@@ -3927,15 +3936,6 @@ Tensor& linalg_solve_triangular_out(
     solve_kernel(*pA, *pB, trans);
   };
 
-  // Returns a Tensor view with neg/conj flags set to false
-  // Think of it as the "storage" variable for X, A, B from above
-  const auto strip_flags = [](const Tensor& t) -> Tensor {
-    auto view = t.view(t.sizes());
-    view._set_neg(false);
-    view._set_conj(false);
-    return view;
-  };
-
   // Solve (A, B) when A and B both have the same memory layout,
   // i.e. they are both row-major or column-major.
   // This follows
@@ -3944,7 +3944,7 @@ Tensor& linalg_solve_triangular_out(
   // NOTE: this method does not optimize for conj materialization.
   // NOTE: B is modified in-place.
   // NOTE: NO COPY of A is done.
-  const auto solve_with_matching_layout = [&solve, &strip_flags](
+  const auto solve_with_matching_layout = [&solve](
     const Tensor& A,
     const Tensor& B,
     TransposeType trans = TransposeType::NoTranspose
@@ -3953,15 +3953,14 @@ Tensor& linalg_solve_triangular_out(
     const bool conj_physical = A.is_conj() ^ B.is_conj();
 
     // Compute [-1]B[*]*
-    auto B_data = strip_flags(B);
-    if (neg_physical) { B_data.neg_(); }
-    if (conj_physical) { B_data.conj_physical_(); }
+    if (neg_physical) { B.neg_(); }
+    if (conj_physical) { B.conj_physical_(); }
 
     // Compute (A, [-1]B[*]*)
-    solve(A, B_data, trans);
+    solve(A, B, trans);
 
     // Compute (A, [-1]B[*]*)[*]*
-    if (conj_physical) { B_data.conj_physical_(); }
+    if (conj_physical) { B.conj_physical_(); }
 
     // B contains -(A, [-1]B[*]*)([*]*)*, if -/* are present in B
   };
@@ -4023,11 +4022,11 @@ Tensor& linalg_solve_triangular_out(
     const auto is_A_col_major = A.stride(-2) == 1;
     if (is_A_col_major) {
       // A is col-major -> resize out to be col-major and solve the original problem
-      out.resize_(B_.transpose(-2, -1).sizes(), MemoryFormat::Contiguous);
-      out.transpose_(-2, -1);
+      pOut->resize_(B_.transpose(-2, -1).sizes(), MemoryFormat::Contiguous);
+      pOut->transpose_(-2, -1);
     } else {
       // A is row-major -> risize out to be row-major and solve the transposed problem
-      out.resize_(B_.sizes(), MemoryFormat::Contiguous);
+      pOut->resize_(B_.sizes(), MemoryFormat::Contiguous);
     }
     // Optimization: conj is not materialized in the memory unless
     // A.is_conj() != B.is_conj() (see solve_by_layout_match)
@@ -4038,27 +4037,27 @@ Tensor& linalg_solve_triangular_out(
     // (A*, B) = (A, B*)* -> copy B.conj() -> set to conj after solve
     // (A, B*) -> needs no optimization
     if (pA->is_conj() && !B_.is_conj()) {
-      out.copy_(B.conj());
+      pOut->copy_(B.conj());
       // Here pA->conj() is not conjugated, and so is out,
       // so no conj is done in the physical memory
-      solve_by_layout_match(pA->conj(), out);
-      out._set_conj(true);
-      return out;
+      solve_by_layout_match(pA->conj(), *pOut);
+      pOut->_set_conj(true);
     } else {
       // Otherwise copy as-is and solve
-      out.copy_(B_);
-      solve_by_layout_match(*pA, out);
-      return out;
+      pOut->copy_(B_);
+      solve_by_layout_match(*pA, *pOut);
     }
-  } else if (!out.is_same(B_)) {
+  } else if (pOut->is_same(B_)) {
+    solve_by_layout_match(*pA, *pOut);
+  } else {
     // Copy B into out and run layout match solver
-    auto B_data = B_;
-    if (out.is_neg()) { B_data = B_data._neg_view(); }
-    if (out.is_conj()) { B_data = B_data.conj(); }
-    strip_flags(out).copy_(B_data);
+    pOut->copy_(B_);
+    solve_by_layout_match(*pA, *pOut);
   }
 
-  solve_by_layout_match(*pA, out);
+  if (!pOut->is_same(out)) {
+    out.copy_(*pOut);
+  }
   return out;
 }
 
