@@ -1,8 +1,8 @@
 # mypy: allow-untyped-defs
 import logging
 import os
-import shlex
 import shutil
+import subprocess
 
 from torch._inductor import config
 from torch._inductor.codegen.xpu.xpu_env import get_xpu_arch
@@ -131,7 +131,6 @@ def xpu_compile_command(
     else:
         raise NotImplementedError(f"Unsupported output file suffix {dst_file_ext}!")
 
-    # Use shlex.join() to properly quote arguments with spaces
-    res = shlex.join(cmd_parts)
+    res = subprocess.list2cmdline(cmd_parts)
     log.debug("XPU command: %s", res)
     return res
