@@ -4038,7 +4038,7 @@ module_db: list[ModuleInfo] = [
                gradcheck_nondet_tol=GRADCHECK_NONDET_TOL,
                skips=(
                    # test_random_samples uses float64 which is not supported on MPS
-                   DecorateInfo(expectedFailureMPS),
+                   DecorateInfo(unittest.expectedFailure, device_type='mps'),
                    DecorateInfo(unittest.skip("Skipped!"), 'TestModule', 'test_memory_format'),)
                ),
     ModuleInfo(torch.nn.FractionalMaxPool3d,
@@ -4046,7 +4046,7 @@ module_db: list[ModuleInfo] = [
                gradcheck_nondet_tol=GRADCHECK_NONDET_TOL,
                skips=(
                    # test_random_samples uses float64 which is not supported on MPS
-                   DecorateInfo(expectedFailureMPS),
+                   DecorateInfo(unittest.expectedFailure, device_type='mps'),
                    DecorateInfo(unittest.skip("Skipped!"), 'TestModule', 'test_memory_format'),)
                ),
     ModuleInfo(torch.nn.L1Loss,
