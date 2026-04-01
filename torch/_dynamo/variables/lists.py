@@ -262,6 +262,37 @@ class BaseListVariable(VariableTracker):
             mutation_type=ValueMutationNew(),
         )
 
+    def mp_subscript_impl(
+        self,
+        tx: "InstructionTranslator",
+        key: VariableTracker,
+    ) -> VariableTracker:
+        # list_subscript: https://github.com/python/cpython/blob/62a6e898e01/Objects/listobject.c#L3689-L3710
+        from .builder import SourcelessBuilder
+
+        if key.is_tensor():
+            value = get_fake_value(key.as_proxy().node, tx)
+            if value.constant is not None and value.constant.numel() == 1:
+                key = VariableTracker.build(tx, value.constant.item())
+            else:
+                unimplemented(
+                    gb_type="Indexing list with non-scalar tensor",
+                    context=f"mp_subscript_impl {self} {key}",
+                    explanation=(
+                        "Attempted to index list-like object with tensor with > 1 element."
+                    ),
+                    hints=[*graph_break_hints.USER_ERROR],
+                )
+
+        # _PyIndex_Check and type validation deferred to PR #178921 (nb_index support)
+        if key.python_type() not in (int, slice):
+            msg = f"indices must be integers or slices, not {key.python_type()}"
+            raise_observed_exception(
+                TypeError, tx, args=[SourcelessBuilder.create(tx, msg)]
+            )
+
+        return self.getitem_const(tx, key)
+
     def call_method(
         self,
         tx: "InstructionTranslator",
@@ -274,41 +305,6 @@ class BaseListVariable(VariableTracker):
         if name == "__len__":
             self._install_list_length_guard()
             return ConstantVariable.create(len(self.items))
-        elif name == "__getitem__":
-            if kwargs or len(args) != 1:
-                raise_args_mismatch(
-                    tx,
-                    name,
-                    "1 args and 0 kwargs",
-                    f"{len(args)} args and {len(kwargs)} kwargs",
-                )
-
-            if args[0].is_tensor():
-                value = get_fake_value(args[0].as_proxy().node, tx)
-                if value.constant is not None and value.constant.numel() == 1:
-                    value = VariableTracker.build(tx, value.constant.item())
-                else:
-                    unimplemented(
-                        gb_type="Indexing list with non-scalar tensor",
-                        context=f"call_method {self} {name} {args} {kwargs}",
-                        explanation=(
-                            "Attempted to index list-like object with tensor with > 1 element."
-                        ),
-                        hints=[*graph_break_hints.USER_ERROR],
-                    )
-            else:
-                value = args[0]
-
-            if value.python_type() not in (int, slice):
-                raise_observed_exception(
-                    TypeError,
-                    tx,
-                    args=[
-                        f"indices must be integers or slices, not {value.python_type()}"
-                    ],
-                )
-
-            return self.getitem_const(tx, value)
         elif name == "__contains__":
             if kwargs or len(args) != 1:
                 raise_args_mismatch(
@@ -706,6 +702,14 @@ class RangeVariable(BaseListVariable):
             return int(re)
         return 0
 
+    def mp_subscript_impl(
+        self,
+        tx: "InstructionTranslator",
+        key: VariableTracker,
+    ) -> VariableTracker:
+        # range_subscript: https://github.com/python/cpython/blob/62a6e898e01/Objects/rangeobject.c#L729-L748
+        return self.getitem_const(tx, key)
+
     def call_method(
         self,
         tx: "InstructionTranslator",
@@ -742,8 +746,6 @@ class RangeVariable(BaseListVariable):
                 tx,
                 args=[f"{x} is not in range"],
             )
-        elif name == "__getitem__":
-            return self.getitem_const(tx, *args)
         elif name in cmp_name_to_op_mapping:
             other = args[0]
             pt = other.python_type()
@@ -1585,6 +1587,14 @@ class SizeVariable(TupleVariable):
             result = mul.call_function(tx, [result, v], {})
         return result
 
+    def mp_subscript_impl(
+        self,
+        tx: "InstructionTranslator",
+        key: VariableTracker,
+    ) -> VariableTracker:
+        # tuple_subscript: https://github.com/python/cpython/blob/62a6e898e01/Objects/tupleobject.c#L877-L930
+        return self.get_item_dyn(tx, key)
+
     def call_method(
         self,
         tx: "InstructionTranslator",
@@ -1592,17 +1602,7 @@ class SizeVariable(TupleVariable):
         args: list[VariableTracker],
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker:
-        if name == "__getitem__":
-            if kwargs or len(args) != 1:
-                raise_args_mismatch(
-                    tx,
-                    name,
-                    "1 args and 0 kwargs",
-                    f"{len(args)} args and {len(kwargs)} kwargs",
-                )
-            out = self.get_item_dyn(tx, args[0])
-            return out
-        elif name == "numel":
+        if name == "numel":
             if args or kwargs:
                 raise_args_mismatch(
                     tx,
