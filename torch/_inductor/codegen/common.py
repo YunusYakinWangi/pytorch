@@ -628,36 +628,26 @@ def register_device_op_overrides(
 
 
 def _initialize_device_op_overrides():
+    # Use a flag rather than checking device_op_overrides_dict, since external/test
+    # code may partially populate it before we are called.
     global _device_op_overrides_initialized
-
-    # Ensure one-time initialization of all device-specific overrides.
-    # This must NOT depend on the current state of `device_op_overrides_dict`,
-    # since external/test code may partially populate it and break lazy init.
     if _device_op_overrides_initialized:
         return
 
-    # Importing these modules has the side effect of registering their
-    # corresponding DeviceOpOverrides via `register_device_op_overrides`.
-    # We explicitly import all known backends here to guarantee complete
-    # and deterministic registration.
     from .cpu_device_op_overrides import CpuDeviceOpOverrides
-    from . import mps_device_op_overrides,  # noqa: F401
+    from . import mps_device_op_overrides  # noqa: F401
     from .cuda import device_op_overrides  # noqa: F401
     from .mtia import device_op_overrides as mtia_op_overrides  # noqa: F401
     from .xpu import device_op_overrides as xpu_op_overrides  # noqa: F401
-    # For backends like TPU that only need no-op overrides (Pallas handles codegen)
+    # TPU uses Pallas for codegen and only needs no-op overrides
     register_device_op_overrides("tpu", CpuDeviceOpOverrides())
 
-    # Mark initialization as complete to prevent duplicate imports and
-    # ensure consistent behavior even if this function is called multiple times.
     _device_op_overrides_initialized = True
 
 
 def get_device_op_overrides(device: str) -> DeviceOpOverrides:
     assert isinstance(device, str), type(device)
-
     _initialize_device_op_overrides()
-
     return device_op_overrides_dict[device]
 
 
