@@ -129,8 +129,6 @@ def repurpose_ops(op_db, base_test_name, derived_test_name):
 dtensor_fails = {
     # view/reshape ops: rejects flatten/split of sharded dims without redistribution
     xfail("cartesian_prod"),
-    xfail("flatten"),
-    xfail("kron"),
     xfail("ravel"),
     xfail("repeat_interleave"),
     xfail("reshape"),
@@ -413,7 +411,6 @@ dtensor_fails_no_strategy = {
     xfail("nn.functional.grid_sample"),
     xfail("nn.functional.group_norm"),
     xfail("nn.functional.hardshrink"),
-    xfail("nn.functional.instance_norm"),
     xfail("nn.functional.interpolate", "nearest"),
     xfail("nn.functional.interpolate", "nearest-exact"),
     xfail("nn.functional.max_unpool1d"),
