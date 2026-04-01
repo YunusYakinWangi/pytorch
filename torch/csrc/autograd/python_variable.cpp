@@ -2451,25 +2451,16 @@ create_native_op_schema(
   }
 
   if (native_info.static_kwargkey && !native_info.static_kwargkey.is_none()) {
-    // Build a set of schema indices for kwargs listed in static_kwargkey.
-    // Only these kwargs affect sharding propagation and belong in the cache
-    // key. The Python comparison key
-    // (DTensor_OpSchema_recompute_comparison_key) already filters this way; the
-    // C++ fast path must match.
-    c10::SmallVector<int64_t, 4> static_kwarg_indices;
-    {
-      py::list kwargkey_list =
-          py::reinterpret_borrow<py::list>(native_info.static_kwargkey);
-      const auto& schema_args = op.schema().arguments();
-      for (const auto& key : kwargkey_list) {
-        auto key_str = py::cast<std::string>(key);
-        for (int64_t i = 0; i < static_cast<int64_t>(schema_args.size()); ++i) {
-          if (schema_args[i].name() == key_str) {
-            static_kwarg_indices.push_back(i);
-            break;
-          }
-        }
-      }
+    // Only kwargs named in static_kwargkey affect sharding propagation and
+    // belong in the cache key. The Python comparison key
+    // (DTensor_OpSchema_recompute_comparison_key_impl) already filters this
+    // way; the C++ fast path must match. Without this filter, step-varying
+    // scalar kwargs (e.g. the `value` arg of addcdiv_ used by AdamW bias
+    // corrections) cause unbounded cache growth.
+    c10::SmallVector<std::string, 2> static_kwarg_names;
+    for (const auto& key :
+         py::reinterpret_borrow<py::list>(native_info.static_kwargkey)) {
+      static_kwarg_names.push_back(py::cast<std::string>(key));
     }
 
     // Separator to disambiguate kwargs from args in comparison and hashing.
@@ -2481,17 +2472,18 @@ create_native_op_schema(
          argument_it != args_kwargs.kwargs_end();
          ++argument_it) {
       const auto underlying_index = argument_it.underlying_index();
-      // Only include kwargs named in static_kwargkey (plus any tensors,
-      // which always matter for sharding propagation).
       const auto [tensor_flavor, py_tensor] =
           check_for_dtensor_or_tensor(*argument_it);
-      bool is_tensor_like = tensor_flavor != TensorFlavor::NON_TENSOR;
-      if (!is_tensor_like &&
-          std::find(
-              static_kwarg_indices.begin(),
-              static_kwarg_indices.end(),
-              underlying_index) == static_kwarg_indices.end()) {
-        continue;
+      // Skip non-tensor kwargs not listed in static_kwargkey.
+      if (tensor_flavor == TensorFlavor::NON_TENSOR) {
+        const auto& kwarg_name =
+            op.schema().arguments()[underlying_index].name();
+        if (std::find(
+                static_kwarg_names.begin(),
+                static_kwarg_names.end(),
+                kwarg_name) == static_kwarg_names.end()) {
+          continue;
+        }
       }
 
       // Rather than hash/compare the string key, we can just use the
