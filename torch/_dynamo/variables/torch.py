@@ -87,6 +87,7 @@ from .ctx_manager import (
     AutocastModeVariable,
     ProfilerContextVariable,
     ProfilerRecordFunctionContextVariable,
+    RecordCommVariable,
     TorchFunctionDisableVariable,
 )
 from .distributed import DistributedVariable
@@ -156,6 +157,8 @@ supported_ctx_manager_classes = dict.fromkeys(
         torch.nn.attention.sdpa_kernel.__wrapped__,  # type: ignore[attr-defined]
     ]
 )
+if torch.distributed.is_available():
+    supported_ctx_manager_classes[torch.distributed.distributed_c10d.record_comm] = None
 
 
 REWRITE_OPS_TO_TENSOR_SIZE_METHOD = dict.fromkeys(
@@ -575,6 +578,11 @@ class TorchCtxManagerClassVariable(BaseTorchVariable):
         ):
             warning_once(log, "Profiler function %s will be ignored", self.value)
             return ProfilerContextVariable()
+        elif (
+            torch.distributed.is_available()
+            and self.value is torch.distributed.distributed_c10d.record_comm
+        ):
+            return RecordCommVariable.create(record_args=args, record_kwargs=kwargs)
         elif (
             self.value is torch._C.DisableTorchFunctionSubclass
             or self.value is torch._C.DisableTorchFunction
