@@ -32,6 +32,7 @@ import sympy
 import torch._numpy as tnp
 import torch.fx
 import torch.random
+from torch import sym_int
 from torch._dynamo import compiled_autograd
 from torch._library.opaque_object import is_opaque_reference_type
 from torch._opaque_base import OpaqueBase
@@ -762,39 +763,6 @@ class TensorVariable(VariableTracker):
             torch._dynamo.config._autograd_backward_strict_mode_conditional_banned_ops
         )
 
-    def mp_subscript_impl(
-        self,
-        tx: "InstructionTranslator",
-        key: VariableTracker,
-    ) -> VariableTracker:
-        from .builder import SourcelessBuilder, VariableBuilder
-        from .torch_function import can_dispatch_torch_function, dispatch_torch_function
-
-        if self.is_strict_mode(tx) and "__getitem__" in self._strict_mode_banned_ops():
-            unimplemented(
-                gb_type="Illegal __getitem__ invocation in strict mode",
-                context=f"mp_subscript_impl {self} {key}",
-                explanation="Dynamo currently does not support __getitem__ "
-                "invocation in strict mode.",
-                hints=[],
-            )
-
-        empty_kwargs: dict[str, VariableTracker] = {}
-        static_attr = all_tensor_attrs.get("__getitem__", None)
-        if static_attr is not None and can_dispatch_torch_function(
-            tx, (self, key), empty_kwargs
-        ):
-            if self.source:
-                func_var = VariableBuilder(
-                    tx,
-                    AttrSource(AttrSource(self.source, "__class__"), "__getitem__"),
-                )(static_attr)
-            else:
-                func_var = SourcelessBuilder.create(tx, torch.Tensor.__getitem__)
-            return dispatch_torch_function(tx, func_var, (self, key), empty_kwargs)
-
-        return self.method___getitem__(tx, key)
-
     def call_method(
         self,
         tx: "InstructionTranslator",
@@ -1468,6 +1436,36 @@ class TensorVariable(VariableTracker):
                 ],
             )
         return None
+
+    def nb_index_impl(
+        self,
+        tx: "InstructionTranslator",
+    ) -> VariableTracker:
+        # CPython: only integer tensors of a single element can be converted
+        # to an index. Mirrors THPVariable_index_scalar in
+        # https://github.com/pytorch/pytorch/blob/7cfd054075b/tools/autograd/templates/python_variable_methods.cpp#L372-L385
+        if self.dtype is not None and (
+            not self.dtype.is_floating_point and not self.dtype.is_complex
+        ):
+            item = self.call_method(tx, "item", [], {})
+            from .builder import wrap_fx_proxy
+
+            return wrap_fx_proxy(
+                tx=tx,
+                proxy=tx.output.create_proxy(
+                    "call_function",
+                    sym_int,
+                    (item.as_proxy(),),
+                    {},
+                ),
+            )
+        raise_observed_exception(
+            TypeError,
+            tx,
+            args=[
+                "only integer tensors of a single element can be converted to an index"
+            ],
+        )
 
     def method___getitem__(
         self,
