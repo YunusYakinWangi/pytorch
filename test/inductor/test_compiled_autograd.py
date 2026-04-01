@@ -5423,6 +5423,8 @@ skipped_tests.add("test_custom_function_boxed_grads_no_extra_refs")
 skipped_tests.add("test_custom_function_boxed_grads_cleanup_on_error")
 skipped_tests.add("test_custom_function_boxed_grads_chain")
 skipped_tests.add("test_custom_function_boxed_grads_none_grads")
+skipped_tests.add("test_custom_function_boxed_grads_direct_apply")
+skipped_tests.add("test_custom_function_boxed_grads_single_list_arg")
 
 test_autograd = load_test_module("test_autograd")
 test_custom_ops = load_test_module("test_custom_ops")
