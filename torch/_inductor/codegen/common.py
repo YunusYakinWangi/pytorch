@@ -371,6 +371,7 @@ class DeviceOpOverrides:
 
 
 device_op_overrides_dict: dict[str, DeviceOpOverrides] = {}
+_device_op_overrides_initialized = False
 custom_backend_passes: dict[str, CustomGraphModulePass | None] = {}
 custom_backend_codegen_configs: dict[str, ConfigModule | None] = {}
 
@@ -629,7 +630,8 @@ def register_device_op_overrides(
 def get_device_op_overrides(device: str) -> DeviceOpOverrides:
     assert isinstance(device, str), type(device)
 
-    if not device_op_overrides_dict:
+    global _device_op_overrides_initialized
+    if not _device_op_overrides_initialized:
         from . import (  # noqa: F401  # noqa: F401
             cpu_device_op_overrides,
             mps_device_op_overrides,
@@ -638,7 +640,9 @@ def get_device_op_overrides(device: str) -> DeviceOpOverrides:
         from .mtia import device_op_overrides as mtia_op_overrides  # noqa: F401
         from .xpu import device_op_overrides as xpu_op_overrides  # noqa: F401
 
-    if device not in device_op_overrides_dict:
+        _device_op_overrides_initialized = True
+
+    if device not in device_op_overrides_dict and device == "tpu":
         # For backends like TPU that only need no-op overrides (Pallas handles codegen)
         from .cpu_device_op_overrides import CpuDeviceOpOverrides
 
