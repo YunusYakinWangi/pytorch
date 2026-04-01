@@ -2816,17 +2816,21 @@ class InstructionTranslatorBase(
 
     def DELETE_ATTR(self, inst: Instruction) -> None:
         obj = self.pop()
-        try:
-            attr_var = obj.var_getattr(self, inst.argval)  # type: ignore[arg-type]
-            if isinstance(attr_var, TensorVariable):
-                self._maybe_emit_sync_dealloc(attr_var)
-        except Exception:
-            pass
+        self._maybe_sync_dealloc_attr(obj, inst.argval)
         VariableTracker.build(self, delattr).call_function(
             self,  # type: ignore[arg-type]
             [obj, VariableTracker.build(self, inst.argval)],
             {},
         )
+
+    def _maybe_sync_dealloc_attr(self, obj: VariableTracker, name: str) -> None:
+        # Only check side_effects — a pure dict lookup with no observable
+        # side effects. We intentionally avoid var_getattr here because it
+        # can trigger __getattr__, add graph nodes, or cause graph breaks.
+        if self.output.side_effects.has_pending_mutation_of_attr(obj, name):
+            attr_var = self.output.side_effects.load_attr(obj, name)
+            if isinstance(attr_var, TensorVariable):
+                self._maybe_emit_sync_dealloc(attr_var)
 
     @staticmethod
     def codegen_return_with_pops(
@@ -3376,13 +3380,31 @@ class InstructionTranslatorBase(
 
     def DELETE_SUBSCR(self, inst: Instruction) -> None:
         obj, key = self.popn(2)
+        # Check for tensor items using side-effect-free internal lookups
+        # only. We avoid call_method("__getitem__") because it can execute
+        # user code and add unwanted graph nodes.
+        self._maybe_sync_dealloc_subscr(obj, key)
+        obj.call_method(self, "__delitem__", [key], {})
+
+    def _maybe_sync_dealloc_subscr(
+        self, obj: VariableTracker, key: VariableTracker
+    ) -> None:
+        from .variables.dicts import ConstDictVariable
+        from .variables.lists import BaseListVariable
+
+        item_var = None
         try:
-            item_var = obj.call_method(self, "__getitem__", [key], {})
-            if isinstance(item_var, TensorVariable):
-                self._maybe_emit_sync_dealloc(item_var)
+            if isinstance(obj, BaseListVariable):
+                item_var = obj.getitem_const(
+                    self,  # pyrefly: ignore [bad-argument-type]
+                    key,
+                )
+            elif isinstance(obj, ConstDictVariable):
+                item_var = obj.maybe_getitem_const(key)
         except Exception:
             pass
-        obj.call_method(self, "__delitem__", [key], {})
+        if isinstance(item_var, TensorVariable):
+            self._maybe_emit_sync_dealloc(item_var)
 
     def BUILD_TUPLE(self, inst: Instruction) -> None:
         items = self.popn(inst.argval)
