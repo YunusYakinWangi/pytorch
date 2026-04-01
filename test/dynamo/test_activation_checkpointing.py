@@ -2637,6 +2637,37 @@ instantiate_device_type_tests(
     ActivationCheckpointingViaTagsTests, globals(), only_for=devices
 )
 
+
+class ActivationCheckpointingNonStrictTracerTests(torch._dynamo.test_case.TestCase):
+    """Tests for non-strict tracing flag interaction with checkpoint."""
+
+    def test_checkpoint_errors_under_non_strict_tracing(self):
+        from torch.fx.experimental.proxy_tensor import make_fx
+
+        def fn(x):
+            return checkpoint(torch.sin, x, use_reentrant=False)
+
+        with torch.compiler._non_strict_tracing_context():
+            with self.assertRaisesRegex(
+                RuntimeError, "torch.utils.checkpoint is not supported"
+            ):
+                make_fx(fn)(torch.randn(4, requires_grad=True))
+
+    def test_checkpoint_errors_under_non_strict_tracing_preserve_rng_false(self):
+        from torch.fx.experimental.proxy_tensor import make_fx
+
+        def fn(x):
+            return checkpoint(
+                torch.sin, x, use_reentrant=False, preserve_rng_state=False
+            )
+
+        with torch.compiler._non_strict_tracing_context():
+            with self.assertRaisesRegex(
+                RuntimeError, "torch.utils.checkpoint is not supported"
+            ):
+                make_fx(fn)(torch.randn(4, requires_grad=True))
+
+
 if __name__ == "__main__":
     from torch._dynamo.test_case import run_tests
 

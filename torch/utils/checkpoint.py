@@ -1539,6 +1539,15 @@ def _checkpoint_without_reentrant_generator(
             f"but got {determinism_check}"
         )
 
+    if torch.compiler._is_non_strict_tracing():
+        # TODO: update this error message once we have a proper pipeline in torchtitan
+        raise RuntimeError(
+            "torch.utils.checkpoint is not supported under non-strict tracing "
+            "because the checkpoint machinery (RNG state stashing, saved tensor hooks) "
+            "is not traceable. Please use torch.compile or use graph-based Activation "
+            "Checkpointing instead. Reach out to the PT2 team for help migrating."
+        )
+
     device_type = _infer_device_type(*args)
     device_module = _get_device_module(device_type)
     forward_context, recompute_context = context_fn()
