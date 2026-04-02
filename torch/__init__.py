@@ -2595,6 +2595,7 @@ def compile(
     options: dict[str, str | builtins.int | builtins.bool | _Callable] | None = None,
     disable: builtins.bool = False,
     recompile_limit: builtins.int | None = None,
+    nested_compile_regions: list[type] | None = None,
 ) -> (
     _Callable[[_Callable[_InputT, _RetT]], _Callable[_InputT, _RetT]]
     | _Callable[_InputT, _RetT]
@@ -2722,6 +2723,7 @@ def compile(
                 mode=mode,
                 options=options,
                 disable=disable,
+                nested_compile_regions=nested_compile_regions,
             )
 
         return fn
@@ -2778,6 +2780,7 @@ def compile(
         fullgraph=fullgraph,
         dynamic=dynamic,
         recompile_limit=recompile_limit,
+        nested_compile_regions=nested_compile_regions,
     )
     return torch._dynamo.optimize(
         backend=backend,
