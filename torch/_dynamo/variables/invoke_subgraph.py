@@ -7,6 +7,7 @@ higher-order operator.
 import enum
 import logging
 import traceback
+import types
 from dataclasses import dataclass
 from typing import Any, cast, NamedTuple, TYPE_CHECKING
 
@@ -328,11 +329,11 @@ LiftedArgOrigin = (
 )
 
 
-def get_fn_id(fn_var: Any) -> int | None:
+def get_fn_id(fn_var: Any) -> types.CodeType | None:
     if isinstance(fn_var, UserFunctionVariable):
-        return id(fn_var.get_function())
+        return fn_var.get_function().__code__
     elif isinstance(fn_var, UnspecializedNNModuleVariable):
-        return id(fn_var.value.forward.__func__)  # pyrefly: ignore[missing-attribute]
+        return fn_var.value.forward.__func__.__code__  # pyrefly: ignore[missing-attribute]
     return None
 
 
@@ -1051,11 +1052,11 @@ class InvokeSubgraphHigherOrderVariable(WrapHigherOrderVariable):
         )
 
         if isinstance(fn_vt, UserFunctionVariable):
-            fn_id = id(fn_vt.get_function())
+            fn_id = fn_vt.get_function().__code__
             fn_name = fn_vt.get_function().__name__
         else:
             assert isinstance(fn_vt, UnspecializedNNModuleVariable)
-            fn_id = id(fn_vt.value.forward.__func__)  # type: ignore[attr-defined]
+            fn_id = fn_vt.value.forward.__func__.__code__  # type: ignore[attr-defined]
             fn_name = fn_vt.value.forward.__name__  # type: ignore[attr-defined]
         # pyrefly: ignore [implicit-any]
         previously_installed_submodules = []
