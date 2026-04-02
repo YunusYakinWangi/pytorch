@@ -2310,8 +2310,7 @@ class RematerializeACNodesPassTests(torch._dynamo.test_case.TestCase):
             )
             loss = z.sum()
 
-            with torch.fx.traceback.annotate({"phase": "backward"}):
-                dx, dy = _grad(loss, (x, y))
+            dx, dy = _grad(loss, (x, y))
 
             return dx.detach(), dy.detach()
 
@@ -2364,8 +2363,7 @@ def forward(self, arg0_1, arg1_1):
             )
             loss = z.sum()
 
-            with torch.fx.traceback.annotate({"phase": "backward"}):
-                dx = _grad(loss, x)[0]
+            dx = _grad(loss, x)[0]
 
             return dx
 
@@ -2375,7 +2373,7 @@ def forward(self, arg0_1, arg1_1):
         ):
             self._compile_and_capture(fwd_bwd_with_rng, True, (x,))
 
-    def test_ac_rematerialize_with_no_annotations_returns_unchanged(self):
+    def test_ac_rematerialize_with_no_annotations(self):
         x = torch.randn(4, 4, requires_grad=True)
 
         def fwd_bwd(x):
@@ -2386,16 +2384,15 @@ def forward(self, arg0_1, arg1_1):
             return _grad(loss, x)[0]
 
         result_with, gm_with = self._compile_and_capture(fwd_bwd, True, (x,))
-        # Get the graph without the pass for comparison
         result_without, gm_without = self._compile_and_capture(fwd_bwd, False, (x,))
 
-        # Results should be correct
         self.assertTrue(torch.allclose(result_with, result_without))
 
-        # Both graphs should have the same number of sigmoid ops (no recomputation)
+        # autograd_backward tagging is automatic now, so remat should still work
         sigmoid_with = self.count_op(gm_with, torch.ops.aten.sigmoid.default)
         sigmoid_without = self.count_op(gm_without, torch.ops.aten.sigmoid.default)
-        self.assertEqual(sigmoid_with, sigmoid_without)
+        self.assertEqual(sigmoid_with, 2, "sigmoid should be recomputed in backward")
+        self.assertEqual(sigmoid_without, 1)
 
     def test_ac_rematerialize_with_selective_checkpoint_policy(self):
         x = torch.randn(4, 128, requires_grad=True)
@@ -2421,8 +2418,7 @@ def forward(self, arg0_1, arg1_1):
             )
             loss = result.sum()
 
-            with torch.fx.traceback.annotate({"phase": "backward"}):
-                dx, dw, db = _grad(loss, (x, w1, b1))
+            dx, dw, db = _grad(loss, (x, w1, b1))
             return dx, dw, db
 
         result_with, gm_with = self._compile_and_capture(
@@ -2497,8 +2493,7 @@ def forward(self, arg0_1, arg1_1):
             )
             loss = z.sum()
 
-            with torch.fx.traceback.annotate({"phase": "backward"}):
-                dx = _grad(loss, x)[0]
+            dx = _grad(loss, x)[0]
 
             return dx.detach()
 
@@ -2546,8 +2541,7 @@ def forward(self, arg0_1):
             )
             loss = z.sum()
 
-            with torch.fx.traceback.annotate({"phase": "backward"}):
-                dx = _grad(loss, x)[0]
+            dx = _grad(loss, x)[0]
 
             return dx.detach()
 

@@ -106,7 +106,8 @@ def remat_using_tags_for_fwd_loss_bwd_graph(gm: fx.GraphModule) -> fx.GraphModul
     for idx, node in enumerate(gm.graph.nodes):
         order[node] = idx
         if _is_backward_node(node, use_phase_only=use_phase_only):
-            bwd_node_set.add(node)
+            if use_phase_only:
+                bwd_node_set.add(node)
             if bwd_start is None:
                 bwd_start = idx
 

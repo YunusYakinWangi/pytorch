@@ -488,6 +488,8 @@ def _patch_autograd_grad():
     and set custom["autograd_backward"]=True on all backward nodes via
     fx_traceback annotation.
     """
+    import functools
+
     import torch.autograd
     import torch.fx.traceback as fx_traceback
     from torch._functorch._aot_autograd.logging_utils import (
@@ -496,6 +498,7 @@ def _patch_autograd_grad():
 
     _orig_grad = torch.autograd.grad
 
+    @functools.wraps(_orig_grad)
     def _patched_grad(outputs, inputs, *args, **kwargs):
         roots = [
             t.grad_fn
