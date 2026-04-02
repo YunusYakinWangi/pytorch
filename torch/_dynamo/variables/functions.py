@@ -3353,7 +3353,7 @@ class CreateTMADescriptorExperimentalVariable(VariableTracker):
             if len(args) + len(kwargs) != 4:
                 type_error(
                     tx,
-                    f"TMA metadata rank=1 requires exactly 4 arguments, got {len(args) + len(kwargs)}"
+                    f"TMA metadata rank=1 requires exactly 4 arguments, got {len(args) + len(kwargs)}",
                 )
             dims = [
                 kwargs["dim"] if "dim" in kwargs else args[1],
@@ -3365,7 +3365,7 @@ class CreateTMADescriptorExperimentalVariable(VariableTracker):
             if len(args) + len(kwargs) != 6:
                 type_error(
                     tx,
-                    f"TMA metadata rank=2 requires exactly 6 arguments, got {len(args) + len(kwargs)}"
+                    f"TMA metadata rank=2 requires exactly 6 arguments, got {len(args) + len(kwargs)}",
                 )
             dims = [
                 kwargs["dim1"] if "dim1" in kwargs else args[1],
@@ -3427,8 +3427,7 @@ class PyTreeGetNodeTypeFunctionVariable(UserFunctionVariable):
     ) -> VariableTracker:
         if len(args) != 1:
             type_error(
-                tx,
-                f"pytree_get_node_type requires exactly 1 argument, got {len(args)}"
+                tx, f"pytree_get_node_type requires exactly 1 argument, got {len(args)}"
             )
         type_source = None
         if args[0].source:
@@ -3465,10 +3464,7 @@ class PyTreeTreeIsLeafFunctionVariable(UserFunctionVariable):
     ) -> VariableTracker:
         # tree_is_leaf(tree, is_leaf=None)
         if len(args) < 1 or len(args) > 2:
-            type_error(
-                tx,
-                f"tree_is_leaf requires 1 or 2 arguments, got {len(args)}"
-            )
+            type_error(tx, f"tree_is_leaf requires 1 or 2 arguments, got {len(args)}")
 
         # Check if is_leaf parameter is provided
         is_leaf = kwargs.get("is_leaf", CONSTANT_VARIABLE_NONE)

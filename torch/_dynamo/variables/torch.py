@@ -63,7 +63,13 @@ from ..create_parameter_op import (
     tracable_create_parameter,
 )
 from ..device_interface import get_registered_device_interfaces
-from ..exc import raise_observed_exception, type_error, unimplemented, UserError, UserErrorType
+from ..exc import (
+    raise_observed_exception,
+    type_error,
+    unimplemented,
+    UserError,
+    UserErrorType,
+)
 from ..guards import GuardBuilder, install_guard
 from ..source import (
     AttrSource,
@@ -1748,7 +1754,7 @@ class TorchInGraphFunctionVariable(BaseTorchVariable):
             if len(args) != 1 or kwargs:
                 type_error(
                     tx,
-                    f"push_torch_function takes exactly one argument ({len(args)} given)"
+                    f"push_torch_function takes exactly one argument ({len(args)} given)",
                 )
             TorchFunctionModeStackVariable.register_mutation(tx)
             # type: ignore[arg-type]

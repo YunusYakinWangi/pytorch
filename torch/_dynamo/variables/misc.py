@@ -30,7 +30,7 @@ import weakref
 from collections.abc import Callable, Sequence
 from random import Random
 from types import BuiltinFunctionType
-from typing import Any, Literal, NoReturn, TYPE_CHECKING, TypeGuard, Union
+from typing import Any, Literal, TYPE_CHECKING, TypeGuard, Union
 
 import torch._C
 import torch._numpy as tnp
@@ -68,11 +68,7 @@ from ..utils import (
     raise_args_mismatch,
     tuple_methods,
 )
-from .base import (
-    AsPythonConstantNotImplementedError,
-    NO_SUCH_SUBOBJ,
-    VariableTracker,
-)
+from .base import AsPythonConstantNotImplementedError, NO_SUCH_SUBOBJ, VariableTracker
 from .constant import CONSTANT_VARIABLE_FALSE, CONSTANT_VARIABLE_NONE, ConstantVariable
 from .functions import NestedUserFunctionVariable, UserFunctionVariable
 from .user_defined import call_random_fn, is_standard_setattr, UserDefinedObjectVariable
@@ -635,12 +631,16 @@ class ExceptionVariable(VariableTracker):
                 self.__cause__ = val
                 self.__suppress_context__ = variables.CONSTANT_VARIABLE_TRUE
             else:
-                type_error(tx, "exception cause must be None or derive from BaseException")
+                type_error(
+                    tx, "exception cause must be None or derive from BaseException"
+                )
         elif name == "__suppress_context__":
             if val.is_constant_match(True, False):
                 self.__suppress_context__ = val
             else:
-                typ_error(tx,"exception cause must be None or derive from BaseException")
+                type_error(
+                    tx, "exception cause must be None or derive from BaseException"
+                )
         elif name == "__traceback__":
             if not TracebackVariable.is_valid_traceback(val):
                 type_error(tx, "__traceback__ must be a traceback object or None")
@@ -766,7 +766,7 @@ class ComptimeVariable(VariableTracker):
             if fn.closure:
                 type_error(
                     tx,
-                    f"comptime function must not have free variables, but these variables were free: {code.co_freevars}"
+                    f"comptime function must not have free variables, but these variables were free: {code.co_freevars}",
                 )
             func = types.FunctionType(
                 code,
@@ -1343,9 +1343,7 @@ class MethodWrapperVariable(VariableTracker):
             args[0], variables.TensorVariable
         ):
             if not (len(args) == 1 and len(kwargs) == 0):
-                type_error(
-                    tx, "tensor attribute getter takes exactly one argument"
-                )
+                type_error(tx, "tensor attribute getter takes exactly one argument")
             # type: ignore[arg-type, attr-defined]
             return args[0].var_getattr(tx, self.method_wrapper.__self__.__name__)
 

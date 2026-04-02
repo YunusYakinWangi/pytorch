@@ -642,7 +642,7 @@ class NNModuleVariable(VariableTracker):
             if not isinstance(args[0], TupleVariable):
                 type_error(
                     tx,
-                    f"``nn.Module`` {module}'s call method {name} requires a tuple as first argument"
+                    f"``nn.Module`` {module}'s call method {name} requires a tuple as first argument",
                 )
             mod_var = args[0].items[args[1].value]  # type: ignore[attr-defined]
             if isinstance(mod_var, UnspecializedNNModuleVariable):
