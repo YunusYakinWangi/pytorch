@@ -329,7 +329,7 @@ LiftedArgOrigin = (
 )
 
 
-def get_fn_id(fn_var: Any) -> types.CodeType | None:
+def get_fn_code(fn_var: Any) -> types.CodeType | None:
     if isinstance(fn_var, UserFunctionVariable):
         return fn_var.get_function().__code__
     elif isinstance(fn_var, UnspecializedNNModuleVariable):
@@ -720,8 +720,8 @@ def has_reuse_entries(
     )
     if not isinstance(invoke_subgraph_cache, InvokeSubgraphCache):
         return False
-    fn_id = get_fn_id(fn_var)
-    return fn_id is not None and fn_id in invoke_subgraph_cache.subgraph_reuse_cache
+    fn_code = get_fn_code(fn_var)
+    return fn_code is not None and fn_code in invoke_subgraph_cache.subgraph_reuse_cache
 
 
 def find_reuse_match(
@@ -736,8 +736,8 @@ def find_reuse_match(
     )
     if not isinstance(invoke_subgraph_cache, InvokeSubgraphCache):
         return None
-    fn_id = get_fn_id(fn_var)
-    if fn_id is None:
+    fn_code = get_fn_code(fn_var)
+    if fn_code is None:
         return None
 
     # this evaluator function is called one by one for all the invoke subgraph
@@ -748,7 +748,7 @@ def find_reuse_match(
     ) -> bool:
         return is_reusable(tx, cond, fingerprint, entry)
 
-    return invoke_subgraph_cache.find_reuse_entry(fn_id, evaluator)
+    return invoke_subgraph_cache.find_reuse_entry(fn_code, evaluator)
 
 
 def save_reuse_entry(
@@ -779,8 +779,8 @@ def save_reuse_entry(
     if not isinstance(invoke_subgraph_cache, InvokeSubgraphCache):
         return
 
-    fn_id = get_fn_id(fn_var)
-    if fn_id is None:
+    fn_code = get_fn_code(fn_var)
+    if fn_code is None:
         return
 
     subgraph_input_mapping = build_subgraph_input_mapping(
@@ -825,7 +825,7 @@ def save_reuse_entry(
         arg_sources=fingerprint.arg_sources,
         num_user_outputs=num_user_outputs,
     )
-    invoke_subgraph_cache.add_reuse_entry(fn_id, condition, entry, max_reuse_entries)
+    invoke_subgraph_cache.add_reuse_entry(fn_code, condition, entry, max_reuse_entries)
 
 
 def stamp_out_subgraph(
@@ -1052,17 +1052,17 @@ class InvokeSubgraphHigherOrderVariable(WrapHigherOrderVariable):
         )
 
         if isinstance(fn_vt, UserFunctionVariable):
-            fn_id = fn_vt.get_function().__code__
+            fn_code = fn_vt.get_function().__code__
             fn_name = fn_vt.get_function().__name__
         else:
             assert isinstance(fn_vt, UnspecializedNNModuleVariable)
-            fn_id = fn_vt.value.forward.__func__.__code__  # type: ignore[attr-defined]
+            fn_code = fn_vt.value.forward.__func__.__code__  # type: ignore[attr-defined]
             fn_name = fn_vt.value.forward.__name__  # type: ignore[attr-defined]
         # pyrefly: ignore [implicit-any]
         previously_installed_submodules = []
         if invoke_subgraph_cache:
             previously_installed_submodules = (
-                invoke_subgraph_cache.get_dynamo_installed_submodules(fn_id)
+                invoke_subgraph_cache.get_dynamo_installed_submodules(fn_code)
             )
             current_mod = body_gmod
             # NB - reverse is more likely to cause a hit sooner because first
@@ -1091,7 +1091,7 @@ class InvokeSubgraphHigherOrderVariable(WrapHigherOrderVariable):
             len(previously_installed_submodules) + 1,
         )
         if invoke_subgraph_cache:
-            invoke_subgraph_cache.add_dynamo_installed_submodule(fn_id, body_name)
+            invoke_subgraph_cache.add_dynamo_installed_submodule(fn_code, body_name)
 
         return body_name
 
@@ -1129,7 +1129,7 @@ class InvokeSubgraphHigherOrderVariable(WrapHigherOrderVariable):
         # and enable if request arises.
         reuse = not tx.output.export
 
-        # Reuse lookup: check fn_id first (cheap) to avoid the
+        # Reuse lookup: check fn_code first (cheap) to avoid the
         # expensive pytree flatten in build_input_fingerprint on the
         # first call when there's nothing in the cache yet.
         if reuse and has_reuse_entries(tx, fn_var):
