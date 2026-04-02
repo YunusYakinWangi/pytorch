@@ -831,9 +831,7 @@ class InvokeSubgraphCache(HopSubgraphCache):
     def __init__(self) -> None:
         self.autograd_cache: dict[str, Callable] = {}
         self.proxy_dispatch_cache: dict[str, Callable] = {}
-        self.dynamo_installed_submodules: dict[CodeType, list[str]] = defaultdict(
-            list
-        )
+        self.dynamo_installed_submodules: dict[CodeType, list[str]] = defaultdict(list)
         self.lazy_bwd_cache: dict[
             str, dict[tuple[object], tuple[torch.fx.GraphModule, int]]
         ] = defaultdict(dict)
