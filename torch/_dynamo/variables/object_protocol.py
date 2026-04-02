@@ -11,7 +11,9 @@ from typing import TYPE_CHECKING
 
 from torch._C._dynamo import get_type_slots
 
+from .. import graph_break_hints
 from .._type_slots import has_slot, PyMappingSlots, PySequenceSlots
+from ..exc import unimplemented
 from ..utils import istype
 from .base import NO_SUCH_SUBOBJ, raise_type_error_exc, VariableTracker
 from .constant import CONSTANT_VARIABLE_FALSE, CONSTANT_VARIABLE_TRUE
@@ -96,14 +98,30 @@ def type_implements_mp_length(obj_type: type) -> bool:
     return has_slot(map_slots, PyMappingSlots.MP_LENGTH)
 
 
+def maybe_get_python_type(obj: VariableTracker) -> type:
+    try:
+        return obj.python_type()
+    except NotImplementedError:
+        unimplemented(
+            gb_type="Unsupported python_type() call",
+            context=f"{obj} does not implement python_type()",
+            explanation="This VariableTracker does not implement python_type(), "
+            "which is required for object protocol operations.",
+            hints=[
+                *graph_break_hints.DYNAMO_BUG,
+            ],
+        )
+
+
 def vt_mapping_size(
     tx: "InstructionTranslator", obj: "VariableTracker"
 ) -> "VariableTracker":
     # ref: https://github.com/python/cpython/blob/v3.13.3/Objects/abstract.c#L2308-L2330
-    if type_implements_mp_length(obj.python_type()):
+    T = maybe_get_python_type(obj)
+    if type_implements_mp_length(T):
         return obj.mp_length(tx)
 
-    if type_implements_sq_length(obj.python_type()):
+    if type_implements_sq_length(T):
         type_error(tx, f"{obj.python_type_name()} is not a mapping")
 
     type_error(tx, f"object of type {obj.python_type_name()} has no len()")
@@ -118,6 +136,7 @@ def generic_len(
     Dispatches to sq_length (sequences) or mp_length (mappings) depending on the VT type.
     """
 
-    if type_implements_sq_length(obj.python_type()):
+    T = maybe_get_python_type(obj)
+    if type_implements_sq_length(T):
         return obj.sq_length(tx)
     return vt_mapping_size(tx, obj)

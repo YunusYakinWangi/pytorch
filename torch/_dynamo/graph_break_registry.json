@@ -4016,6 +4016,40 @@
       ]
     }
   ],
+  "GB4671": [
+    {
+      "Gb_type": "Unsupported python_type() call",
+      "Context": "{obj} does not implement python_type()",
+      "Explanation": "This VariableTracker does not implement python_type(), which is required for object protocol operations.",
+      "Hints": [
+        "This is likely to be a Dynamo bug. Please report an issue to PyTorch."
+      ]
+    },
+    {
+      "Gb_type": "Unsupported python_type() call",
+      "Context": "{obj} does not implement python_type()",
+      "Explanation": "This VariableTracker does not implement python_type(), which is required for object protocol operations.        asdflja af sldkfja;sdjf a;slkjdf  ",
+      "Hints": [
+        "This is likely to be a Dynamo bug. Please report an issue to PyTorch."
+      ]
+    },
+    {
+      "Gb_type": "Unsupported python_type() call",
+      "Context": "{obj} does not implement python_type()",
+      "Explanation": "This VariableTracker does not implement python_type(), which is required for object protocol operations.",
+      "Hints": [
+        "This is likely to be a Dynamo bug. Please report an issue to PyTorch."
+      ]
+    },
+    {
+      "Gb_type": "Unsupported python_type() call",
+      "Context": "{obj} does not implement python_type()",
+      "Explanation": "Dynamo does not support the ",
+      "Hints": [
+        "This is likely to be a Dynamo bug. Please report an issue to PyTorch."
+      ]
+    }
+  ],
   "GB0316": [
     {
       "Gb_type": "torch.associative_scan: improper additional_inputs",
