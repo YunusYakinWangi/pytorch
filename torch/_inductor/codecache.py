@@ -498,14 +498,14 @@ def extract_tensor_metadata_for_cache_key(t: Tensor) -> TensorMetadata:
 # Types that pickle handles natively via GLOBAL/INST opcodes even though their
 # __reduce_ex__ may raise TypeError. We must not treat these as unpicklable in
 # reducer_override to avoid infinite recursion.
-_PICKLE_NATIVE_TYPES = frozenset(
-    (
-        FunctionType,
-        BuiltinFunctionType,
-        BuiltinMethodType,
-        MethodType,
-        type,
-    )
+# We use a tuple for isinstance() checks so subclasses are also matched
+# (e.g. ABCMeta is a subclass of type).
+_PICKLE_NATIVE_TYPES_TUPLE = (
+    FunctionType,
+    BuiltinFunctionType,
+    BuiltinMethodType,
+    MethodType,
+    type,
 )
 
 
@@ -603,7 +603,10 @@ class FxGraphCachePickler(pickle.Pickler):
         """
         t = type(obj)
         # Types already registered or handled by default pickle.
-        if t in self.dispatch_table or t in _PICKLE_NATIVE_TYPES:
+        # Use isinstance for _PICKLE_NATIVE_TYPES to cover subclasses
+        # (e.g. ABCMeta is a subclass of type, and pickle handles all
+        # type/class objects natively via GLOBAL opcode).
+        if t in self.dispatch_table or isinstance(obj, _PICKLE_NATIVE_TYPES_TUPLE):
             return NotImplemented
         # Fast path: type already probed.
         # _checked_types maps type -> bool:
