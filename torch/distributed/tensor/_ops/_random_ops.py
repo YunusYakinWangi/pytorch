@@ -58,7 +58,8 @@ def uniform_single_dim_strategy(
     kwargs_schema: dict[str, Any],
 ) -> list[list[Placement | _ShardingPlaceholder]]:
     input_meta = args_schema[0]
-    assert isinstance(input_meta, TensorMeta)
+    if not isinstance(input_meta, TensorMeta):
+        raise AssertionError(f"Expected TensorMeta, got {type(input_meta)}")
     # [output, input] — element-independent, any shard maps to same shard
     return [
         [_ShardingPlaceholder(d), _ShardingPlaceholder(d)]

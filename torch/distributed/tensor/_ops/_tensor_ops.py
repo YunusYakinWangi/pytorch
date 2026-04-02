@@ -609,7 +609,8 @@ def select_scatter_single_dim_strategy(
     kwargs_schema: KwargsType,
 ) -> list[list[Placement | _ShardingPlaceholder]]:
     input_meta = args_schema[0]
-    assert isinstance(input_meta, TensorMeta)
+    if not isinstance(input_meta, TensorMeta):
+        raise AssertionError(f"Expected TensorMeta, got {type(input_meta)}")
     ndim = len(input_meta.shape)
     dim = normalize_dim(cast(int, args_schema[2]), ndim)
     # [output, self, src] — src has the select dim removed
@@ -637,7 +638,8 @@ def diagonal_scatter_single_dim_strategy(
     kwargs_schema: KwargsType,
 ) -> list[list[Placement | _ShardingPlaceholder]]:
     input_meta = args_schema[0]
-    assert isinstance(input_meta, TensorMeta)
+    if not isinstance(input_meta, TensorMeta):
+        raise AssertionError(f"Expected TensorMeta, got {type(input_meta)}")
     ndim = len(input_meta.shape)
     # schema: (self, src, offset=0, dim1=0, dim2=1)
     dim1 = cast(int, args_schema[3]) if len(args_schema) > 3 else 0
