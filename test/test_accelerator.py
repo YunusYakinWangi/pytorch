@@ -10,10 +10,9 @@ from torch.testing._internal.common_utils import (
     NoTest,
     run_tests,
     TEST_ACCELERATOR,
-    TEST_CUDA_GRAPH,
-    TEST_CUDAMALLOCASYNC,
     TEST_MPS,
     TEST_MULTIACCELERATOR,
+    TEST_XPU,
     TestCase,
 )
 
@@ -302,8 +301,8 @@ class TestAccelerator(TestCase):
         self.assertEqual(pool2[0], 0)
 
     @unittest.skipIf(
-        not TEST_CUDA_GRAPH or TEST_CUDAMALLOCASYNC,
-        "Requires Graph support with native allocator.",
+        not TEST_XPU,
+        "Requires accelerator graph support.",
     )
     def test_graph_three_successive(self):
         gc.collect()
