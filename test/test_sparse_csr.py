@@ -4334,6 +4334,20 @@ class TestSparseCSRMPS(TestCase):
                 4,
             )
 
+    def test_validate_mps_checks_plain_indices_before_crow_structure(self, device):
+        crow_indices = torch.tensor([0, 0], device=device, dtype=torch.int64)
+        col_indices = torch.tensor([5], device=device, dtype=torch.int64)
+
+        with self.assertRaisesRegex(RuntimeError, r"`0 <= col_indices < ncols` is not satisfied\."):
+            torch._validate_compressed_sparse_indices(
+                True,
+                crow_indices,
+                col_indices,
+                1,
+                3,
+                1,
+            )
+
 
 # e.g., TestSparseCSRCPU and TestSparseCSRCUDA
 instantiate_device_type_tests(TestSparseCSR, globals())

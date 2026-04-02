@@ -122,6 +122,41 @@ static void validate_compressed_sparse_indices_mps_host(
   });
 }
 
+static void launch_validate_plain_idx_bounds_mps_kernel(
+    const bool is_crow,
+    const Tensor& idx,
+    const int64_t dim) {
+  const int64_t total_work = idx.numel();
+  if (total_work == 0) {
+    return;
+  }
+
+  TORCH_CHECK(
+      total_work <= static_cast<int64_t>(std::numeric_limits<uint32_t>::max()),
+      "_validate_compressed_sparse_indices_mps: too many plain indices for Metal kernel launch");
+
+  auto stream = getCurrentMPSStream();
+  dispatch_sync_with_rethrow(stream->queue(), ^() {
+    @autoreleasepool {
+      const auto kernel_name = "validate_plain_idx_bounds_" + mps::scalarToMetalTypeString(idx);
+      auto pipeline = lib.getPipelineStateForFunc(kernel_name);
+      auto encoder = stream->commandEncoder();
+      [encoder setComputePipelineState:pipeline];
+      mtl_setArgs(
+          encoder,
+          idx,
+          idx.sizes(),
+          idx.strides(),
+          static_cast<uint32_t>(idx.dim()),
+          dim,
+          is_crow,
+          stream->getErrorBuffer());
+      mtl_dispatch1DJob(encoder, pipeline, static_cast<NSUInteger>(total_work));
+    }
+  });
+  stream->synchronize(SyncType::COMMIT_AND_WAIT);
+}
+
 static void launch_validate_compressed_sparse_indices_mps_kernel(
     const bool is_crow,
     const Tensor& cidx,
@@ -446,6 +481,10 @@ void _validate_compressed_sparse_indices_mps(
     const int64_t nnz) {
   mps::csr::validate_compressed_sparse_indices_mps_host(
       is_crow, cidx, idx, cdim, dim, nnz);
+  // Invariants 5.4 and 5.5
+  mps::csr::launch_validate_plain_idx_bounds_mps_kernel(
+      is_crow, idx, dim);
+  // Invariants 5.1, 5.2, 5.3, and 5.6
   mps::csr::launch_validate_compressed_sparse_indices_mps_kernel(
       is_crow, cidx, idx, cdim, dim, nnz);
 }

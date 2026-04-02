@@ -20,6 +20,8 @@ inline long batch_base_offset_from_linear(
   return offset;
 }
 
+// Invariant 5.1
+// compressed_index[..., 0] == 0.
 inline void report_first_cidx_error(device ErrorMessages* error_buf, bool is_crow) {
   if (is_crow) {
     TORCH_REPORT_ERROR(error_buf, "`crow_indices[..., 0] == 0` is not satisfied.");
@@ -28,6 +30,8 @@ inline void report_first_cidx_error(device ErrorMessages* error_buf, bool is_cro
   }
 }
 
+// Invariant 5.2
+// compressed_index[..., -1] == nnz.
 inline void report_last_cidx_error(device ErrorMessages* error_buf, bool is_crow) {
   if (is_crow) {
     TORCH_REPORT_ERROR(error_buf, "`crow_indices[..., -1] == nnz` is not satisfied.");
@@ -36,6 +40,8 @@ inline void report_last_cidx_error(device ErrorMessages* error_buf, bool is_crow
   }
 }
 
+// Invariant 5.3
+// 0 <= compressed_indices[..., 1:] - compressed_indices[..., :-1] <= plain_dim.
 inline void report_cidx_diff_error(device ErrorMessages* error_buf, bool is_crow) {
   if (is_crow) {
     TORCH_REPORT_ERROR(
@@ -48,6 +54,8 @@ inline void report_cidx_diff_error(device ErrorMessages* error_buf, bool is_crow
   }
 }
 
+// Invariants 5.4 and 5.5
+// 0 <= plain_index < plain_dim.
 inline void report_idx_bounds_error(device ErrorMessages* error_buf, bool is_crow) {
   if (is_crow) {
     TORCH_REPORT_ERROR(error_buf, "`0 <= col_indices < ncols` is not satisfied.");
@@ -56,6 +64,10 @@ inline void report_idx_bounds_error(device ErrorMessages* error_buf, bool is_cro
   }
 }
 
+// Invariant 5.6
+// plain_indices[..., compressed_indices[..., i - 1]:compressed_indices[..., i]]
+// for all i = 1, ..., compressed_dim
+// are sorted and distinct along the last dimension values.
 inline void report_sorted_distinct_error(device ErrorMessages* error_buf, bool is_crow) {
   if (is_crow) {
     TORCH_REPORT_ERROR(
@@ -65,6 +77,42 @@ inline void report_sorted_distinct_error(device ErrorMessages* error_buf, bool i
     TORCH_REPORT_ERROR(
         error_buf,
         "`row_indices[..., ccol_indices[..., i - 1]:ccol_indices[..., i]] for all i = 1, ..., ncols are sorted and distinct along the last dimension values` is not satisfied.");
+  }
+}
+
+inline long linear_offset_from_index(
+    long linear_index,
+    constant long* sizes,
+    constant long* strides,
+    uint ndim) {
+  long offset = 0;
+  long tmp = linear_index;
+  for (int dim = static_cast<int>(ndim) - 1; dim >= 0; --dim) {
+    const long div = tmp / sizes[dim];
+    offset += (tmp - div * sizes[dim]) * strides[dim];
+    tmp = div;
+  }
+  return offset;
+}
+
+// Invariants 5.4 and 5.5
+template <typename index_t>
+kernel void validate_plain_idx_bounds(
+    device const index_t* idx       [[buffer(0)]],
+    constant long* idx_sizes        [[buffer(1)]],
+    constant long* idx_strides      [[buffer(2)]],
+    constant uint& idx_ndim         [[buffer(3)]],
+    constant long& dim              [[buffer(4)]],
+    constant bool& is_crow          [[buffer(5)]],
+    device ErrorMessages* error_buf [[buffer(6)]],
+    uint gid                        [[thread_position_in_grid]]) {
+  const long idx_offset =
+      linear_offset_from_index(static_cast<long>(gid), idx_sizes, idx_strides, idx_ndim);
+  const index_t idx_curr = idx[idx_offset];
+  const index_t zero = static_cast<index_t>(0);
+  const index_t dim_t = static_cast<index_t>(dim);
+  if (!(zero <= idx_curr && idx_curr < dim_t)) {
+    report_idx_bounds_error(error_buf, is_crow);
   }
 }
 
@@ -104,11 +152,13 @@ kernel void validate_compressed_sparse_indices(
   const long cidx_stride = cidx_strides[cidx_ndim - 1];
   const long idx_stride = idx_strides[idx_ndim - 1];
 
+  // Invariant 5.1
   if (slice_idx == 0 && cidx[cidx_batch_offset] != static_cast<index_t>(0)) {
     report_first_cidx_error(error_buf, is_crow);
     return;
   }
 
+  // Invariant 5.2
   if (((cdim == 0) && (slice_idx == 0)) || ((cdim > 0) && (slice_idx == cdim - 1))) {
     if (cidx[cidx_batch_offset + cdim * cidx_stride] != static_cast<index_t>(nnz)) {
       report_last_cidx_error(error_buf, is_crow);
@@ -128,6 +178,7 @@ kernel void validate_compressed_sparse_indices(
   const index_t dim_t = static_cast<index_t>(dim);
   const index_t nnz_t = static_cast<index_t>(nnz);
 
+  // Invariant 5.3
   if (!(zero <= (cidx_next - cidx_curr) && (cidx_next - cidx_curr) <= dim_t)) {
     report_cidx_diff_error(error_buf, is_crow);
     return;
@@ -137,6 +188,7 @@ kernel void validate_compressed_sparse_indices(
     return;
   }
 
+  // Invariant 5.6
   for (index_t p = cidx_curr; p < cidx_next; ++p) {
     const long curr_idx_offset = idx_batch_offset + static_cast<long>(p) * idx_stride;
     const index_t idx_curr = idx[curr_idx_offset];
@@ -153,6 +205,21 @@ kernel void validate_compressed_sparse_indices(
     }
   }
 }
+
+#define REGISTER_VALIDATE_PLAIN_IDX_BOUNDS(INDEX_T)                              \
+  template [[host_name("validate_plain_idx_bounds_" #INDEX_T)]] kernel           \
+      void validate_plain_idx_bounds<INDEX_T>(                                   \
+          device const INDEX_T * idx,                                            \
+          constant long * idx_sizes,                                             \
+          constant long * idx_strides,                                           \
+          constant uint & idx_ndim,                                              \
+          constant long & dim,                                                   \
+          constant bool & is_crow,                                               \
+          device ErrorMessages * error_buf,                                      \
+          uint gid);
+
+REGISTER_VALIDATE_PLAIN_IDX_BOUNDS(int);
+REGISTER_VALIDATE_PLAIN_IDX_BOUNDS(long);
 
 #define REGISTER_VALIDATE_COMPRESSED_SPARSE_INDICES(INDEX_T)                     \
   template [[host_name("validate_compressed_sparse_indices_" #INDEX_T)]] kernel  \
