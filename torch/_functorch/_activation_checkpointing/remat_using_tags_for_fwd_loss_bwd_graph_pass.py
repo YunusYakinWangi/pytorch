@@ -75,24 +75,29 @@ def remat_using_tags_for_fwd_loss_bwd_graph(gm: fx.GraphModule) -> fx.GraphModul
     or custom["autograd_backward"] == True (set automatically by _patch_autograd_grad).
     When the user provides phase annotations, only those are used.
 
-    Only a single backward region is supported. If multiple backward regions are
-    detected (e.g. multiple autograd.grad calls), the user must manually annotate
-    the real backward with fx.traceback.annotate({"phase": "backward"}).
+    Only a single contiguous backward region is supported. If multiple backward
+    regions are detected (whether from multiple autograd.grad calls or multiple
+    user annotations), an error is raised.
     """
     if not has_recomputable_ops(gm):
         return gm
 
     use_phase_only = _has_user_phase_annotation(gm)
 
-    if not use_phase_only:
-        num_regions = _count_backward_regions(gm)
-        if num_regions > 1:
+    num_regions = _count_backward_regions(gm, use_phase_only=use_phase_only)
+    if num_regions > 1:
+        if use_phase_only:
             raise RuntimeError(
-                f"Detected {num_regions} backward regions in the graph but remat only supports "
-                "a single backward region. This can happen when the traced function contains "
-                "multiple torch.autograd.grad calls. Please annotate the real backward with "
-                'torch.fx.traceback.annotate({"phase": "backward"}).'
+                f"Detected {num_regions} backward regions annotated with "
+                'phase: "backward" but remat only supports a single backward region. '
+                "Please ensure only one contiguous region is annotated."
             )
+        raise RuntimeError(
+            f"Detected {num_regions} backward regions in the graph but remat only supports "
+            "a single backward region. This can happen when the traced function contains "
+            "multiple torch.autograd.grad calls. Please annotate the real backward with "
+            'torch.fx.traceback.annotate({"phase": "backward"}).'
+        )
 
     # Find backward boundary and build ordering
     bwd_start: int | None = None

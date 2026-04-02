@@ -485,7 +485,8 @@ def _patch_autograd_grad():
     Under make_fx tracing, the autograd engine doesn't automatically call
     setup_stacktrace_preservation_hooks, so backward FX nodes end up without
     seq_nr metadata. This patches autograd.grad to install those hooks
-    and set custom["is_backward"]=True on all backward nodes via fx_traceback annotation.
+    and set custom["autograd_backward"]=True on all backward nodes via
+    fx_traceback annotation.
     """
     import torch.autograd
     import torch.fx.traceback as fx_traceback

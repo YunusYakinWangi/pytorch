@@ -2631,6 +2631,81 @@ def forward(self, arg0_1):
         self.assertEqual(ref, result)
         self.assertEqual(x_ref.grad, x_test.grad)
 
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
+    def test_multiple_user_phase_annotations_errors(self):
+        x = torch.randn(4, 4, requires_grad=True)
+        w = torch.randn(4, 4, requires_grad=True)
+
+        def fn(x, w):
+            z = torch.utils.checkpoint.checkpoint(
+                lambda a, b: torch.sin(a @ b), x, w, use_reentrant=False
+            )
+            loss = z.sum()
+            with torch.fx.traceback.annotate({"phase": "backward"}):
+                dx, dw = _grad(loss, (x, w))
+            # Non-backward computation between two backward annotations
+            out = dx + dw
+            with torch.fx.traceback.annotate({"phase": "backward"}):
+                out = out * 2
+            return out.detach()
+
+        with self.assertRaisesRegex(RuntimeError, "backward regions annotated"):
+            self._compile_and_capture(fn, True, (x, w))
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
+    def test_user_phase_annotation_with_extra_autograd_grad(self):
+        """Only the user-annotated backward region gets rematerialization."""
+        x = torch.randn(4, 4, requires_grad=True)
+        w1 = torch.randn(4, 4, requires_grad=True)
+        w2 = torch.randn(4, 4, requires_grad=True)
+
+        def fn(x, w1, w2):
+            z1 = torch.utils.checkpoint.checkpoint(
+                lambda a, b: torch.sin(a @ b), x, w1, use_reentrant=False
+            )
+            z2 = torch.utils.checkpoint.checkpoint(
+                lambda a, b: torch.sigmoid(a @ b), x, w2, use_reentrant=False
+            )
+            loss1 = z1.sum()
+            loss2 = z2.sum()
+            # Only the first backward is annotated
+            with torch.fx.traceback.annotate({"phase": "backward"}):
+                dx1 = _grad(loss1, (x,))
+            # Second backward NOT annotated — should not get remat
+            dx2 = _grad(loss2, (x,))
+            return (dx1[0] + dx2[0]).detach()
+
+        _, gm_with = self._compile_and_capture(fn, True, (x, w1, w2))
+
+        self.assertExpectedInline(
+            gm_with.code.strip(),
+            """\
+def forward(self, arg0_1, arg1_1, arg2_1):
+    mm = torch.ops.aten.mm.default(arg0_1, arg1_1)
+    sin = torch.ops.aten.sin.default(mm);  mm = None
+    mm_1 = torch.ops.aten.mm.default(arg0_1, arg2_1)
+    sigmoid = torch.ops.aten.sigmoid.default(mm_1);  mm_1 = None
+    detach_4 = torch.ops.aten.detach.default(sigmoid)
+    sum_1 = torch.ops.aten.sum.default(sin);  sin = None
+    sum_2 = torch.ops.aten.sum.default(sigmoid);  sigmoid = None
+    ones_like = torch.ops.aten.ones_like.default(sum_1, pin_memory = False, memory_format = torch.preserve_format);  sum_1 = None
+    expand = torch.ops.aten.expand.default(ones_like, [4, 4]);  ones_like = None
+    mm_recomputed = torch.ops.aten.mm.default(arg0_1, arg1_1);  arg0_1 = None
+    cos = torch.ops.aten.cos.default(mm_recomputed);  mm_recomputed = None
+    mul = torch.ops.aten.mul.Tensor(expand, cos);  expand = cos = None
+    t = torch.ops.aten.t.default(arg1_1);  arg1_1 = None
+    mm_3 = torch.ops.aten.mm.default(mul, t);  mul = t = None
+    ones_like_1 = torch.ops.aten.ones_like.default(sum_2, pin_memory = False, memory_format = torch.preserve_format);  sum_2 = None
+    expand_1 = torch.ops.aten.expand.default(ones_like_1, [4, 4]);  ones_like_1 = None
+    detach_5 = torch.ops.aten.detach.default(detach_4);  detach_4 = None
+    sigmoid_backward = torch.ops.aten.sigmoid_backward.default(expand_1, detach_5);  expand_1 = detach_5 = None
+    t_1 = torch.ops.aten.t.default(arg2_1);  arg2_1 = None
+    mm_4 = torch.ops.aten.mm.default(sigmoid_backward, t_1);  sigmoid_backward = t_1 = None
+    add = torch.ops.aten.add.Tensor(mm_3, mm_4);  mm_3 = mm_4 = None
+    detach_6 = torch.ops.aten.detach.default(add);  add = None
+    return (detach_6,)""",
+        )
+
 
 devices = ["cuda", "hpu"]
 instantiate_device_type_tests(
