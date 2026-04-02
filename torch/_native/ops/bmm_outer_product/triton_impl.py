@@ -11,6 +11,8 @@ def _is_outer_product(a: torch.Tensor, b: torch.Tensor) -> bool:
         and b.ndim == 3
         and a.shape[2] == 1
         and b.shape[1] == 1
+        and a.numel() > 0
+        and b.numel() > 0
         and not a.is_complex()
     )
 
