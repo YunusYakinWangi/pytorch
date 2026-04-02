@@ -1299,6 +1299,45 @@ class UserDefinedObjectVariable(UserDefinedVariable):
             return self.value
         return super().guard_as_python_constant()
 
+    def bool_impl(
+        self,
+        tx: "InstructionTranslator",
+    ) -> "VariableTracker | None":
+        """Mirrors slot_nb_bool (typeobject.c:10630-10671).
+
+        For user-defined types, CPython's slot_nb_bool:
+        1. Tries __bool__ — must return bool, else TypeError.
+        2. Falls back to __len__ — truthy if > 0.
+        3. If neither exists, returns 1 (truthy).
+        """
+        from .constant import ConstantVariable
+        from .object_protocol import CONSTANT_VARIABLE_TRUE
+        from .tensor import SymNodeVariable
+
+        if self.call_obj_hasattr(tx, "__bool__").value:
+            result = self.call_method(tx, "__bool__", [], {})
+            if result.is_python_constant():
+                result_value = result.as_python_constant()
+                if not isinstance(result_value, bool):
+                    # CPython: "__bool__ should return bool, got ..."
+                    raise_observed_exception(
+                        TypeError,
+                        tx,
+                        args=[
+                            f"__bool__ should return bool, returned {type(result_value).__name__}"
+                        ],
+                    )
+            return result
+        elif self.call_obj_hasattr(tx, "__len__").value:
+            length = self.call_method(tx, "__len__", [], {})
+            if length.is_python_constant():
+                return ConstantVariable.create(length.as_python_constant() > 0)
+            if isinstance(length, SymNodeVariable):
+                return SymNodeVariable.create(tx, length.as_proxy() > 0)
+            return None
+        else:
+            return CONSTANT_VARIABLE_TRUE
+
     def nb_index_impl(
         self,
         tx: "InstructionTranslator",
