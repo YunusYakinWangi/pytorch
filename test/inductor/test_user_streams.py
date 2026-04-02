@@ -937,6 +937,36 @@ class TestUserStreamCompile(InductorTestCase):
         # All pointwise ops on same stream should fuse into 1 kernel
         self.assertEqual(torch._inductor.metrics.generated_kernel_count, 1)
 
+    def test_no_fusion_simple_dependency_across_streams(self):
+        """Regression: a single pointwise consumed across a stream boundary must not fuse."""
+        from torch._inductor.utils import run_and_get_code
+
+        def fn(x):
+            s1 = torch.cuda.Stream()
+            s2 = torch.cuda.Stream()
+
+            with torch.cuda.stream(s1):
+                a = x + 1
+            e = s1.record_event()
+            s2.wait_event(e)
+            with torch.cuda.stream(s2):
+                b = a * 2
+            s1.synchronize()
+            s2.synchronize()
+            return b
+
+        x = torch.randn(1024, device="cuda")
+
+        expected = fn(x)
+        compiled_fn = torch.compile(fn)
+        torch._inductor.metrics.reset()
+        result, (code,) = run_and_get_code(compiled_fn, x)
+
+        self.assertEqual(result, expected)
+
+        # Must be 2 separate kernels on 2 streams, not fused into 1
+        self.assertEqual(torch._inductor.metrics.generated_kernel_count, 2)
+
     def test_codegen_structure_single_stream(self):
         """Verify wrapper structure for pointwise ops with one side stream."""
         from torch._inductor.utils import run_and_get_code
@@ -988,9 +1018,12 @@ with torch.cuda._DeviceGuard(0):
     stream1 = get_external_object_by_index(0)
     with torch.cuda.stream(stream1):
         buf0 = empty_strided_cuda((1024, ), (1, ), torch.float32)
-        buf1 = buf0; del buf0
         raw_stream = get_raw_stream(0)
-        triton_kernel.run(buf1, arg0_1, 1024, stream=raw_stream)
+        triton_kernel.run(arg0_1, buf0, 1024, stream=raw_stream)
+    with torch.cuda.stream(default_stream):
+        buf1 = buf0; del buf0
+        stream0 = get_raw_stream(0)
+        triton_kernel.run(buf1, arg0_1, 1024, stream=stream0)
     return (buf1, )""",
         )
 
