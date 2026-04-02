@@ -3870,14 +3870,14 @@ Tensor& linalg_solve_triangular_out(
     if (can_flatten_batch_dims(A) && (A.stride(-2) == 1 || A.stride(-1) == 1)) {
       return c10::MaybeOwned<Tensor>::borrowed(A);
     } else {
-      // A will be copied, so we need to tell to look at -1 on the diag
       // NOTE: This is the only place A is copied!
-      if (A.is_neg() && unitriangular) { unitriangular = false; }
-      return c10::MaybeOwned<Tensor>::owned(cloneMatrix(
-        A,
+      auto A_clone = cloneMatrix(
+        A.is_neg() ? A._neg_view() : A,
         // NOTE: preserve memory format for faster clone
-        /*make_col_major_like=*/(A.stride(-2) == 1)
-      ));
+        /*make_col_major_like=*/(A.stride(-1) != 1)
+      );
+      A_clone._set_neg(A.is_neg());
+      return c10::MaybeOwned<Tensor>::owned(std::move(A_clone));
     }
   }(A_);
 
