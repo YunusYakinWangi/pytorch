@@ -4344,6 +4344,12 @@ class SourcelessBuilder:
         ):
             proxy = tx.output.bound_symbols[value.node.expr]
             return SymNodeVariable.create(tx, proxy)
+        elif isinstance(value, slice):
+            items = [
+                SourcelessBuilder.create(tx, getattr(value, k))
+                for k in ("start", "stop", "step")
+            ]
+            return SliceVariable(items, tx)  # pyrefly: ignore[bad-argument-type]
         elif istype(value, object):
             return ObjectVariable(value)
         unimplemented(
