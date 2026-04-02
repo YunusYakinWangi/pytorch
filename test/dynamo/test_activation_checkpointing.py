@@ -2644,6 +2644,7 @@ class ActivationCheckpointingNonStrictTracerTests(torch._dynamo.test_case.TestCa
     def _trace_train_step(self, mod, x):
         import torch.utils._pytree as pytree
         from torch.fx.experimental.proxy_tensor import make_fx
+        from torch.fx.traceback import preserve_node_meta
         from torch.nn.utils import stateless
 
         params = dict(mod.named_parameters())
@@ -2658,7 +2659,10 @@ class ActivationCheckpointingNonStrictTracerTests(torch._dynamo.test_case.TestCa
 
         full_args = (*flat_params, x)
 
-        with torch.compiler._non_strict_tracing_context():
+        with (
+            torch.compiler._non_strict_tracing_context(),
+            preserve_node_meta(),
+        ):
             return make_fx(train_step)(*full_args)
 
     def test_checkpoint_traces_through_eager_ac_under_non_strict(self):
@@ -2712,9 +2716,7 @@ def forward(self, arg0_1, arg1_1):
                 def fn(x):
                     return torch.sin(x @ self.w)
 
-                return checkpoint(
-                    fn, x, use_reentrant=False, context_fn=context_fn
-                )
+                return checkpoint(fn, x, use_reentrant=False, context_fn=context_fn)
 
         gm = self._trace_train_step(Model(), torch.randn(2, 4))
 
