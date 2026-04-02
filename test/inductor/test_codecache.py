@@ -3177,15 +3177,38 @@ class TestFxGraphCacheHashing(TestCase):
         gm = torch.fx.GraphModule({}, torch.fx.Graph())
         pickler = FxGraphCachePickler(gm)
 
-        # Unpicklable type gets cached as True
-        self.assertNotIn(AnotherUnpicklable, pickler._checked_types)
+        # Unpicklable type gets cached as True (class-level cache)
+        self.assertNotIn(AnotherUnpicklable, FxGraphCachePickler._checked_types)
         pickler.dumps(AnotherUnpicklable("x"))
-        self.assertTrue(pickler._checked_types[AnotherUnpicklable])
+        self.assertTrue(FxGraphCachePickler._checked_types[AnotherUnpicklable])
 
         # Second call should use fast path (same result)
         obj1 = AnotherUnpicklable("y")
         obj2 = AnotherUnpicklable("y")
         self.assertEqual(pickler.dumps(obj1), pickler.dumps(obj2))
+
+        # Clean up class-level cache to avoid polluting other tests
+        FxGraphCachePickler._checked_types.pop(AnotherUnpicklable, None)
+
+    def test_reducer_override_bypasses_cache_for_totally_opaque_types(self):
+        """
+        Test that unpicklable objects with no stable repr and no known
+        accessors cause BypassFxGraphCache instead of silently producing
+        a potentially incorrect cache key.
+        """
+
+        class TotallyOpaque:
+            def __reduce_ex__(self, protocol):
+                raise TypeError("cannot pickle")
+
+        gm = torch.fx.GraphModule({}, torch.fx.Graph())
+        pickler = FxGraphCachePickler(gm)
+
+        with self.assertRaises(BypassFxGraphCache):
+            pickler.dumps(TotallyOpaque())
+
+        # Clean up class-level cache
+        FxGraphCachePickler._checked_types.pop(TotallyOpaque, None)
 
 
 class TestCudaCompileCommand(TestCase):
