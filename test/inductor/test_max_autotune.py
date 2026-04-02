@@ -292,7 +292,7 @@ class TestMaxAutotune(TestCase):
 
         torch.testing.assert_close(c_actual, c_expected, atol=1e-2, rtol=1e-2)
 
-    def test_use_triton_tma_template_rejects_descriptor_offsets_exceeding_int32(self):
+    def test_use_triton_tma_template_rejects_descriptor_shapes_exceeding_int32(self):
         from torch._inductor.utils import use_triton_tma_template
 
         int32_max = torch.iinfo(torch.int32).max
@@ -322,12 +322,17 @@ class TestMaxAutotune(TestCase):
                 use_triton_tma_template(mat1, mat2, output_layout=output_layout)
             )
 
-    def test_descriptor_offsets_fit_in_int32_uses_expected_guarding(self):
-        from torch._inductor.utils import _descriptor_offsets_fit_in_int32
+    def test_descriptor_shape_fits_in_int32_uses_expected_guarding(self):
+        from torch._inductor.utils import _descriptor_shape_fits_in_int32
 
         gm = make_fx(lambda: torch.zeros(2, 3))()
         graph = GraphLowering(gm)
-        size = sympy.Symbol("s0", integer=True, nonnegative=True)
+        size0 = sympy.Symbol("s0", integer=True, nonnegative=True)
+        size1 = sympy.Symbol("s1", integer=True, nonnegative=True)
+        condition = sympy.And(
+            sympy.Le(size0, torch.iinfo(torch.int32).max),
+            sympy.Le(size1, torch.iinfo(torch.int32).max),
+        )
 
         with V.set_graph_handler(graph):
             with (
@@ -339,11 +344,11 @@ class TestMaxAutotune(TestCase):
                 ) as guard_or_false,
             ):
                 self.assertTrue(
-                    _descriptor_offsets_fit_in_int32([size], add_guards=False)
+                    _descriptor_shape_fits_in_int32(
+                        [128, size0, size1], add_guards=False
+                    )
                 )
-                statically_known_true.assert_called_once_with(
-                    sympy.Le(size, torch.iinfo(torch.int32).max)
-                )
+                statically_known_true.assert_called_once_with(condition)
                 guard_or_false.assert_not_called()
 
             with (
@@ -355,11 +360,11 @@ class TestMaxAutotune(TestCase):
                 ) as guard_or_false,
             ):
                 self.assertTrue(
-                    _descriptor_offsets_fit_in_int32([size], add_guards=True)
+                    _descriptor_shape_fits_in_int32(
+                        [128, size0, size1], add_guards=True
+                    )
                 )
-                guard_or_false.assert_called_once_with(
-                    sympy.Le(size, torch.iinfo(torch.int32).max)
-                )
+                guard_or_false.assert_called_once_with(condition)
                 statically_known_true.assert_not_called()
 
     @unittest.skipIf(not torch.version.hip, "ROCM only")

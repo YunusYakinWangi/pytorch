@@ -1956,25 +1956,28 @@ def can_use_tma(
     )
 
 
-def _descriptor_offsets_fit_in_int32(
+def _descriptor_shape_fits_in_int32(
     sizes: Sequence[sympy.Expr], add_guards: bool = False
 ) -> bool:
     int32_max = torch.iinfo(torch.int32).max
-    if all(isinstance(size, (int, sympy.Integer)) for size in sizes):
-        return all(size <= int32_max for size in sizes)
+    conditions = []
+    for size in sizes:
+        if isinstance(size, (int, sympy.Integer)):
+            if size > int32_max:
+                return False
+        else:
+            conditions.append(sympy.Le(size, int32_max))
+
+    if not conditions:
+        return True
 
     from .virtualized import V
 
-    is_in_bounds = (
-        V.graph.sizevars.guard_or_false
+    condition = conditions[0] if len(conditions) == 1 else sympy.And(*conditions)
+    return (
+        V.graph.sizevars.guard_or_false(condition)
         if add_guards
-        else V.graph.sizevars.statically_known_true
-    )
-    return all(
-        size <= int32_max
-        if isinstance(size, (int, sympy.Integer))
-        else is_in_bounds(sympy.Le(size, int32_max))
-        for size in sizes
+        else V.graph.sizevars.statically_known_true(condition)
     )
 
 
@@ -1986,11 +1989,11 @@ def use_triton_tma_template(
     if not all(len(m.get_size()) == 2 for m in matrices):
         return False
     if not all(
-        _descriptor_offsets_fit_in_int32(m.get_size(), add_guards=add_guards)
+        _descriptor_shape_fits_in_int32(m.get_size(), add_guards=add_guards)
         for m in matrices
     ):
         return False
-    if config.triton.enable_template_tma_store and not _descriptor_offsets_fit_in_int32(
+    if config.triton.enable_template_tma_store and not _descriptor_shape_fits_in_int32(
         output_layout.size, add_guards=add_guards
     ):
         return False
