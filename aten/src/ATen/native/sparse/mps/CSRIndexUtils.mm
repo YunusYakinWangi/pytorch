@@ -1,11 +1,12 @@
 #define TORCH_ASSERT_ONLY_METHOD_OPERATORS
 #include <ATen/native/sparse/mps/CSRIndexUtils.h>
 
+#include <ATen/Dispatch.h>
 #include <ATen/native/SparseTensorUtils.h>
+#include <ATen/native/mps/OperationUtils.h>
 
 #include <ATen/TensorOperators.h>
 
-#include <ATen/ops/_validate_compressed_sparse_indices.h>
 #include <ATen/ops/arange.h>
 #include <ATen/ops/diff.h>
 #include <ATen/ops/cumsum_native.h>
@@ -25,21 +26,150 @@
 #include <algorithm>
 #include <array>
 #include <functional>
+#include <limits>
 #include <numeric>
 #include <string>
 #include <vector>
 
-namespace at {
-void _validate_compressed_sparse_indices(
-    bool is_crow,
-    const Tensor& compressed_idx,
-    const Tensor& plain_idx,
-    int64_t cdim,
-    int64_t dim,
-    int64_t nnz);
-} // namespace at
-
 namespace at::native::mps::csr {
+
+#ifndef PYTORCH_JIT_COMPILE_SHADERS
+static auto& lib = mps::MetalShaderLibrary::getBundledLibrary();
+#else
+#include <ATen/native/mps/SparseTensorMath_metallib.h>
+#endif
+
+static int64_t index_count(IntArrayRef sizes) {
+  int64_t result = 1;
+  for (const auto& size : sizes) {
+    result *= size;
+  }
+  return result;
+}
+
+static void validate_compressed_sparse_indices_mps_host(
+    const bool is_crow,
+    const Tensor& cidx,
+    const Tensor& idx,
+    const int64_t cdim,
+    const int64_t dim,
+    const int64_t nnz) {
+  if (is_crow) {
+    TORCH_CHECK(
+        cidx.size(-1) == cdim + 1,
+        "crow_indices have wrong shape: ",
+        "crow_indices.shape[-1] = ",
+        cidx.size(-1),
+        " is not equal to ",
+        "nrows + 1 = ",
+        cdim + 1);
+    TORCH_CHECK(
+        idx.size(-1) == nnz,
+        "col_indices have wrong shape: ",
+        "col_indices.shape[-1] = ",
+        idx.size(-1),
+        " is not equal to ",
+        "nnz = ",
+        nnz);
+  } else {
+    TORCH_CHECK(
+        cidx.size(-1) == cdim + 1,
+        "ccol_indices have wrong shape: ",
+        "ccol_indices.shape[-1] = ",
+        cidx.size(-1),
+        " is not equal to ",
+        "ncols + 1 = ",
+        cdim + 1);
+    TORCH_CHECK(
+        idx.size(-1) == nnz,
+        "row_indices have wrong shape: ",
+        "row_indices.shape[-1] = ",
+        idx.size(-1),
+        " is not equal to ",
+        "nnz = ",
+        nnz);
+  }
+
+  AT_DISPATCH_INDEX_TYPES(idx.scalar_type(), "compressed_index_invariance_checks_mps", [=]() {
+    if (is_crow) {
+      TORCH_CHECK(
+          static_cast<int64_t>(static_cast<index_t>(dim)) == dim,
+          sizeof(index_t) * 8,
+          "-bit integer overflow in column dimension = ",
+          dim);
+      TORCH_CHECK(
+          static_cast<int64_t>(static_cast<index_t>(cdim)) == cdim,
+          sizeof(index_t) * 8,
+          "-bit integer overflow in row dimension = ",
+          cdim);
+    } else {
+      TORCH_CHECK(
+          static_cast<int64_t>(static_cast<index_t>(dim)) == dim,
+          sizeof(index_t) * 8,
+          "-bit integer overflow in row dimension = ",
+          dim);
+      TORCH_CHECK(
+          static_cast<int64_t>(static_cast<index_t>(cdim)) == cdim,
+          sizeof(index_t) * 8,
+          "-bit integer overflow in column dimension = ",
+          cdim);
+    }
+    TORCH_CHECK(
+        static_cast<int64_t>(static_cast<index_t>(nnz)) == nnz,
+        sizeof(index_t) * 8,
+        "-bit integer overflow in nnz = ",
+        nnz);
+  });
+}
+
+static void launch_validate_compressed_sparse_indices_mps_kernel(
+    const bool is_crow,
+    const Tensor& cidx,
+    const Tensor& idx,
+    const int64_t cdim,
+    const int64_t dim,
+    const int64_t nnz) {
+  const auto batch_dims = cidx.sizes().slice(0, cidx.dim() - 1);
+  const int64_t batch_count = index_count(batch_dims);
+  if (batch_count == 0) {
+    return;
+  }
+
+  const int64_t slices_per_batch = std::max<int64_t>(cdim, 1);
+  const int64_t total_work = batch_count * slices_per_batch;
+  TORCH_CHECK(
+      total_work <= static_cast<int64_t>(std::numeric_limits<uint32_t>::max()),
+      "_validate_compressed_sparse_indices_mps: too many work items for Metal kernel launch");
+
+  auto stream = getCurrentMPSStream();
+  dispatch_sync_with_rethrow(stream->queue(), ^() {
+    @autoreleasepool {
+      const auto kernel_name =
+          "validate_compressed_sparse_indices_" + mps::scalarToMetalTypeString(idx);
+      auto pipeline = lib.getPipelineStateForFunc(kernel_name);
+      auto encoder = stream->commandEncoder();
+      [encoder setComputePipelineState:pipeline];
+      mtl_setArgs(
+          encoder,
+          cidx,
+          idx,
+          cidx.sizes(),
+          cidx.strides(),
+          idx.sizes(),
+          idx.strides(),
+          std::array<uint32_t, 4>{
+              static_cast<uint32_t>(cidx.dim()),
+              static_cast<uint32_t>(idx.dim()),
+              static_cast<uint32_t>(batch_count),
+              0},
+          std::array<int64_t, 4>{cdim, dim, nnz, 0},
+          is_crow,
+          stream->getErrorBuffer());
+      mtl_dispatch1DJob(encoder, pipeline, static_cast<NSUInteger>(total_work));
+    }
+  });
+  stream->synchronize(SyncType::COMMIT_AND_WAIT);
+}
 
 void build_batch_ptr_mps_out(
     const Tensor& batch_indices,
@@ -314,15 +444,10 @@ void _validate_compressed_sparse_indices_mps(
     const int64_t cdim,
     const int64_t dim,
     const int64_t nnz) {
-  auto cidx_cpu = cidx.cpu();
-  auto idx_cpu = idx.cpu();
-  at::_validate_compressed_sparse_indices(
-      is_crow,
-      cidx_cpu,
-      idx_cpu,
-      cdim,
-      dim,
-      nnz);
+  mps::csr::validate_compressed_sparse_indices_mps_host(
+      is_crow, cidx, idx, cdim, dim, nnz);
+  mps::csr::launch_validate_compressed_sparse_indices_mps_kernel(
+      is_crow, cidx, idx, cdim, dim, nnz);
 }
 
 } // namespace at::native

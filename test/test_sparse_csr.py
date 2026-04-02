@@ -16,7 +16,7 @@ from torch.testing._internal.common_utils import \
      run_tests, load_tests, coalescedonoff, parametrize, subtest, skipIfTorchDynamo,
      IS_FBCODE, IS_REMOTE_GPU, suppress_warnings)
 from torch.testing._internal.common_device_type import \
-    (ops, instantiate_device_type_tests, dtypes, OpDTypes, dtypesIfCUDA, onlyCPU, onlyCUDA, skipCUDAIfNoSparseGeneric,
+    (ops, instantiate_device_type_tests, dtypes, OpDTypes, dtypesIfCUDA, onlyCPU, onlyCUDA, onlyMPS, skipCUDAIfNoSparseGeneric,
      precisionOverride, skipMeta, skipCUDAIfRocm, skipCPUIfNoMklSparse, largeTensorTest)
 from torch.testing._internal.common_methods_invocations import \
     (op_db, sparse_csr_unary_ufuncs, ReductionOpInfo)
@@ -4298,6 +4298,41 @@ class TestSparseCSRMPS(TestCase):
     test_zero_to_zero_correspondence_unary = TestSparseCSR.test_zero_to_zero_correspondence_unary
     test_sparse_csr_unary_out = TestSparseCSR.test_sparse_csr_unary_out
     test_sparse_csr_unary_inplace = TestSparseCSR.test_sparse_csr_unary_inplace
+
+    def test_validate_mps_does_not_fallback_to_cpu(self, device):
+        crow_indices = torch.tensor([0, 2, 4], device=device, dtype=torch.int64)
+        col_indices = torch.tensor([0, 1, 0, 2], device=device, dtype=torch.int64)
+
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU]) as prof:
+            torch._validate_compressed_sparse_indices(
+                True,
+                crow_indices,
+                col_indices,
+                2,
+                3,
+                4,
+            )
+
+        events = {event.key for event in prof.key_averages()}
+        forbidden_events = {"aten::cpu", "aten::to", "aten::_to_copy", "aten::copy_"}
+        self.assertFalse(
+            forbidden_events & events,
+            f"unexpected CPU fallback ops were recorded: {sorted(forbidden_events & events)}",
+        )
+
+    def test_validate_mps_reports_invalid_crow_indices(self, device):
+        crow_indices = torch.tensor([1, 2, 4], device=device, dtype=torch.int64)
+        col_indices = torch.tensor([0, 1, 0, 2], device=device, dtype=torch.int64)
+
+        with self.assertRaisesRegex(RuntimeError, r"`crow_indices\[\.\.\., 0\] == 0` is not satisfied\."):
+            torch._validate_compressed_sparse_indices(
+                True,
+                crow_indices,
+                col_indices,
+                2,
+                3,
+                4,
+            )
 
 
 # e.g., TestSparseCSRCPU and TestSparseCSRCUDA
