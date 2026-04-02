@@ -2441,16 +2441,25 @@ class FakeTensorMode(TorchDispatchMode):
 
         flat_args, args_spec = pytree.tree_flatten((args, kwargs))
 
-        # Single pass over flat_args to compute subclass check, collect fake
-        # tensors, and detect symbolic sizes. This replaces three separate
-        # iterations (_check_for_subclass, list comprehension for fakes,
-        # and has_symbolic_sizes any() calls).
         # DO NOT PUT LOGIC BEFORE UNRECOGNIZED TYPE CHECKING
         # We must throw NotImplemented in case of unrecognized types to handle subclasses.
+        # Throwing the exception will pass the control to the next __torch_dispatch__.
         # See [subclass inputs] below
+        has_unrecognized_types = _check_for_subclass(flat_args)
+        if has_unrecognized_types:
+            unrecognized_types = [
+                type(x) for x in flat_args if _check_for_subclass_arg(x)
+            ]
+            not_implemented_log.debug(
+                "FakeTensorMode unrecognized subclass(es): %s", unrecognized_types
+            )
+            return NotImplemented
+
+        # Fused pass: collect our fake tensors, detect symbolic sizes, and
+        # check for non-fake tensors in one iteration (replaces two separate
+        # list comprehension + any() calls).
         flat_arg_fake_tensors: list[FakeTensor] = []
         has_symbolic_sizes = False
-        has_unrecognized_types = False
         has_non_fake_tensors = False
         for x in flat_args:
             if isinstance(x, FakeTensor) and x.fake_mode is self:
@@ -2461,17 +2470,6 @@ class FakeTensorMode(TorchDispatchMode):
                 has_symbolic_sizes = True
             elif isinstance(x, Tensor):
                 has_non_fake_tensors = True
-                if type(x) is not Tensor and type(x) is not torch.nn.Parameter:
-                    has_unrecognized_types = True
-
-        if has_unrecognized_types:
-            unrecognized_types = [
-                type(x) for x in flat_args if _check_for_subclass_arg(x)
-            ]
-            not_implemented_log.debug(
-                "FakeTensorMode unrecognized subclass(es): %s", unrecognized_types
-            )
-            return NotImplemented
 
         converter = self.fake_tensor_converter
 

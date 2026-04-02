@@ -1785,6 +1785,9 @@ class ProxyTorchDispatchMode(TorchDispatchMode):
         self.decomp_layers: int = 0
         # See invoke_subgraph
         self._invoke_subgraph_names: set[str] = set()
+        # Cached FakeTensorMode for static dispatch — set by _trace_inner
+        # to avoid per-op TLS round-trips through the C++ dispatcher.
+        self._cached_fake_mode: FakeTensorMode | None = None
         self._invoke_subgraph_cache: dict[
             torch.fx.GraphModule | FunctionalizeCtxWrapper, str
         ] = {}
@@ -2712,6 +2715,13 @@ class _MakefxTracer:
             stack.enter_context(disable_autocast_cache())
             stack.enter_context(_set_make_fx_tracer(self))
 
+            # Static dispatch: remove FakeTensorMode from TLS and cache it
+            # on proxy_mode. proxy_call will call dispatch() directly,
+            # eliminating the per-op C++ dispatcher round-trip.
+            if self.fake_tensor_mode:
+                stack.enter_context(unset_fake_temporarily())
+                proxy_mode._cached_fake_mode = self.fake_tensor_mode
+
             if self.fx_tracer is None:
                 raise AssertionError("fx_tracer should not be None")
             try:
@@ -2966,6 +2976,10 @@ def _set_unbacked_bindings(out: object, out_proxy: _NestedProxys) -> None:
     # will fail.  Very strange, it probably isn't right for them to be using
     # two fake modes there...
     fake_mode = torch._C._get_dispatch_mode(torch._C._TorchDispatchModeKey.FAKE)
+    if fake_mode is None:
+        fake_mode = torch._guards.detect_fake_mode(
+            [out] if not isinstance(out, (tuple, list)) else out
+        )
     if fake_mode and fake_mode.shape_env:
         if symbol_to_path := compute_unbacked_bindings(fake_mode.shape_env, out):
             if not isinstance(out_proxy, Proxy):
