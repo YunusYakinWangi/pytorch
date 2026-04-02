@@ -2054,6 +2054,7 @@ class TestFX(JitTestCase):
                         f"got {tensor_meta[1].shape}"
                     )
 
+    @xfailIf(IS_ARM64) # RuntimeError: label is too far
     def test_shape_prop_layout_3d(self):
         class ConvTest3d(torch.nn.Module):
             def __init__(self) -> None:
