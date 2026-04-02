@@ -312,6 +312,7 @@ dtensor_compiled_fails = {
     xfail("lu_unpack"),
     xfail("scatter"),
     xfail("scatter_add"),
+    xfail("take_along_dim"),
     # batch_norm variants decompose through squeeze.dims → as_strided under
     # compilation, and DTensor has no as_strided strategy.
     xfail("_native_batch_norm_legit"),
