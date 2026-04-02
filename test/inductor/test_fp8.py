@@ -476,13 +476,15 @@ class TestFP8Lowering(TestCase):
         x_fp8, x_inverse_scale = _quantize_tensorwise(x, dtype_float8)
 
         def linear(x_fp8, x_inverse_scale, w_t_fp8, w_inverse_scale, bias):
-            y = torch._scaled_mm(
+            y = torch.nn.functional.scaled_mm(
                 x_fp8,
                 w_t_fp8,
                 x_inverse_scale,
+                ScalingType.TensorWise,
                 w_inverse_scale,
-                bias,
-                out_dtype=dtype,
+                ScalingType.TensorWise,
+                bias=bias,
+                output_dtype=dtype,
                 use_fast_accum=use_fast_accum,
             )
             return y
@@ -532,12 +534,14 @@ class TestFP8Lowering(TestCase):
             dtype_float8 = _fix_fp8_dtype_for_rocm(dtype_float8, GPU_TYPE)
             a_fp8 = a.to(dtype_float8).contiguous()  # row-major
             b_fp8 = b.t().contiguous().t().to(dtype_float8)  # column-major
-            return torch._scaled_mm(
+            return torch.nn.functional.scaled_mm(
                 a_fp8,
                 b_fp8,
                 scale_a,
+                ScalingType.TensorWise,
                 scale_b,
-                out_dtype=torch.bfloat16,
+                ScalingType.TensorWise,
+                output_dtype=torch.bfloat16,
                 use_fast_accum=use_fast_accum,
             )
 
@@ -551,7 +555,7 @@ class TestFP8Lowering(TestCase):
                 for node in g.nodes:
                     if (
                         node.op == "call_function"
-                        and node.target == torch.ops.aten._scaled_mm.default
+                        and node.target == torch.ops.aten._scaled_mm_v2.default
                     ):
                         # Insert clone operations before scaled_mm
                         with g.inserting_before(node):
@@ -643,13 +647,15 @@ class TestFP8Lowering(TestCase):
         x_fp8, x_inverse_scale = _quantize_tensorwise(x, dtype_float8)
 
         def linear(x_fp8, x_inverse_scale, w_t_fp8, w_inverse_scale, bias):
-            y = torch._scaled_mm(
+            y = torch.nn.functional.scaled_mm(
                 x_fp8,
                 w_t_fp8,
                 x_inverse_scale,
+                ScalingType.TensorWise,
                 w_inverse_scale,
-                bias,
-                out_dtype=dtype,
+                ScalingType.TensorWise,
+                bias=bias,
+                output_dtype=dtype,
                 use_fast_accum=use_fast_accum,
             )
             return y
@@ -735,13 +741,15 @@ class TestFP8Lowering(TestCase):
         x_fp8, x_inverse_scale = _quantize_rowwise(x, dtype_float8)
 
         def linear(x_fp8, x_inverse_scale, w_t_fp8, w_inverse_scale, bias):
-            y = torch._scaled_mm(
+            y = torch.nn.functional.scaled_mm(
                 x_fp8,
                 w_t_fp8,
                 x_inverse_scale,
+                ScalingType.RowWise,
                 w_inverse_scale,
-                bias,
-                out_dtype=dtype,
+                ScalingType.RowWise,
+                bias=bias,
+                output_dtype=dtype,
                 use_fast_accum=use_fast_accum,
             )
             return y
@@ -802,13 +810,15 @@ class TestFP8Lowering(TestCase):
         x_fp8, x_inverse_scale = _quantize_rowwise(x, dtype_float8)
 
         def linear(x_fp8, x_inverse_scale, w_t_fp8, w_inverse_scale, bias):
-            y = torch._scaled_mm(
+            y = torch.nn.functional.scaled_mm(
                 x_fp8,
                 w_t_fp8,
                 x_inverse_scale,
+                ScalingType.RowWise,
                 w_inverse_scale,
-                bias,
-                out_dtype=dtype,
+                ScalingType.RowWise,
+                bias=bias,
+                output_dtype=dtype,
                 use_fast_accum=use_fast_accum,
             )
             return y
@@ -889,35 +899,47 @@ class TestFP8Lowering(TestCase):
 
         am, ak, bn, bk = scaling_block_sizes
 
+        def _to_v2_scale(scale, block_outer):
+            """Convert scale to v2 cuBLAS format (column-major, padded for 128x128)."""
+            if block_outer == 1:
+                return scale.t().contiguous().t()
+            scale_t = scale.t().contiguous()
+            k_dim = scale_t.size(0)
+            k_padded = ceil_div(k_dim, 4) * 4
+            if k_dim < k_padded:
+                padding = torch.zeros(
+                    k_padded - k_dim, scale_t.size(1),
+                    device=scale.device, dtype=scale.dtype,
+                )
+                scale_t = torch.cat([scale_t, padding], dim=0)
+            return scale_t.t().contiguous().t()
+
         # quantize weight (prior to inference)
         w_fp8, w_inverse_scale = _quantize_blockwise(
             w, dtype_float8, block_outer=bn, block_inner=bk
         )
         w_t_fp8 = w_fp8.t()
-        if (bn, bk) == (1, 128):
-            w_inverse_scale = (
-                w_inverse_scale.t().contiguous().t().t()
-            )  # 1x128 blocks need scales to be outer-dim-major
-        else:
-            w_inverse_scale = w_inverse_scale.t()  # scale_b should be (1, N)
+        w_inverse_scale = _to_v2_scale(w_inverse_scale, bn)
 
         # quantize input x
         x_fp8, x_inverse_scale = _quantize_blockwise(
             x, dtype_float8, block_outer=am, block_inner=ak
         )
-        if (am, ak) == (1, 128):
-            x_inverse_scale = (
-                x_inverse_scale.t().contiguous().t()
-            )  # 1x128 blocks need scales to be outer-dim-major
+        x_inverse_scale = _to_v2_scale(x_inverse_scale, am)
+
+        recipe_x = ScalingType.BlockWise1x128 if (am, ak) == (1, 128) else ScalingType.BlockWise128x128
+        recipe_w = ScalingType.BlockWise1x128 if (bn, bk) == (1, 128) else ScalingType.BlockWise128x128
 
         def linear(x_fp8, x_inverse_scale, w_t_fp8, w_inverse_scale, bias):
-            y = torch._scaled_mm(
+            y = torch.nn.functional.scaled_mm(
                 x_fp8,
                 w_t_fp8,
                 x_inverse_scale,
+                recipe_x,
                 w_inverse_scale,
-                bias,
-                out_dtype=dtype,
+                recipe_w,
+                bias=bias,
+                output_dtype=dtype,
                 use_fast_accum=use_fast_accum,
             )
             return y
@@ -1016,13 +1038,15 @@ class TestFP8Lowering(TestCase):
         x_fp8, x_inverse_scale = _quantize_tensorwise(x, dtype_float8)
 
         def linear(x_fp8, x_inverse_scale, w_t_fp8, w_inverse_scale, bias):
-            y = torch._scaled_mm(
+            y = torch.nn.functional.scaled_mm(
                 x_fp8,
                 w_t_fp8,
                 x_inverse_scale,
+                ScalingType.TensorWise,
                 w_inverse_scale,
-                bias,
-                out_dtype=dtype,
+                ScalingType.TensorWise,
+                bias=bias,
+                output_dtype=dtype,
                 use_fast_accum=use_fast_accum,
             )
             return y
@@ -1327,13 +1351,15 @@ class TestFP8Lowering(TestCase):
         x_fp8, x_inverse_scale = _quantize_rowwise(x, dtype_float8)
 
         def linear(x_fp8, x_inverse_scale, w_t_fp8, w_inverse_scale, bias):
-            y = torch._scaled_mm(
+            y = torch.nn.functional.scaled_mm(
                 x_fp8,
                 w_t_fp8,
                 x_inverse_scale,
+                ScalingType.RowWise,
                 w_inverse_scale,
-                bias,
-                out_dtype=dtype,
+                ScalingType.RowWise,
+                bias=bias,
+                output_dtype=dtype,
                 use_fast_accum=use_fast_accum,
             )
             return y
