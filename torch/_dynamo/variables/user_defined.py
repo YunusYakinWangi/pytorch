@@ -1994,7 +1994,7 @@ class UserDefinedObjectVariable(UserDefinedVariable):
         # C-extension types in the enum's MRO (e.g. str for StrEnum).
         if isinstance(self.value, enum.Enum):
             if not hasattr(self.value, name):
-                raise NotImplementedError
+                raise ObservedAttributeError()
             if name in cmp_name_to_op_mapping:
                 return variables.GetAttrVariable(self, name)
             member = getattr(self.value, name)
