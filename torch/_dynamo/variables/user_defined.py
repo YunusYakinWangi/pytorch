@@ -517,6 +517,8 @@ class UserDefinedClassVariable(UserDefinedVariable):
         source: Source | None,
     ) -> VariableTracker:
         """Trace a class-MRO descriptor's __get__(None, cls) call."""
+        from . import CONSTANT_VARIABLE_NONE
+
         descriptor_source = None
         descriptor_get_source = None
         if self.source:
@@ -526,7 +528,7 @@ class UserDefinedClassVariable(UserDefinedVariable):
         else:
             descriptor_var = UserDefinedObjectVariable(descriptor)
 
-        none_var = variables.ConstantVariable.create(None)
+        none_var = CONSTANT_VARIABLE_NONE
         return variables.UserMethodVariable(
             descriptor.__get__.__func__,  # type: ignore[union-attr]
             descriptor_var,
