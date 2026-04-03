@@ -25976,7 +25976,8 @@ python_ref_db = [
         skips=(
             # RuntimeError: mean(): could not infer output dtype. Input dtype must be either a floating point or complex dtype
             DecorateInfo(
-                unittest.expectedFailure, 'TestCommon', 'test_python_ref', device_type='mps', dtypes=(torch.int32, torch.int16, torch.int8, torch.uint8)
+                unittest.expectedFailure, 'TestCommon', 'test_python_ref', device_type='mps',
+                dtypes=(torch.int32, torch.int16, torch.int8, torch.uint8)
             ),
             DecorateInfo(
                 unittest.expectedFailure, 'TestCommon', 'test_python_ref_meta', device_type='mps',

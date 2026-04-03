@@ -38,23 +38,12 @@ static void fill_mps_dispatch(const Tensor& self, const Scalar& value) {
     const int64_t dim0_size = self.dim() > 0 ? self.size(0) : 1;
     const int64_t inner_numel = self.numel() / dim0_size;
     const uint32_t ndim = static_cast<uint32_t>(self.dim());
-    int64_t sizes_buf[16], strides_buf[16];
-    for (uint32_t i = 0; i < ndim; i++) {
-      sizes_buf[i] = self.size(i);
-      strides_buf[i] = self.stride(i);
-    }
-    // Blocks can't capture C arrays; use pointer aliases (safe: dispatch_sync blocks until done).
-    const int64_t* sizes_ptr = sizes_buf;
-    const int64_t* strides_ptr = strides_buf;
     dispatch_sync_with_rethrow(stream->queue(), ^() {
       @autoreleasepool {
         auto computeEncoder = stream->commandEncoder();
         auto mpsScalar = getMPSScalar(value, dtype);
         [computeEncoder setComputePipelineState:fillPSO];
-        mtl_setArgs(computeEncoder, self, mpsScalar);
-        [computeEncoder setBytes:sizes_ptr length:ndim * sizeof(int64_t) atIndex:2];
-        [computeEncoder setBytes:strides_ptr length:ndim * sizeof(int64_t) atIndex:3];
-        [computeEncoder setBytes:&ndim length:sizeof(uint32_t) atIndex:4];
+        mtl_setArgs(computeEncoder, self, mpsScalar, self.sizes(), self.strides(), ndim);
         const NSUInteger maxTG = fillPSO.maxTotalThreadsPerThreadgroup;
         const MTLSize tgSize = MTLSizeMake(std::min(maxTG, (NSUInteger)inner_numel), 1, 1);
         const MTLSize gridSize = MTLSizeMake(inner_numel, dim0_size, 1);
@@ -64,14 +53,20 @@ static void fill_mps_dispatch(const Tensor& self, const Scalar& value) {
     return;
   }
 
+  // Single-byte dtypes (bool, uint8, int8) use vec4 kernels that fill
+  // 4 elements per thread; all others fill 1 element per thread.
+  const bool is_byte_type = self.element_size() == 1;
+  const uint32_t numel = static_cast<uint32_t>(self.numel());
+  const int64_t threads = is_byte_type ? (numel + 3) / 4 : numel;
+
   auto fillPSO = lib.getPipelineStateForFunc(fmt::format("fill_scalar_dense_{}", type_str));
   dispatch_sync_with_rethrow(stream->queue(), ^() {
     @autoreleasepool {
       auto computeEncoder = stream->commandEncoder();
       auto mpsScalar = getMPSScalar(value, dtype);
       [computeEncoder setComputePipelineState:fillPSO];
-      mtl_setArgs(computeEncoder, self, mpsScalar);
-      mtl_dispatch1DJob(computeEncoder, fillPSO, self.numel());
+      mtl_setArgs(computeEncoder, self, mpsScalar, numel);
+      mtl_dispatch1DJob(computeEncoder, fillPSO, threads);
     }
   });
 }
@@ -93,7 +88,7 @@ static void fill_mps_kernel(TensorIterator& iter, const Scalar& value) {
       return;
     }
     if (dtype == kBool || dtype == kByte || dtype == kChar) {
-      int val = dtype == kBool ? value.toBool() : dtype == kByte ? value.toChar() : value.to<uint8_t>();
+      int val = dtype == kBool ? value.toBool() : dtype == kChar ? value.toChar() : value.to<uint8_t>();
       stream->fill(getMTLBufferStorage(self), val, self.nbytes(), self.storage_offset());
       return;
     }
