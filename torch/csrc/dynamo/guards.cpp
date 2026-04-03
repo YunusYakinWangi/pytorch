@@ -2632,47 +2632,186 @@ class SYMBOLIC_SHAPE_GUARD : public RelationalGuard {
   std::function<int8_t(int64_t*, double*)> _guard_check_fn;
 };
 
-class DYNAMIC_INDICES : public LeafGuard {
-  // C++ equivalent of
-  //  code.append(
-  //      f"(({tensor_name}._dynamo_dynamic_indices.issubset({value._dynamo_dynamic_indices}))
-  //      if hasattr({tensor_name}, '_dynamo_dynamic_indices') else True)"  #
-  //      noqa: B950
+// Unified guard for all dimension marking attributes set by
+// mark_dynamic, mark_static, mark_unbacked, and maybe_mark_dynamic...
+// Checks expected_attrs (exact match), absent_attrs (must not exist),
+// and dependent_attrs (checked only when a gate attribute is present)
+// in a single pass over the tensor.
+//
+// See [Note: Dimension Marking Guards] in torch/_dynamo/guards.py.
+class DIMENSION_MARKING_GUARD : public LeafGuard {
  public:
-  DYNAMIC_INDICES(
+  // expected_attrs: dict {attr_name: expected_value} - attrs present at compile
+  //   time. Runtime: if attr present -> exact match; if absent -> pass.
+  // absent_attrs: list of attr_name strings - attrs absent at compile time.
+  //   Runtime: must NOT have attr.
+  // dependent_attrs: dict {attr_name: (expected_value, gate_attr_name)} -
+  //   checked only when gate attribute is present on runtime tensor.
+  DIMENSION_MARKING_GUARD(
       RootGuardManager* root_guard_manager,
-      py::set dynamic_indices,
+      py::dict expected_attrs,
+      py::list absent_attrs,
+      py::dict dependent_attrs,
       py::object verbose_code_parts,
       py::object user_stack)
       : LeafGuard(
             root_guard_manager,
             std::move(verbose_code_parts),
-            std::move(user_stack)),
-        _dynamic_indices(std::move(dynamic_indices)) {}
+            std::move(user_stack)) {
+    // Pre-intern all attribute name strings for fast lookup on hot path.
+    for (auto& item : expected_attrs) {
+      PyObject* key =
+          PyUnicode_InternFromString(py::cast<std::string>(item.first).c_str());
+      _expected_attrs.emplace_back(
+          key, py::reinterpret_borrow<py::object>(item.second));
+    }
+    for (auto& item : absent_attrs) {
+      PyObject* key =
+          PyUnicode_InternFromString(py::cast<std::string>(item).c_str());
+      _absent_attrs.emplace_back(key);
+    }
+    for (auto& item : dependent_attrs) {
+      py::tuple val = py::cast<py::tuple>(item.second);
+      PyObject* attr_key =
+          PyUnicode_InternFromString(py::cast<std::string>(item.first).c_str());
+      PyObject* gate_key =
+          PyUnicode_InternFromString(py::cast<std::string>(val[1]).c_str());
+      _dependent_attrs.emplace_back(
+          attr_key, py::reinterpret_borrow<py::object>(val[0]), gate_key);
+    }
+  }
 
-  bool check_nopybind(PyObject* value) override { // borrowed ref
-    // Make an interned string
-    static PyObject* dynamic_indices_str =
-        PyUnicode_InternFromString("_dynamo_dynamic_indices");
-    PyObject* indices = PyObject_GetAttr(value, dynamic_indices_str); // new ref
-    if (indices == nullptr) {
-      // Attr absent. Clear exception.
-      PyErr_Clear();
-      // This is true deliberately. If hasattr fails, we return true.
-      return true;
+  bool check_nopybind(PyObject* value) override {
+    // Check expected attrs: if runtime has attr -> exact match required;
+    // if runtime doesn't have attr -> pass (unspecified = don't care).
+    for (auto& [attr_str, expected] : _expected_attrs) {
+      PyObject* actual = PyObject_GetAttr(value, attr_str);
+      if (actual == nullptr) {
+        PyErr_Clear();
+        continue; // absent = don't care
+      }
+      int eq = PyObject_RichCompareBool(actual, expected.ptr(), Py_EQ);
+      Py_DECREF(actual);
+      if (eq != 1) {
+        if (eq == -1)
+          PyErr_Clear();
+        return false;
+      }
     }
 
-    static PyObject* issubset_str = PyUnicode_InternFromString("issubset");
-    PyObject* call_result = PyObject_CallMethodObjArgs(
-        indices, issubset_str, _dynamic_indices.ptr(), nullptr); // new ref
-    bool result = PyObject_IsTrue(call_result);
-    Py_DECREF(call_result);
-    Py_DECREF(indices);
-    return result;
+    // Check absent attrs: runtime must NOT have these.
+    for (auto& attr_str : _absent_attrs) {
+      if (PyObject_HasAttr(value, attr_str)) {
+        return false;
+      }
+    }
+
+    // Check dependent attrs: only check if gate attr is present.
+    for (auto& [attr_str, expected, gate_str] : _dependent_attrs) {
+      if (!PyObject_HasAttr(value, gate_str)) {
+        continue; // gate absent = don't care
+      }
+      PyObject* actual = PyObject_GetAttr(value, attr_str);
+      if (actual == nullptr) {
+        PyErr_Clear();
+        // Runtime has gate but not the dependent attr.
+        // expected could be None (compile-time also didn't have it) -> pass.
+        // expected could be non-None -> fail.
+        if (expected.is_none()) {
+          continue;
+        }
+        return false;
+      }
+      int eq = PyObject_RichCompareBool(actual, expected.ptr(), Py_EQ);
+      Py_DECREF(actual);
+      if (eq != 1) {
+        if (eq == -1)
+          PyErr_Clear();
+        return false;
+      }
+    }
+
+    return true;
+  }
+
+  GuardDebugInfo check_verbose_nopybind(PyObject* value) override {
+    // Check expected attrs
+    for (auto& [attr_str, expected] : _expected_attrs) {
+      PyObject* actual = PyObject_GetAttr(value, attr_str);
+      if (actual == nullptr) {
+        PyErr_Clear();
+        continue;
+      }
+      int eq = PyObject_RichCompareBool(actual, expected.ptr(), Py_EQ);
+      Py_DECREF(actual);
+      if (eq != 1) {
+        if (eq == -1)
+          PyErr_Clear();
+        std::string attr_name = PyUnicode_AsUTF8(attr_str);
+        return GuardDebugInfo(
+            false,
+            attr_name + " mismatch: expected " +
+                py::repr(expected).cast<std::string>() + ", got " +
+                py::repr(py::reinterpret_borrow<py::object>(
+                             PyObject_GetAttr(value, attr_str)))
+                    .cast<std::string>(),
+            0);
+      }
+    }
+
+    // Check absent attrs
+    for (auto& attr_str : _absent_attrs) {
+      if (PyObject_HasAttr(value, attr_str)) {
+        std::string attr_name = PyUnicode_AsUTF8(attr_str);
+        return GuardDebugInfo(
+            false,
+            attr_name + " should be absent but is present on runtime tensor",
+            0);
+      }
+    }
+
+    // Check dependent attrs
+    for (auto& [attr_str, expected, gate_str] : _dependent_attrs) {
+      if (!PyObject_HasAttr(value, gate_str)) {
+        continue;
+      }
+      PyObject* actual = PyObject_GetAttr(value, attr_str);
+      if (actual == nullptr) {
+        PyErr_Clear();
+        if (!expected.is_none()) {
+          std::string attr_name = PyUnicode_AsUTF8(attr_str);
+          return GuardDebugInfo(
+              false,
+              attr_name + " expected " +
+                  py::repr(expected).cast<std::string>() +
+                  " but attribute is absent on runtime tensor",
+              0);
+        }
+        continue;
+      }
+      int eq = PyObject_RichCompareBool(actual, expected.ptr(), Py_EQ);
+      Py_DECREF(actual);
+      if (eq != 1) {
+        if (eq == -1)
+          PyErr_Clear();
+        std::string attr_name = PyUnicode_AsUTF8(attr_str);
+        return GuardDebugInfo(
+            false,
+            attr_name + " mismatch: expected " +
+                py::repr(expected).cast<std::string>(),
+            0);
+      }
+    }
+
+    return GuardDebugInfo(true, 0);
   }
 
  private:
-  py::set _dynamic_indices;
+  // Pre-interned attr names + expected values
+  std::vector<std::pair<PyObject*, py::object>> _expected_attrs;
+  std::vector<PyObject*> _absent_attrs;
+  // (attr_name, expected_value, gate_attr_name)
+  std::vector<std::tuple<PyObject*, py::object, PyObject*>> _dependent_attrs;
 };
 
 class DICT_VERSION : public LeafGuard {
@@ -7124,10 +7263,18 @@ PyObject* torch_c_dynamo_guards_init() {
       py_m, "COMPLEX_IS_NAN")
       .def(py::init<RootGuardManager*, py::list, py::object>())
       .def("__call__", &COMPLEX_IS_NAN::check);
-  py::class_<DYNAMIC_INDICES, LeafGuard, std::shared_ptr<DYNAMIC_INDICES>>(
-      py_m, "DYNAMIC_INDICES")
-      .def(py::init<RootGuardManager*, py::set, py::list, py::object>())
-      .def("__call__", &DYNAMIC_INDICES::check);
+  py::class_<
+      DIMENSION_MARKING_GUARD,
+      LeafGuard,
+      std::shared_ptr<DIMENSION_MARKING_GUARD>>(py_m, "DIMENSION_MARKING_GUARD")
+      .def(py::init<
+           RootGuardManager*,
+           py::dict,
+           py::list,
+           py::dict,
+           py::list,
+           py::object>())
+      .def("__call__", &DIMENSION_MARKING_GUARD::check);
   py::class_<DICT_VERSION, LeafGuard, std::shared_ptr<DICT_VERSION>>(
       py_m, "DICT_VERSION")
       .def(py::init<RootGuardManager*, py::object, py::list, py::object>())
@@ -7619,14 +7766,18 @@ PyObject* torch_c_dynamo_guards_init() {
                 std::move(user_stack)));
           })
       .def(
-          "add_dynamic_indices_guard",
+          "add_dimension_marking_guard",
           [](GuardManager& self,
-             py::set value,
+             py::dict expected_attrs,
+             py::list absent_attrs,
+             py::dict dependent_attrs,
              py::object verbose_code_parts,
              py::object user_stack) -> void {
-            self.add_leaf_guard(std::make_shared<DYNAMIC_INDICES>(
+            self.add_leaf_guard(std::make_shared<DIMENSION_MARKING_GUARD>(
                 self.get_root(),
-                std::move(value),
+                std::move(expected_attrs),
+                std::move(absent_attrs),
+                std::move(dependent_attrs),
                 std::move(verbose_code_parts),
                 std::move(user_stack)));
           })

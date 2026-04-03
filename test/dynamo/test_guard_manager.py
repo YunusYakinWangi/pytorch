@@ -333,22 +333,41 @@ user_stack=None)
 
     def test_dynamic_indices_guard(self):
         root = RootGuardManager()
-        guard1 = guards.DYNAMIC_INDICES(root, set(), ["x.size(0) == y.size(0)"], None)
-        guard2 = guards.DYNAMIC_INDICES(
-            root, set({0, 1}), ["x.size(0) == y.size(0)"], None
+
+        # Test with expected attr: _dynamo_dynamic_indices = {0, 1}
+        # and absent attr: _dynamo_static_indices
+        expected_attrs = {"_dynamo_dynamic_indices": {0, 1}}
+        absent_attrs = ["_dynamo_static_indices"]
+        dependent_attrs = {}  # type: ignore[var-annotated]
+        guard = guards.DIMENSION_MARKING_GUARD(
+            root,
+            expected_attrs,
+            absent_attrs,
+            dependent_attrs,
+            ["dimension marking guard"],
+            None,
         )
 
+        # No attr at all -> pass (unspecified = don't care)
         x = torch.randn(4)
-        self.assertTrue(guard1(x))
-        self.assertTrue(guard2(x))
+        self.assertTrue(guard(x))
 
-        x._dynamo_dynamic_indices = set({0})
-        self.assertFalse(guard1(x))
-        self.assertTrue(guard2(x))
+        # Exact match -> pass
+        x._dynamo_dynamic_indices = {0, 1}
+        self.assertTrue(guard(x))
 
-        x._dynamo_dynamic_indices = set({2})
-        self.assertFalse(guard1(x))
-        self.assertFalse(guard2(x))
+        # Subset -> fail (exact match required, not issubset)
+        x._dynamo_dynamic_indices = {0}
+        self.assertFalse(guard(x))
+
+        # Different set -> fail
+        x._dynamo_dynamic_indices = {2}
+        self.assertFalse(guard(x))
+
+        # Absent attr present -> fail
+        x._dynamo_dynamic_indices = {0, 1}
+        x._dynamo_static_indices = {0}
+        self.assertFalse(guard(x))
 
     def test_tensor_match_guard(self):
         guard_manager = RootGuardManager()

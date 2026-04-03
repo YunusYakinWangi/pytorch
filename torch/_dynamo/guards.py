@@ -3391,7 +3391,7 @@ class GuardBuilder(GuardBuilderBase):
             assert guard.source is not None
 
             # [Note: Dimension Marking Guards]
-            # Guards for user explicit dynamism (mark_dynamic, mark_unbacked, mark_static).
+            # Guards for user explicit dynamism (mark_dynamic, mark_unbacked, mark_static..).
             #
             # When a user explicitly marks dimensions, we must honor that request.
             # If the runtime tensor has different markings than what was compiled,
@@ -3402,16 +3402,14 @@ class GuardBuilder(GuardBuilderBase):
             #   - Compiled WITH attribute, runtime NO attribute → pass (unspecified = don't care)
             #   - Compiled WITHOUT attribute, runtime HAS attribute → recompile (new marking)
             #
-            # Users can explicitly set empty indices via mark_dynamic(t, []), mark_unbacked(t, []),
-            # or mark_static(t, []) to say "I want NO dims of this type". This is different
-            # from not calling the API at all (unspecified = inherit from compiled frame).
+            # Passing an empty list [] to any marking API is a no-op (same as not calling
+            # the function at all). Calls are additive.
             #
             # Examples:
             #   1. Compile with mark_dynamic(x, 0), call with mark_dynamic(x, 0) → no recompile (exact match)
             #   2. Compile with mark_dynamic(x, 0), call with mark_dynamic(x, 1) → recompile (different dims)
             #   3. Compile with mark_dynamic(x, 0), call with plain tensor → no recompile (unspecified = don't care)
             #   4. Compile with plain tensor, call with mark_dynamic(x, 0) → recompile (new marking added)
-            #   5. Compile with mark_dynamic(x, 0), call with mark_dynamic(x, []) → recompile (explicit empty != {0})
             #
             # _dynamo_weak_dynamic_indices vs _dynamo_propagated_dynamic_indices:
             #   _dynamo_weak_dynamic_indices is the user-facing attribute, set via
@@ -3426,57 +3424,45 @@ class GuardBuilder(GuardBuilderBase):
             #   spurious guard failures when the compiler mutates an input tensor's
             #   attributes through an input-aliased output.
             #
-            def add_dim_indices_guard(attr_name: str) -> None:
+            # Collect dimension marking guard info for a single C++ guard.
+            dim_marking_attrs = (
+                "_dynamo_dynamic_indices",
+                "_dynamo_weak_dynamic_indices",
+                "_dynamo_unbacked_indices",
+                "_dynamo_static_indices",
+            )
+            expected_attrs: dict[str, Any] = {}
+            absent_attrs: list[str] = []
+            for attr_name in dim_marking_attrs:
                 if hasattr(value, attr_name):
-                    indices = getattr(value, attr_name)
-                    # Only check exact match if runtime tensor has the attribute.
-                    # If runtime tensor has no attribute, it means "unspecified = don't care".
-                    code_part = f"((getattr({tensor_name}, '{attr_name}', None) == {indices!r}) if hasattr({tensor_name}, '{attr_name}') else True)"  # noqa: B950
+                    expected_attrs[attr_name] = getattr(value, attr_name)
+                    code_part = f"((getattr({tensor_name}, '{attr_name}', None) == {getattr(value, attr_name)!r}) if hasattr({tensor_name}, '{attr_name}') else True)"  # noqa: B950
                     code.append(code_part)
-                    self.get_guard_manager(guard).add_lambda_guard(
-                        lambda x, attr=attr_name, expected=indices: (
-                            getattr(x, attr, None) == expected
-                            if hasattr(x, attr)
-                            else True
-                        ),
-                        get_verbose_code_parts(code_part, guard),
-                        guard.user_stack,
-                    )
                 else:
+                    absent_attrs.append(attr_name)
                     code_part = f"hasattr({tensor_name}, '{attr_name}') == False"
                     code.append(code_part)
-                    self.get_guard_manager(guard).add_no_hasattr_guard(
-                        attr_name,
-                        get_verbose_code_parts(code_part, guard),
-                        guard.user_stack,
-                    )
 
-            add_dim_indices_guard("_dynamo_dynamic_indices")
-            add_dim_indices_guard("_dynamo_weak_dynamic_indices")
-            add_dim_indices_guard("_dynamo_unbacked_indices")
-            add_dim_indices_guard("_dynamo_static_indices")
-
-            # Guard on unbacked-dependent attributes (shape_ids, bounds).
-            # These are only checked if the runtime tensor has _dynamo_unbacked_indices.
-            # We must install guards even when attr_value is None to detect runtime
-            # tensors that have the attribute when compile-time didn't.
-            def add_unbacked_dependent_guard(attr_name: str) -> None:
-                if hasattr(value, "_dynamo_unbacked_indices"):
+            # Dependent attributes: checked only when _dynamo_unbacked_indices is present.
+            dependent_attrs: dict[str, tuple[Any, str]] = {}
+            dep_attr_names = ("_dynamo_shape_ids", "_dynamo_unbacked_bounds")
+            gate_attr = "_dynamo_unbacked_indices"
+            if hasattr(value, gate_attr):
+                for attr_name in dep_attr_names:
                     attr_value = getattr(value, attr_name, None)
-                    code_part = f"((getattr({tensor_name}, '{attr_name}', None) == {attr_value!r}) if hasattr({tensor_name}, '_dynamo_unbacked_indices') else True)"  # noqa: B950
+                    dependent_attrs[attr_name] = (attr_value, gate_attr)
+                    code_part = f"((getattr({tensor_name}, '{attr_name}', None) == {attr_value!r}) if hasattr({tensor_name}, '{gate_attr}') else True)"  # noqa: B950
                     code.append(code_part)
-                    self.get_guard_manager(guard).add_lambda_guard(
-                        lambda x, attr=attr_name, expected=attr_value: (
-                            getattr(x, attr, None) == expected
-                            if hasattr(x, "_dynamo_unbacked_indices")
-                            else True
-                        ),
-                        get_verbose_code_parts(code_part, guard),
-                        guard.user_stack,
-                    )
 
-            add_unbacked_dependent_guard("_dynamo_shape_ids")
-            add_unbacked_dependent_guard("_dynamo_unbacked_bounds")
+            # Install a single C++ guard for all dimension marking attributes.
+            if expected_attrs or absent_attrs or dependent_attrs:
+                self.get_guard_manager(guard).add_dimension_marking_guard(
+                    expected_attrs,
+                    absent_attrs,
+                    dependent_attrs,
+                    get_verbose_code_parts(code, guard),
+                    guard.user_stack,
+                )
 
             if len(code) > 0:
                 self._set_guard_export_info(guard, code)
