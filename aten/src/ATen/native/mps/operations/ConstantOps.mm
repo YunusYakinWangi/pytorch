@@ -46,15 +46,16 @@ static void fill_mps_kernel(TensorIterator& iter, const Scalar& value) {
   // addresses in the innermost dimension, giving coalesced writes.
   if (!can_fill_linearly) {
     auto fillPSO = lib.getPipelineStateForFunc(fmt::format("fill_scalar_strided_{}", type_str));
-    const int64_t dim0_size = self.dim() > 0 ? self.size(0) : 1;
-    const int64_t inner_numel = self.numel() / dim0_size;
-    const uint32_t ndim = static_cast<uint32_t>(self.dim());
+    const int64_t dim0_size = iter.ndim() > 0 ? iter.shape()[0] : 1;
+    const int64_t inner_numel = iter.numel() / dim0_size;
+    const uint32_t ndim = static_cast<uint32_t>(iter.ndim());
     dispatch_sync_with_rethrow(stream->queue(), ^() {
       @autoreleasepool {
         auto computeEncoder = stream->commandEncoder();
         auto mpsScalar = getMPSScalar(value, dtype);
         [computeEncoder setComputePipelineState:fillPSO];
-        mtl_setArgs(computeEncoder, self, mpsScalar, self.sizes(), self.strides(), ndim);
+        bind_iter_tensors(computeEncoder, iter);
+        mtl_setArgs<1>(computeEncoder, mpsScalar, iter.shape(), iter.strides(0), ndim);
         const NSUInteger maxTG = fillPSO.maxTotalThreadsPerThreadgroup;
         const MTLSize tgSize = MTLSizeMake(std::min(maxTG, (NSUInteger)inner_numel), 1, 1);
         const MTLSize gridSize = MTLSizeMake(inner_numel, dim0_size, 1);
@@ -67,7 +68,7 @@ static void fill_mps_kernel(TensorIterator& iter, const Scalar& value) {
   // Single-byte dtypes (bool, uint8, int8) use vec4 kernels that fill
   // 4 elements per thread; all others fill 1 element per thread.
   const bool is_byte_type = self.element_size() == 1;
-  const uint32_t numel = static_cast<uint32_t>(self.numel());
+  const uint32_t numel = static_cast<uint32_t>(iter.numel());
   const int64_t threads = is_byte_type ? (numel + 3) / 4 : numel;
 
   auto fillPSO = lib.getPipelineStateForFunc(fmt::format("fill_scalar_dense_{}", type_str));
@@ -76,7 +77,8 @@ static void fill_mps_kernel(TensorIterator& iter, const Scalar& value) {
       auto computeEncoder = stream->commandEncoder();
       auto mpsScalar = getMPSScalar(value, dtype);
       [computeEncoder setComputePipelineState:fillPSO];
-      mtl_setArgs(computeEncoder, self, mpsScalar, numel);
+      bind_iter_tensors(computeEncoder, iter);
+      mtl_setArgs<1>(computeEncoder, mpsScalar, numel);
       mtl_dispatch1DJob(computeEncoder, fillPSO, threads);
     }
   });
