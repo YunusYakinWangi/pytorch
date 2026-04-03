@@ -13520,24 +13520,38 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
         self.assertNotIn("copy_misaligned", code[0])
 
     def test_copy_misaligned_returns_same_tensor_when_aligned(self):
+        import weakref
+
         from torch._C._dynamo.guards import copy_misaligned
 
         x = torch.randn(32, 32, device=self.device)
+        ref = weakref.ref(x)
         result = copy_misaligned(x)
         self.assertIs(result, x)
+        del x, result
+        self.assertIsNone(ref(), "aligned tensor should be freed")
 
     def test_copy_misaligned_clones_when_misaligned(self):
+        import weakref
+
         from torch._C._dynamo.guards import copy_misaligned
 
         big = torch.randn(32 * 32 + 1, device=self.device)
         x = big[1:].reshape(32, 32)
         self.assertNotEqual(x.data_ptr() % 16, 0)
+        ref_orig = weakref.ref(x)
         result = copy_misaligned(x)
         self.assertIsNot(result, x)
         self.assertEqual(result.data_ptr() % 16, 0)
         self.assertEqual(result, x)
         self.assertEqual(result.size(), x.size())
         self.assertEqual(result.stride(), x.stride())
+        ref_clone = weakref.ref(result)
+        del x, result
+        self.assertIsNone(ref_clone(), "cloned tensor should be freed")
+        # orig kept alive by big's storage, that's fine
+        del big
+        self.assertIsNone(ref_orig(), "original tensor should be freed")
 
     def test_copy_misaligned_empty_tensor(self):
         from torch._C._dynamo.guards import copy_misaligned
