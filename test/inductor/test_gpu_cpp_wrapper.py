@@ -14,7 +14,11 @@ from torch._inductor.codegen.cpp_wrapper_gpu import DeferredTritonCallWrapper
 from torch._inductor.codegen.cuda.device_op_overrides import CUDADeviceOpOverrides
 from torch._inductor.test_case import TestCase as InductorTestCase
 from torch._inductor.utils import IndentedBuffer
-from torch.testing._internal.common_utils import slowTest
+from torch.testing._internal.common_utils import (
+    instantiate_parametrized_tests,
+    parametrize,
+    slowTest,
+)
 from torch.testing._internal.inductor_utils import GPU_TYPE, RUN_GPU
 
 
@@ -145,7 +149,8 @@ class TestGpuWrapper(InductorTestCase):
 
         self.assertEqual(wrapper.scratch_spaces, {"global_scratch": 256 * 8})
 
-    def test_lazy_compile_combo_kernel_default_config(self):
+    @parametrize("per_subkernel_blocks", [False, True])
+    def test_lazy_compile_combo_kernel_default_config(self, per_subkernel_blocks):
         """Lazy compile should use default_config from combo_grid_meta for XBLOCK."""
         if not RUN_GPU:
             self.skipTest("GPU not available")
@@ -156,8 +161,6 @@ class TestGpuWrapper(InductorTestCase):
             DEFAULT_COMBO_BLOCK_SIZE_1D,
         )
         from torch._inductor.runtime import triton_lazy_compile as tlc
-
-        expected_xblock = DEFAULT_COMBO_BLOCK_SIZE_1D
 
         captured = {}
         original = tlc.run_triton_kernel_with_autotune
@@ -177,6 +180,7 @@ class TestGpuWrapper(InductorTestCase):
                     "cpp_wrapper": True,
                     "triton.autotune_at_compile_time": False,
                     "combo_kernels": True,
+                    "combo_kernel_per_subkernel_blocks": per_subkernel_blocks,
                 }
             )
             def fn(params, grads):
@@ -186,11 +190,20 @@ class TestGpuWrapper(InductorTestCase):
 
         self.assertTrue(len(captured) > 0, "No combo kernels were lazy-compiled")
         for name, xblock in captured.items():
-            self.assertEqual(
-                xblock,
-                expected_xblock,
-                f"{name} got XBLOCK={xblock}, expected {expected_xblock} from combo_grid_meta",
-            )
+            # When per_subkernel_blocks=False, default_config has a single XBLOCK
+            # that must be picked up correctly (not the hardcoded fallback of 128).
+            # When per_subkernel_blocks=True, default_config uses per-subkernel
+            # XBLOCK_N keys instead, so result.xblock is not used for grid
+            # computation; just verify compilation succeeded.
+            if not per_subkernel_blocks:
+                self.assertEqual(
+                    xblock,
+                    DEFAULT_COMBO_BLOCK_SIZE_1D,
+                    f"{name} got XBLOCK={xblock}, expected {DEFAULT_COMBO_BLOCK_SIZE_1D}",
+                )
+
+
+instantiate_parametrized_tests(TestGpuWrapper)
 
 
 # Helper script for test_lazy_compile_kernel_name_collision_across_modules.
