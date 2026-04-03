@@ -10,18 +10,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
 # shellcheck source=./common-build.sh
 source "$(dirname "${BASH_SOURCE[0]}")/common-build.sh"
 
-# Set OMP_NUM_THREADS to nproc/4 if not already set.
-# See .ci/pytorch/test.sh for the full explanation: on ARC k8s, OpenMP
-# spin-waits at barriers cause ~5000x slowdowns when thread count equals
-# cpuset size.
-if [[ -z "${OMP_NUM_THREADS:-}" ]]; then
-  OMP_NUM_THREADS=$(( $(nproc) / 4 ))
-  if [[ "$OMP_NUM_THREADS" -lt 4 ]]; then
-    OMP_NUM_THREADS=4
-  fi
-  export OMP_NUM_THREADS
-fi
-
 echo "Environment variables"
 env
 
