@@ -570,9 +570,10 @@ def _canonicalize_graph(graph: fx.Graph) -> fx.Graph:
                 indeg[node] += 1
             segment_reorderable = []
             prev_barrier = node
-        elif prev_barrier is not None:
-            extra_users[prev_barrier].append(node)
-            indeg[node] += 1
+        else:
+            if prev_barrier is not None:
+                extra_users[prev_barrier].append(node)
+                indeg[node] += 1
             segment_reorderable.append(node)
 
     canonical_idx: dict[fx.Node, int] = {}
@@ -2762,7 +2763,10 @@ class OutputGraph(OutputGraphCommon):
             # free a bit of memory
             self.real_value_cache.clear()
 
-            if not self.export:
+            if (
+                not self.export
+                and not torch._dynamo.compiled_autograd.in_compiled_autograd_region
+            ):
                 _canonicalize_graph(self.graph)
 
             gm = _make_graph_module(root, self.graph)

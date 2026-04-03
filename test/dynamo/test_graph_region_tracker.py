@@ -249,7 +249,7 @@ class GraphRegionTrackerTests(TestCase):
         ]:
             self.assertExpectedInline(
                 self.get_result(fn, torch.rand(10, 10), torch.ones(10, 20), ctx),
-                """[[['mul_2', 'add_2', 'sum_3', 'add_6'], ['mul_3', 'add_3', 'sum_4', 'add_7']], [['mul', 'add', 'sum_1', 'add_4'], ['mul_1', 'add_1', 'sum_2', 'add_5']]]""",
+                """[[['mul_2', 'add_4', 'sum_3', 'add_6'], ['mul_3', 'add_5', 'sum_4', 'add_7']], [['mul', 'add', 'sum_1', 'add_2'], ['mul_1', 'add_1', 'sum_2', 'add_3']]]""",
             )
 
     def test_mutation_tracking_simple(self):
