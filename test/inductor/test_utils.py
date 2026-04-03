@@ -3,7 +3,6 @@
 import importlib.util
 import unittest
 
-import sympy
 from sympy import I, Max, Min, Symbol, sympify
 
 import torch
@@ -17,7 +16,7 @@ from torch.testing._internal.common_device_type import (
 )
 from torch.testing._internal.common_utils import run_tests, TestCase
 from torch.utils._sympy.functions import Identity
-
+from torch.utils._sympy.functions import Mod
 
 class TestUtils(TestCase):
     def test_zip_schema(self):
@@ -258,10 +257,7 @@ class TestUtils(TestCase):
         s1 = Symbol("s1", integer=True)
         denominator = 16
 
-        # Encode "s1 % 16 == 0" using the ShapeEnv range representation:
-        # (lower bound=0, upper bound=None, stride=16)
-        allocator.shape_env.var_to_range[s1] = (0, None, 16)
-
+        allocator.shape_env._add_divisible(Mod(s1, 16))
 
         # Test Case 1: Simple product (s0 * s1) -> should be divisible by 16
         product_expr = s0 * s1
