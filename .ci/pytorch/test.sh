@@ -164,8 +164,11 @@ echo "Testing pytorch"
 # headroom for the main thread and for NUM_PROCS=3 parallel test processes.
 if [[ -z "${OMP_NUM_THREADS:-}" ]]; then
   OMP_NUM_THREADS=$(( $(nproc) / 4 ))
-  if [[ "$OMP_NUM_THREADS" -lt 1 ]]; then
-    OMP_NUM_THREADS=1
+  # Floor of 4: low OMP_NUM_THREADS (1-2) changes floating-point reduction
+  # order, causing numerical mismatches in tests with tight tolerances
+  # (e.g., test_batchnorm_nhwc_cpu).
+  if [[ "$OMP_NUM_THREADS" -lt 4 ]]; then
+    OMP_NUM_THREADS=4
   fi
   export OMP_NUM_THREADS
 fi
