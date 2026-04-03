@@ -133,6 +133,9 @@ class BaseListVariable(VariableTracker):
     def getitem_const(
         self, tx: "InstructionTranslator", arg: VariableTracker
     ) -> VariableTracker:
+        # TODO(follow-up): this assumes the caller (mp_subscript_impl) has already
+        # run _PyIndex_Check → nb_index_impl. Direct callers bypassing
+        # mp_subscript_impl will skip that validation.
         from .tensor import SymNodeVariable
 
         self._install_list_length_guard()
@@ -164,6 +167,11 @@ class BaseListVariable(VariableTracker):
     def unpack_var_sequence(self, tx: "InstructionTranslator") -> list[VariableTracker]:
         self._install_list_length_guard()
         return list(self.items)
+
+    def sq_length(self, tx: "InstructionTranslator") -> VariableTracker:
+        """Sequence length for lists, tuples, and range objects."""
+        self._install_list_length_guard()
+        return VariableTracker.build(tx, len(self.items))
 
     def call_tree_map_branch(
         self,
@@ -269,10 +277,8 @@ class BaseListVariable(VariableTracker):
     ) -> VariableTracker:
         # list_subscript: https://github.com/python/cpython/blob/62a6e898e01/Objects/listobject.c#L3689-L3710
         # _PyIndex_Check: https://github.com/python/cpython/blob/62a6e898e01/Include/internal/pycore_abstract.h#L13-L17
-        # CPython: list_subscript checks _PyIndex_Check first, and
-        # raises its own error if the type doesn't have nb_index.
-        # Only if the type has __index__ does it call PyNumber_AsSsize_t.
-        # Tensor keys are handled by TensorVariable.nb_index_impl.
+        # TODO(follow-up): replace hasattr(key_type, "__index__") with
+        # has_slot(num_slots, PyNumberSlots.NB_INDEX) for C extension types.
         try:
             key_type = key.python_type()
         except NotImplementedError:
@@ -302,7 +308,7 @@ class BaseListVariable(VariableTracker):
 
         if name == "__len__":
             self._install_list_length_guard()
-            return ConstantVariable.create(len(self.items))
+            return self.sq_length(tx)
         elif name == "__contains__":
             if kwargs or len(args) != 1:
                 raise_args_mismatch(
@@ -632,7 +638,10 @@ class RangeVariable(BaseListVariable):
     def getitem_const(
         self, tx: "InstructionTranslator", arg: VariableTracker
     ) -> VariableTracker:
-        # implementations mimics https://github.com/python/cpython/blob/main/Objects/rangeobject.c
+        # range_subscript: https://github.com/python/cpython/blob/main/Objects/rangeobject.c
+        # TODO(follow-up): this assumes the caller (mp_subscript_impl) has already
+        # run _PyIndex_Check → nb_index_impl. Direct callers bypassing
+        # mp_subscript_impl will skip that validation.
         index = arg.as_python_constant()
 
         if isinstance(index, slice):
@@ -651,6 +660,13 @@ class RangeVariable(BaseListVariable):
         self, tx: Optional["InstructionTranslator"] = None
     ) -> list[VariableTracker]:
         return [variables.ConstantVariable.create(x) for x in self.as_python_constant()]
+
+    def sq_length(self, tx: "InstructionTranslator") -> VariableTracker:
+        """Sequence length for range objects."""
+        length = self.range_length()
+        if length > sys.maxsize:
+            raise_observed_exception(OverflowError, tx)
+        return VariableTracker.build(tx, length)
 
     def reconstruct(self, codegen: "PyCodegen") -> None:
         assert "range" not in codegen.tx.f_globals
@@ -706,6 +722,21 @@ class RangeVariable(BaseListVariable):
         key: VariableTracker,
     ) -> VariableTracker:
         # range_subscript: https://github.com/python/cpython/blob/62a6e898e01/Objects/rangeobject.c#L729-L748
+        # CPython: range_subscript checks _PyIndex_Check → PyNumber_Index for non-slice keys
+        try:
+            key_type = key.python_type()
+        except NotImplementedError:
+            key_type = None
+        if key_type not in (int, bool, slice):
+            if key_type is not None and not hasattr(key_type, "__index__"):
+                raise_observed_exception(
+                    TypeError,
+                    tx,
+                    args=[
+                        f"range indices must be integers or slices, not {key.python_type_name()}"
+                    ],
+                )
+            key = key.nb_index_impl(tx)
         return self.getitem_const(tx, key)
 
     def call_method(
@@ -726,11 +757,6 @@ class RangeVariable(BaseListVariable):
             return RangeIteratorVariable(
                 self.start(), self.stop(), self.step(), self.range_length()
             )
-        elif name == "__len__":
-            length = self.range_length()
-            if length > sys.maxsize:
-                raise_observed_exception(OverflowError, tx)
-            return VariableTracker.build(tx, self.range_length())
         elif name in ("count", "__contains__"):
             return SourcelessBuilder.create(tx, self.range_count(*args))
         elif name == "index":
@@ -1259,6 +1285,11 @@ class ListVariable(CommonListMethodsVariable):
         return False
 
 
+# TODO(follow-up): DequeVariable inherits BaseListVariable.mp_subscript_impl which
+# accepts slices. CPython's deque only has sq_item (Modules/_collectionsmodule.c:1888),
+# not mp_subscript — deque[slice] should raise TypeError. Override mp_subscript_impl
+# to reject slices and only accept integer-like keys via _PyIndex_Check → nb_index_impl.
+# Also add tests for: negative index, __index__ object key, invalid type key.
 class DequeVariable(CommonListMethodsVariable):
     def __init__(
         self,
@@ -1591,6 +1622,21 @@ class SizeVariable(TupleVariable):
         key: VariableTracker,
     ) -> VariableTracker:
         # tuple_subscript: https://github.com/python/cpython/blob/62a6e898e01/Objects/tupleobject.c#L877-L930
+        # CPython: tuplesubscript checks _PyIndex_Check → PyNumber_AsSsize_t for non-slice keys
+        try:
+            key_type = key.python_type()
+        except NotImplementedError:
+            key_type = None
+        if key_type not in (int, bool, slice):
+            if key_type is not None and not hasattr(key_type, "__index__"):
+                raise_observed_exception(
+                    TypeError,
+                    tx,
+                    args=[
+                        f"tuple indices must be integers or slices, not {key.python_type_name()}"
+                    ],
+                )
+            key = key.nb_index_impl(tx)
         return self.get_item_dyn(tx, key)
 
     def call_method(

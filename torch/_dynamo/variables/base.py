@@ -548,6 +548,22 @@ class VariableTracker(metaclass=VariableTrackerMeta):
             ],
         )
 
+    def sq_length(self, tx: Any) -> "VariableTracker":
+        """Called when sq_length is not implemented."""
+        raise_observed_exception(
+            TypeError,
+            tx,
+            args=[f"object of type '{self.python_type_name()}' has no len()"],
+        )
+
+    def mp_length(self, tx: Any) -> "VariableTracker":
+        """Called when mp_length is not implemented."""
+        raise_observed_exception(
+            TypeError,
+            tx,
+            args=[f"object of type '{self.python_type_name()}' has no len()"],
+        )
+
     def mp_subscript_impl(
         self,
         tx: "InstructionTranslator",
@@ -579,9 +595,10 @@ class VariableTracker(metaclass=VariableTrackerMeta):
                 "1 args and 0 kwargs",
                 f"{len(args)} args and {len(kwargs)} kwargs",
             )
-        elif name == "__len__" and self.has_unpack_var_sequence(tx):
-            assert not (args or kwargs)
-            return variables.ConstantVariable.create(len(self.unpack_var_sequence(tx)))
+        elif name == "__len__" and not (args or kwargs):
+            from .object_protocol import generic_len
+
+            return generic_len(tx, self)
         elif (
             name == "__getattr__"
             and len(args) == 1

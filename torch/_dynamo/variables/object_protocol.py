@@ -6,11 +6,19 @@ comparison dispatch machinery that is independent of any specific type.
 Per-type richcompare_impl hooks live in their respective VT files.
 """
 
+from functools import lru_cache
 from typing import TYPE_CHECKING
 
+from torch._C._dynamo import get_type_slots, has_slot, PyMappingSlots, PySequenceSlots
+
+from .. import graph_break_hints
+from ..exc import unimplemented
 from ..utils import istype
-from .base import NO_SUCH_SUBOBJ, VariableTracker
+from .base import NO_SUCH_SUBOBJ, raise_type_error_exc, VariableTracker
 from .constant import CONSTANT_VARIABLE_FALSE, CONSTANT_VARIABLE_TRUE
+
+
+type_error = raise_type_error_exc
 
 
 if TYPE_CHECKING:
@@ -71,6 +79,68 @@ def vt_identity_compare(
     return None
 
 
+@lru_cache(maxsize=256)
+def _get_cached_slots(obj_type: type) -> tuple[int, int, int, int]:
+    """Get all type slots for a type (cached)."""
+    return get_type_slots(obj_type)
+
+
+def type_implements_sq_length(obj_type: type) -> bool:
+    """Check whether obj_type implements __len__ as sequence protocol"""
+    seq_slots, _, _, _ = _get_cached_slots(obj_type)
+    return has_slot(seq_slots, PySequenceSlots.SQ_LENGTH)
+
+
+def type_implements_mp_length(obj_type: type) -> bool:
+    """Check whether obj_type implements __len__ as mapping protocol"""
+    _, map_slots, _, _ = _get_cached_slots(obj_type)
+    return has_slot(map_slots, PyMappingSlots.MP_LENGTH)
+
+
+def maybe_get_python_type(obj: VariableTracker) -> type:
+    try:
+        return obj.python_type()
+    except NotImplementedError:
+        unimplemented(
+            gb_type="Unsupported python_type() call",
+            context=f"{obj} does not implement python_type()",
+            explanation="This VariableTracker does not implement python_type(), "
+            "which is required for object protocol operations.",
+            hints=[
+                *graph_break_hints.DYNAMO_BUG,
+            ],
+        )
+
+
+def vt_mapping_size(
+    tx: "InstructionTranslator", obj: "VariableTracker"
+) -> "VariableTracker":
+    # ref: https://github.com/python/cpython/blob/v3.13.3/Objects/abstract.c#L2308-L2330
+    T = maybe_get_python_type(obj)
+    if type_implements_mp_length(T):
+        return obj.mp_length(tx)
+
+    if type_implements_sq_length(T):
+        type_error(tx, f"{obj.python_type_name()} is not a mapping")
+
+    type_error(tx, f"object of type {obj.python_type_name()} has no len()")
+
+
+def generic_len(
+    tx: "InstructionTranslator", obj: "VariableTracker"
+) -> "VariableTracker":
+    # ref: https://github.com/python/cpython/blob/v3.13.3/Objects/abstract.c#L53-L69
+    """
+    Implements PyObject_Size/PyObject_Length semantics for VariableTracker objects.
+    Dispatches to sq_length (sequences) or mp_length (mappings) depending on the VT type.
+    """
+
+    T = maybe_get_python_type(obj)
+    if type_implements_sq_length(T):
+        return obj.sq_length(tx)
+    return vt_mapping_size(tx, obj)
+
+
 def vt_getitem(
     tx: "InstructionTranslator",
     obj: VariableTracker,
@@ -86,8 +156,16 @@ def vt_getitem(
       3. PyType_Check(o)              (L183-203) — type[int] → GenericAlias/__class_getitem__
 
     Branch 1 is the common path (list, tuple, dict, range all have mp_subscript).
-    TODO: Branch 2 (sq_item) for C extension types that only have tp_as_sequence.
+    TODO(follow-up): use has_slot(map_slots, PyMappingSlots.MP_SUBSCRIPT) to gate
+    Branch 1 and has_slot(seq_slots, PySequenceSlots.SQ_ITEM) to gate Branch 2,
+    matching CPython's dispatch order.
+    TODO(follow-up): Branch 2 (sq_item) for C extension types that only have
+    tp_as_sequence (e.g. deque — Modules/_collectionsmodule.c:1888).
     Branch 3 is handled by TypingVariable.mp_subscript_impl for typing module types
     and by BuiltinVariable for builtin types like list[int].
+
+    Types that work via constant fold fallback (no dedicated mp_subscript_impl):
+    TODO(follow-up): str (unicode_subscript, Objects/unicodeobject.c:13809)
+    TODO(follow-up): bytes (bytes_subscript, Objects/bytesobject.c)
     """
     return obj.mp_subscript_impl(tx, key)

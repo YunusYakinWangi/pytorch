@@ -768,6 +768,8 @@ class TensorVariable(VariableTracker):
         tx: "InstructionTranslator",
         key: VariableTracker,
     ) -> VariableTracker:
+        # Tensor.__getitem__ is a custom C slot, not CPython's mp_subscript.
+        # TODO(follow-up): add tests for negative index, bool index, invalid key type
         from .builder import SourcelessBuilder, VariableBuilder
         from .torch_function import can_dispatch_torch_function, dispatch_torch_function
 
@@ -1552,6 +1554,10 @@ class TensorVariable(VariableTracker):
         )
 
     def method___len__(self, tx: "InstructionTranslator") -> VariableTracker:
+        return self.sq_length(tx)
+
+    def sq_length(self, tx: "InstructionTranslator") -> VariableTracker:
+        """Sequence length for tensors (size along first dimension)."""
         return self.call_method(tx, "size", [VariableTracker.build(tx, 0)], {})
 
     def method___iter__(self, tx: "InstructionTranslator") -> ListIteratorVariable:

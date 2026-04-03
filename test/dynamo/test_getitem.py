@@ -1,9 +1,11 @@
 # Owner(s): ["module: dynamo"]
 """Tests for mp_subscript_impl: unified __getitem__ dispatch via vt_getitem in Dynamo.
 
-Each test uses operator.getitem() to exercise the vt_getitem → mp_subscript_impl
-path (BuiltinVariable.call_getitem → vt_getitem → VT.mp_subscript_impl), which
-is distinct from the call_method("__getitem__") path.
+Tests exercise the vt_getitem → mp_subscript_impl path via operator.getitem(),
+and the call_method("__getitem__") → mp_subscript_impl path via obj.__getitem__().
+
+See TODO(follow-up) comments on each mp_subscript_impl override for remaining
+CPython behavioral gaps.
 """
 
 import collections
@@ -17,11 +19,6 @@ import torch._dynamo.testing
 from torch.testing._internal.inductor_utils import HAS_CUDA_AND_TRITON, HAS_GPU
 
 
-requires_gpu_and_triton = unittest.skipUnless(
-    HAS_GPU and HAS_CUDA_AND_TRITON, "requires gpu and triton"
-)
-
-
 class GetItemTests(torch._dynamo.test_case.TestCase):
     def _compile(self, fn, *args):
         return torch.compile(fn, backend="eager", fullgraph=True)(*args)
@@ -31,21 +28,38 @@ class GetItemTests(torch._dynamo.test_case.TestCase):
     def test_list_int_index(self):
         def fn(x):
             items = [x, x + 1, x + 2]
-            return operator.getitem(items, 1)
-
-        x = torch.randn(4)
-        self.assertEqual(fn(x), self._compile(fn, x))
-
-    def test_list_slice(self):
-        def fn(x):
-            items = [x, x + 1, x + 2]
-            return operator.getitem(items, slice(0, 2))
+            return (
+                operator.getitem(items, 0),
+                operator.getitem(items, 1),
+                operator.getitem(items, 2),
+            )
 
         x = torch.randn(4)
         ref = fn(x)
         res = self._compile(fn, x)
         for r, e in zip(res, ref):
             self.assertEqual(r, e)
+
+    def test_list_getitem_compiled_directly(self):
+        compiled = torch.compile(operator.getitem, backend="eager", fullgraph=True)
+        items = [10, 20, 30]
+        self.assertEqual(compiled(items, 0), 10)
+        self.assertEqual(compiled(items, 2), 30)
+
+    def test_list_slice(self):
+        def fn(x):
+            items = [x, x + 1, x + 2]
+            full = operator.getitem(items, slice(None))
+            partial = operator.getitem(items, slice(0, 2))
+            single = operator.getitem(items, slice(1, 2))
+            return full, partial, single
+
+        x = torch.randn(4)
+        ref = fn(x)
+        res = self._compile(fn, x)
+        for ref_list, res_list in zip(ref, res):
+            for r, e in zip(res_list, ref_list):
+                self.assertEqual(r, e)
 
     def test_list_negative_index(self):
         def fn(x):
@@ -58,10 +72,16 @@ class GetItemTests(torch._dynamo.test_case.TestCase):
     def test_list_bool_index(self):
         def fn(x):
             items = [x, x + 1, x + 2]
-            return operator.getitem(items, True)
+            return (
+                operator.getitem(items, False),
+                operator.getitem(items, True),
+            )
 
         x = torch.randn(4)
-        self.assertEqual(fn(x), self._compile(fn, x))
+        ref = fn(x)
+        res = self._compile(fn, x)
+        for r, e in zip(res, ref):
+            self.assertEqual(r, e)
 
     def test_list_invalid_index_type(self):
         def fn(x):
@@ -72,12 +92,78 @@ class GetItemTests(torch._dynamo.test_case.TestCase):
         with self.assertRaises(torch._dynamo.exc.Unsupported):
             self._compile(fn, x)
 
+    def test_list_index_via_index_dunder(self):
+        """Custom __index__ object used as list index — _PyIndex_Check + nb_index_impl."""
+
+        class Idx:
+            def __index__(self):
+                return 2
+
+        def fn(x):
+            items = [x, x + 1, x + 2]
+            return operator.getitem(items, Idx())
+
+        x = torch.randn(4)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
     # --- BaseListVariable (TupleVariable) ---
 
     def test_tuple_int_index(self):
         def fn(x):
             items = (x, x + 1, x + 2)
             return operator.getitem(items, 0)
+
+        x = torch.randn(4)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
+    def test_tuple_negative_index(self):
+        def fn(x):
+            items = (x, x + 1, x + 2)
+            return operator.getitem(items, -1)
+
+        x = torch.randn(4)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
+    def test_tuple_slice(self):
+        def fn(x):
+            items = (x, x + 1, x + 2)
+            full = operator.getitem(items, slice(None))
+            partial = operator.getitem(items, slice(0, 2))
+            single = operator.getitem(items, slice(1, 2))
+            return full, partial, single
+
+        x = torch.randn(4)
+        ref = fn(x)
+        res = self._compile(fn, x)
+        for ref_tup, res_tup in zip(ref, res):
+            for r, e in zip(res_tup, ref_tup):
+                self.assertEqual(r, e)
+
+    def test_tuple_bool_index(self):
+        def fn(x):
+            items = (x, x + 1, x + 2)
+            return operator.getitem(items, False)
+
+        x = torch.randn(4)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
+    def test_tuple_invalid_index_type(self):
+        def fn(x):
+            items = (x, x + 1, x + 2)
+            return operator.getitem(items, "a")
+
+        x = torch.randn(4)
+        with self.assertRaises(torch._dynamo.exc.Unsupported):
+            self._compile(fn, x)
+
+    def test_tuple_index_via_index_dunder(self):
+        class Idx:
+            def __index__(self):
+                return 2
+
+        def fn(x):
+            items = (x, x + 1, x + 2)
+            return operator.getitem(items, Idx())
 
         x = torch.randn(4)
         self.assertEqual(fn(x), self._compile(fn, x))
@@ -92,6 +178,14 @@ class GetItemTests(torch._dynamo.test_case.TestCase):
         x = torch.randn(4)
         self.assertEqual(fn(x), self._compile(fn, x))
 
+    def test_range_negative_index(self):
+        def fn(x):
+            r = range(0, 10, 2)
+            return x + operator.getitem(r, -1)
+
+        x = torch.randn(4)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
     def test_range_slice(self):
         def fn(x):
             r = range(0, 10, 2)
@@ -100,6 +194,35 @@ class GetItemTests(torch._dynamo.test_case.TestCase):
 
         x = torch.randn(4)
         self.assertEqual(fn(x), self._compile(fn, x))
+
+    def test_range_bool_index(self):
+        def fn(x):
+            r = range(0, 10, 2)
+            return x + operator.getitem(r, True)
+
+        x = torch.randn(4)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
+    def test_range_index_via_index_dunder(self):
+        class Idx:
+            def __index__(self):
+                return 2
+
+        def fn(x):
+            r = range(0, 10, 2)
+            return x + operator.getitem(r, Idx())
+
+        x = torch.randn(4)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
+    def test_range_invalid_index_type(self):
+        def fn(x):
+            r = range(0, 10, 2)
+            return x + operator.getitem(r, "a")
+
+        x = torch.randn(4)
+        with self.assertRaises(torch._dynamo.exc.Unsupported):
+            self._compile(fn, x)
 
     # --- SizeVariable ---
 
@@ -110,6 +233,52 @@ class GetItemTests(torch._dynamo.test_case.TestCase):
 
         x = torch.randn(4, 8)
         self.assertEqual(fn(x), self._compile(fn, x))
+
+    def test_size_negative_index(self):
+        def fn(x):
+            s = x.size()
+            return x + operator.getitem(s, -1)
+
+        x = torch.randn(4, 8)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
+    def test_size_slice(self):
+        def fn(x):
+            s = x.size()
+            result = operator.getitem(s, slice(0, 1))
+            return x + result[0]
+
+        x = torch.randn(4, 8)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
+    def test_size_bool_index(self):
+        def fn(x):
+            s = x.size()
+            return x + operator.getitem(s, False)
+
+        x = torch.randn(4, 8)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
+    def test_size_index_via_index_dunder(self):
+        class Idx:
+            def __index__(self):
+                return 1
+
+        def fn(x):
+            s = x.size()
+            return x + operator.getitem(s, Idx())
+
+        x = torch.randn(4, 8)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
+    def test_size_invalid_index_type(self):
+        def fn(x):
+            s = x.size()
+            return x + operator.getitem(s, "a")
+
+        x = torch.randn(4, 8)
+        with self.assertRaises(torch._dynamo.exc.Unsupported):
+            self._compile(fn, x)
 
     # --- ConstDictVariable ---
 
@@ -129,6 +298,15 @@ class GetItemTests(torch._dynamo.test_case.TestCase):
         x = torch.randn(4)
         self.assertEqual(fn(x), self._compile(fn, x))
 
+    def test_dict_missing_key(self):
+        def fn(x):
+            d = {"a": x}
+            return operator.getitem(d, "missing")
+
+        x = torch.randn(4)
+        with self.assertRaises(torch._dynamo.exc.Unsupported):
+            self._compile(fn, x)
+
     # --- DefaultDictVariable ---
 
     def test_defaultdict_existing_key(self):
@@ -136,6 +314,15 @@ class GetItemTests(torch._dynamo.test_case.TestCase):
             d = collections.defaultdict(lambda: x + 99)
             d["a"] = x
             return operator.getitem(d, "a")
+
+        x = torch.randn(4)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
+    def test_defaultdict_missing_key(self):
+        def fn(x):
+            d = collections.defaultdict(list)
+            operator.getitem(d, "new")
+            return x
 
         x = torch.randn(4)
         self.assertEqual(fn(x), self._compile(fn, x))
@@ -297,6 +484,19 @@ class GetItemTests(torch._dynamo.test_case.TestCase):
         x = torch.randn(4)
         self.assertEqual(fn(x), self._compile(fn, x))
 
+    # --- UserDefinedTupleVariable ---
+
+    def test_user_defined_tuple_getitem(self):
+        class MyTuple(tuple):  # noqa: SLOT001
+            pass
+
+        def fn(x):
+            items = MyTuple((x, x + 1, x + 2))
+            return operator.getitem(items, 1)
+
+        x = torch.randn(4)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
     # --- UserDefinedDictVariable ---
 
     def test_user_defined_dict_getitem(self):
@@ -413,7 +613,7 @@ class GetItemTests(torch._dynamo.test_case.TestCase):
 
     # --- TritonKernelVariable ---
 
-    @requires_gpu_and_triton
+    @unittest.skipUnless(HAS_GPU and HAS_CUDA_AND_TRITON, "requires gpu and triton")
     def test_triton_kernel_getitem_grid(self):
         from torch.testing._internal.triton_utils import add_kernel
 
@@ -429,6 +629,118 @@ class GetItemTests(torch._dynamo.test_case.TestCase):
         y = torch.randn(256, device="cuda")
         compiled = torch.compile(fn, backend="eager", fullgraph=True)
         self.assertEqual(fn(x, y), compiled(x, y))
+
+    # ===================================================================
+    # CPython behavioral gaps — expectedFailure until implemented
+    # See agent_space/cpython_getitem_gap_analysis.md for details.
+    # ===================================================================
+
+    # GAP 1: deque has only sq_item (int index), no mp_subscript.
+    # CPython: deque[slice] → TypeError "sequence index must be integer, not 'slice'"
+    # Dynamo: DequeVariable inherits BaseListVariable.mp_subscript_impl which accepts slices.
+    # TODO: DequeVariable should override mp_subscript_impl to reject slices, matching
+    # CPython's deque which only has sq_item (Modules/_collectionsmodule.c:1888).
+    @unittest.expectedFailure
+    def test_deque_slice_should_reject(self):
+        """deque does not support slicing in CPython — only sq_item (int index)."""
+
+        def fn(x):
+            d = collections.deque([x, x + 1, x + 2])
+            return operator.getitem(d, slice(0, 2))
+
+        x = torch.randn(4)
+        with self.assertRaises(TypeError):
+            self._compile(fn, x)
+
+    # TODO: deque int index works but through the wrong dispatch path.
+    # CPython: PyObject_GetItem Branch 2 → _PyIndex_Check(key) → PyNumber_AsSsize_t → sq_item.
+    # Dynamo: inherited BaseListVariable.mp_subscript_impl (Branch 1 path).
+    # Result is correct, dispatch path diverges. Fix when sq_item branch is implemented.
+    def test_deque_int_index(self):
+        def fn(x):
+            d = collections.deque([x, x + 1, x + 2])
+            return operator.getitem(d, 1)
+
+        x = torch.randn(4)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
+    # GAP 2: dict_subscript calls _PyObject_HashFast → TypeError for unhashable keys.
+    # TODO: ConstDictVariable.mp_subscript_impl should check tp_hash and raise TypeError
+    # for unhashable keys, matching CPython's dict_subscript (Objects/dictobject.c:3680).
+    @unittest.expectedFailure
+    def test_dict_unhashable_key(self):
+        """dict[unhashable] should raise TypeError, not KeyError or silent failure."""
+
+        def fn(x):
+            d = {0: x, 1: x + 1}
+            return operator.getitem(d, [0])
+
+        x = torch.randn(4)
+        with self.assertRaises(TypeError):
+            self._compile(fn, x)
+
+    # TODO: str/bytes subscript works via constant fold fallback (base mp_subscript_impl
+    # raises Unsupported → _make_handler → operator.getitem("hello", 0) evaluates at
+    # Python level), not via a proper mp_subscript_impl override mirroring CPython's
+    # unicode_subscript / bytes_subscript. Should add dedicated overrides on
+    # ConstantVariable to match CPython's dispatch path.
+    # CPython: Objects/unicodeobject.c:13809 (unicode_subscript)
+    # CPython: Objects/bytesobject.c (bytes_subscript)
+
+    def test_str_subscript(self):
+        def fn(x):
+            s = "hello"
+            c = operator.getitem(s, 0)
+            return x + len(c)
+
+        x = torch.randn(4)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
+    def test_bytes_subscript(self):
+        def fn(x):
+            b = b"hello"
+            val = operator.getitem(b, 0)
+            return x + val
+
+        x = torch.randn(4)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
+    # ===================================================================
+    # Explicit __getitem__ dunder call path tests
+    # Exercises: obj.__getitem__(key) → LOAD_ATTR + CALL, which may
+    # route through call_method → mp_subscript_impl rather than
+    # vt_getitem → mp_subscript_impl.
+    # ===================================================================
+
+    def test_list_dunder_getitem(self):
+        def fn(x):
+            items = [x, x + 1, x + 2]
+            return items.__getitem__(1)
+
+        x = torch.randn(4)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
+    def test_dict_dunder_getitem(self):
+        def fn(x):
+            d = {"a": x, "b": x + 1}
+            return d.__getitem__("a")
+
+        x = torch.randn(4)
+        self.assertEqual(fn(x), self._compile(fn, x))
+
+    def test_user_defined_dict_missing_dunder_getitem(self):
+        """__missing__ fallback must work via __getitem__ method call, not just operator.getitem."""
+
+        class MyDict(dict):
+            def __missing__(self, key):
+                return 42
+
+        def fn(x):
+            d = MyDict(a=1)
+            return x + d.__getitem__("b")
+
+        x = torch.randn(4)
+        self.assertEqual(fn(x), self._compile(fn, x))
 
 
 if __name__ == "__main__":

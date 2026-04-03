@@ -397,6 +397,7 @@ class TorchScriptObjectVariable(UserDefinedObjectVariable):
         tx: "InstructionTranslator",
         key: "VariableTracker",
     ) -> "VariableTracker":
+        # TODO(follow-up): add tests for slice, invalid key type
         return self.call_method(tx, "__getitem__", [key], {})
 
     # We only support method calls on script objects. Interpreting the bytecodes
