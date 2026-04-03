@@ -478,9 +478,18 @@ def _extract_closure_pytree(fn):
 
     Skipped under Dynamo tracing (torch.compiler.is_compiling) because Dynamo
     can't trace through closure cell introspection and handles freevars via its
-    own lifting mechanism.
+    own lifting mechanism.  Also skipped under make_fx tracing (AOT Autograd)
+    because Dynamo has already lifted the closure tensors; re-extracting them
+    here would produce a different pytree leaf count and cause Proxy objects to
+    leak into mask_mod_other_buffers.
     """
-    if not inspect.isfunction(fn) or torch.compiler.is_compiling():
+    from torch.fx.experimental.proxy_tensor import _CURRENT_MAKE_FX_TRACER
+
+    if (
+        not inspect.isfunction(fn)
+        or torch.compiler.is_compiling()
+        or _CURRENT_MAKE_FX_TRACER is not None
+    ):
         return (), _EMPTY_CLOSURE_SPEC, fn
 
     closure = fn.__closure__
