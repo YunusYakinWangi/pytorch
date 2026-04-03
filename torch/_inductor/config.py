@@ -1138,9 +1138,9 @@ class aten_distributed_optimizations:
     #     (e.g. bf16 and fp32) into one bucket
     # "coalesced": zero-copy batching via reduce_scatter_tensor_coalesced
     #     (reduce_scatter only; all_gather falls back to default)
-    bucket_mode: Literal[
-        "default", "custom_ops", "custom_ops_multidtype", "coalesced"
-    ] = "custom_ops_multidtype"
+    bucket_mode: (
+        Literal["default", "custom_ops", "custom_ops_multidtype", "coalesced"] | None
+    ) = None
 
     # Prioritize bucketing during overlap scheduling by grouping candidates by bucket key
     prioritize_bucketing_during_scheduling: bool = True

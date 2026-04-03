@@ -31,7 +31,7 @@ BucketMode: TypeAlias = Literal[
 ]
 
 
-def _default_bucket_mode() -> BucketMode:
+def _default_bucket_mode() -> BucketMode | None:
     from torch._inductor import config
 
     return config.aten_distributed_optimizations.bucket_mode
@@ -298,7 +298,7 @@ def get_collective_type(node: torch.fx.Node) -> str:
 
 
 def get_full_bucket_key(
-    node: torch.fx.Node, bucket_mode: BucketMode
+    node: torch.fx.Node, bucket_mode: BucketMode | None
 ) -> tuple[str, Any]:
     """Get the full bucket key including collective type and bucket key."""
     return (get_collective_type(node), bucket_key(node, mode=bucket_mode))
@@ -1234,7 +1234,7 @@ def merge_all_gather_bucket(
     ag_merge_fn = all_gather_merge_fn_to_trace
     if mode == "coalesced":
         logger.info("coalesced bucket_mode not supported for all_gather, using default")
-    if mode is not None and "custom_ops" in mode:
+    elif mode is not None and "custom_ops" in mode:
         ag_merge_fn = all_gather_merge_fn_to_trace_custom_ops  # type: ignore[assignment]
 
     # Process bucket with lazy input collection

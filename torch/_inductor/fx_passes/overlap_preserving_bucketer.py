@@ -229,8 +229,8 @@ class OverlapPreservingBucketer:
                 node_type = "starts"
                 hiding_nodes |= self.collective_info[node].hiding_nodes
             elif _schedulable_wait_node(node):
-                wait_input = node.args[0]
-                if isinstance(wait_input, fx.Node) and get_group_name(wait_input) == pg:
+                wait_coll = _get_collective_node_from_wait(node)
+                if isinstance(wait_coll, fx.Node) and get_group_name(wait_coll) == pg:
                     node_type = "waits"
                 # Wait for a different PG but hiding a collective on this PG
                 elif node in hiding_nodes:
@@ -589,10 +589,9 @@ class OverlapPreservingBucketer:
             coll = event.node
         # For wait events, look up the start node from the event's args
         elif event.is_wait:
-            wait_input = event.node.args[0]
-            if not isinstance(wait_input, fx.Node):
+            coll = _get_collective_node_from_wait(event.node)
+            if coll is None:
                 return None, []
-            coll = wait_input
         else:
             return None, []
 
@@ -1083,7 +1082,7 @@ def finalize_overlap_scheduling(
     region_of: dict[fx.Node, Any] | None = None,
     bucket_exposed_first: bool | None = None,
     bucket_only_internode_comms: bool = False,
-    bucket_mode: BucketMode = "default",
+    bucket_mode: BucketMode | None = None,
 ) -> None:
     """
     Finalize overlap scheduling by applying deps, inlining fusions, and optionally bucketing.
