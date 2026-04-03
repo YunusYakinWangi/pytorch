@@ -1882,7 +1882,7 @@ class EQUALS_MATCH : public LeafGuard {
       if (Py_TYPE(value) != _value_type) {
         return false;
       }
-      return py_equals(value, _value.ptr());
+      return py_equals(value, _value.ptr(), /*false_on_error=*/true);
     }
     return true;
   }
@@ -2100,7 +2100,7 @@ class DEFAULT_DEVICE : public LeafGuard {
     PyObject* device = PyDict_GetItem(
         _utils_device_dict.ptr(), current_device_str); // borrowed ref
     if (device != _device.ptr()) {
-      return py_equals(device, _device.ptr());
+      return py_equals(device, _device.ptr(), /*false_on_error=*/true);
     }
     return true;
   }
@@ -2696,7 +2696,7 @@ class DIMENSION_MARKING_GUARD : public LeafGuard {
         PyErr_Clear();
         continue; // absent = don't care
       }
-      bool match = py_equals(actual, expected.ptr());
+      bool match = py_equals(actual, expected.ptr(), /*false_on_error=*/true);
       Py_DECREF(actual);
       if (!match)
         return false;
@@ -2725,7 +2725,7 @@ class DIMENSION_MARKING_GUARD : public LeafGuard {
         }
         return false;
       }
-      bool match = py_equals(actual, expected.ptr());
+      bool match = py_equals(actual, expected.ptr(), /*false_on_error=*/true);
       Py_DECREF(actual);
       if (!match)
         return false;
@@ -2734,80 +2734,79 @@ class DIMENSION_MARKING_GUARD : public LeafGuard {
     return true;
   }
 
-  GuardDebugInfo check_verbose_nopybind
-      // Check expected attrs
-      for (auto& [attr_str, expected] : _expected_attrs) {
-    PyObject* actual = PyObject_GetAttr(value, attr_str);
-    if (actual == nullptr) {
-      PyErr_Clear();
-      continue;
-    }
-    bool match = py_equals(actual, expected.ptr());
-    Py_DECREF(actual);
-    if (!match) {
-      std::string attr_name = PyUnicode_AsUTF8(attr_str);
-      return GuardDebugInfo(
-          false,
-          attr_name + " mismatch: expected " +
-              py::repr(expected).cast<std::string>() + ", got " +
-              py::repr(py::reinterpret_borrow<py::object>(
-                           PyObject_GetAttr(value, attr_str)))
-                  .cast<std::string>(),
-          0);
-    }
-  }
-
-  // Check absent attrs
-  for (auto& attr_str : _absent_attrs) {
-    if (PyObject_HasAttr(value, attr_str)) {
-      std::string attr_name = PyUnicode_AsUTF8(attr_str);
-      return GuardDebugInfo(
-          false,
-          attr_name + " should be absent but is present on runtime tensor",
-          0);
-    }
-  }
-
-  // Check dependent attrs
-  for (auto& [attr_str, expected, gate_str] : _dependent_attrs) {
-    if (!PyObject_HasAttr(value, gate_str)) {
-      continue;
-    }
-    PyObject* actual = PyObject_GetAttr(value, attr_str);
-    if (actual == nullptr) {
-      PyErr_Clear();
-      if (!expected.is_none()) {
+  GuardDebugInfo check_verbose_nopybind(PyObject* value) override {
+    // Check expected attrs
+    for (auto& [attr_str, expected] : _expected_attrs) {
+      PyObject* actual = PyObject_GetAttr(value, attr_str);
+      if (actual == nullptr) {
+        PyErr_Clear();
+        continue;
+      }
+      bool match = py_equals(actual, expected.ptr(), /*false_on_error=*/true);
+      Py_DECREF(actual);
+      if (!match) {
         std::string attr_name = PyUnicode_AsUTF8(attr_str);
         return GuardDebugInfo(
             false,
-            attr_name + " expected " + py::repr(expected).cast<std::string>() +
-                " but attribute is absent on runtime tensor",
+            attr_name + " mismatch: expected " +
+                py::repr(expected).cast<std::string>() + ", got " +
+                py::repr(py::reinterpret_borrow<py::object>(
+                             PyObject_GetAttr(value, attr_str)))
+                    .cast<std::string>(),
             0);
       }
-      continue;
     }
-    bool match = py_equals(actual, expected.ptr());
-    Py_DECREF(actual);
-    if (!match) {
-      std::string attr_name = PyUnicode_AsUTF8(attr_str);
-      return GuardDebugInfo(
-          false,
-          attr_name + " mismatch: expected " +
-              py::repr(expected).cast<std::string>(),
-          0);
+
+    // Check absent attrs
+    for (auto& attr_str : _absent_attrs) {
+      if (PyObject_HasAttr(value, attr_str)) {
+        std::string attr_name = PyUnicode_AsUTF8(attr_str);
+        return GuardDebugInfo(
+            false,
+            attr_name + " should be absent but is present on runtime tensor",
+            0);
+      }
     }
+
+    // Check dependent attrs
+    for (auto& [attr_str, expected, gate_str] : _dependent_attrs) {
+      if (!PyObject_HasAttr(value, gate_str)) {
+        continue;
+      }
+      PyObject* actual = PyObject_GetAttr(value, attr_str);
+      if (actual == nullptr) {
+        PyErr_Clear();
+        if (!expected.is_none()) {
+          std::string attr_name = PyUnicode_AsUTF8(attr_str);
+          return GuardDebugInfo(
+              false,
+              attr_name + " expected " + py::repr(expected).cast<std::string>() +
+                  " but attribute is absent on runtime tensor",
+              0);
+        }
+        continue;
+      }
+      bool match = py_equals(actual, expected.ptr(), /*false_on_error=*/true);
+      Py_DECREF(actual);
+      if (!match) {
+        std::string attr_name = PyUnicode_AsUTF8(attr_str);
+        return GuardDebugInfo(
+            false,
+            attr_name + " mismatch: expected " +
+                py::repr(expected).cast<std::string>(),
+            0);
+      }
+    }
+
+    return GuardDebugInfo(true, 0);
   }
 
-  return GuardDebugInfo(true, 0);
-}
-
-private :
-    // Pre-interned attr names + expected values
-    std::vector<std::pair<PyObject*, py::object>>
-        _expected_attrs;
-std::vector<PyObject*> _absent_attrs;
-// (attr_name, expected_value, gate_attr_name)
-std::vector<std::tuple<PyObject*, py::object, PyObject*>> _dependent_attrs;
+ private:
+  // Pre-interned attr names + expected values
+  std::vector<std::pair<PyObject*, py::object>> _expected_attrs;
+  std::vector<PyObject*> _absent_attrs;
+  // (attr_name, expected_value, gate_attr_name)
+  std::vector<std::tuple<PyObject*, py::object, PyObject*>> _dependent_attrs;
 };
 
 class DICT_VERSION : public LeafGuard {
