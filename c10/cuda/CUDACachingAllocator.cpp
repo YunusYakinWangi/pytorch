@@ -1218,6 +1218,7 @@ class RingBuffer {
     if (alloc_trace->size() < alloc_trace_max_entries_) {
       alloc_trace->emplace_back(entry);
     } else {
+      alloc_trace_overflowed_ = true;
       (*alloc_trace)[alloc_trace_next++] = entry;
       if (alloc_trace_next == alloc_trace_max_entries_) {
         alloc_trace_next = 0;
@@ -1238,8 +1239,19 @@ class RingBuffer {
   void clear() {
     std::lock_guard<std::mutex> lk(alloc_trace_lock);
     alloc_trace_next = 0;
+    alloc_trace_overflowed_ = false;
     alloc_trace->clear();
     alloc_trace->shrink_to_fit();
+  }
+
+  bool hasOverflowed() const {
+    std::lock_guard<std::mutex> lk(alloc_trace_lock);
+    return alloc_trace_overflowed_;
+  }
+
+  size_t maxEntries() const {
+    std::lock_guard<std::mutex> lk(alloc_trace_lock);
+    return alloc_trace_max_entries_;
   }
 
  private:
@@ -1249,6 +1261,7 @@ class RingBuffer {
   // under alloc_trace_lock.
   mutable std::mutex alloc_trace_lock;
   size_t alloc_trace_next = 0;
+  bool alloc_trace_overflowed_ = false;
   std::vector<T>*
       alloc_trace; // pointer because we need to intentionally leak this on
                    // deallocation it can hold references to Python state which
@@ -1419,6 +1432,14 @@ class DeviceCachingAllocator {
   static thread_local std::string user_metadata;
 
  public:
+  bool traceBufferOverflowed() const {
+    return alloc_buffer.hasOverflowed();
+  }
+
+  size_t traceBufferMaxEntries() const {
+    return alloc_buffer.maxEntries();
+  }
+
   // NOLINTNEXTLINE(cppcoreguidelines-pro-type-member-init)
   explicit DeviceCachingAllocator(c10::DeviceIndex id)
       : device_id(id),
@@ -4369,6 +4390,10 @@ class NativeCachingAllocator : public CUDAAllocator {
       // Get the device_traces' TraceEntry lists.
       for (auto& da : device_allocator) {
         result.device_traces.emplace_back(da->trace(tsc_to_us));
+        result.trace_alloc_max_entries.push_back(
+            da->traceBufferMaxEntries());
+        result.trace_alloc_overflowed.push_back(
+            da->traceBufferOverflowed());
         auto snap = da->snapshot(mempool_id);
         result.segments.insert(result.segments.end(), snap.begin(), snap.end());
       }
