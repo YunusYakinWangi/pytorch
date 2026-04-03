@@ -2124,6 +2124,113 @@ class TestViewOps(DTensorContinuousTestBase):
         (flat_full[:half].sum()).backward()
         self.assertEqual(dt_flat.grad.full_tensor(), full_req.grad.flatten(0, 1))
 
+    def test_flatten_then_cat_on_strided_shard_dim(self):
+        """Verify _StridedShard correctness through cat on the shard dim.
+
+        cat_strategy uses is_tensor_dim_sharded which calls is_shard(),
+        missing _StridedShard. When cat dim == _StridedShard dim, the
+        strategy won't unshard first, producing wrong results.
+        """
+        mesh = init_device_mesh(self.device_type, (self.world_size,))
+        shape = (4, self.world_size * 2, 6)
+        full = torch.randn(*shape, device=self.device_type)
+        dt = distribute_tensor(full, mesh, [Shard(1)])
+        dt_flat = dt.flatten(0, 1)
+        flat_full = full.flatten(0, 1)
+
+        self.assertIsInstance(dt_flat.placements[0], _StridedShard)
+        self.assertEqual(dt_flat.placements[0].dim, 0)
+
+        # cat on the _StridedShard dim (dim 0)
+        result = torch.cat([dt_flat, dt_flat], dim=0)
+        expected = torch.cat([flat_full, flat_full], dim=0)
+        self.assertEqual(result.full_tensor(), expected)
+
+        # cat on non-shard dim should work without redistribution
+        result2 = torch.cat([dt_flat, dt_flat], dim=1)
+        expected2 = torch.cat([flat_full, flat_full], dim=1)
+        self.assertEqual(result2.full_tensor(), expected2)
+
+        # _StridedShard on a higher dim (dim=1), cat on that dim
+        shape2 = (3, 5, self.world_size * 2)
+        full2 = torch.randn(*shape2, device=self.device_type)
+        dt2 = distribute_tensor(full2, mesh, [Shard(2)])
+        dt2_flat = dt2.flatten(1, 2)  # (3, 5*ws*2) with _StridedShard(dim=1)
+        flat_full2 = full2.flatten(1, 2)
+
+        self.assertIsInstance(dt2_flat.placements[0], _StridedShard)
+        self.assertEqual(dt2_flat.placements[0].dim, 1)
+
+        result3 = torch.cat([dt2_flat, dt2_flat], dim=1)
+        expected3 = torch.cat([flat_full2, flat_full2], dim=1)
+        self.assertEqual(result3.full_tensor(), expected3)
+
+    def test_flatten_then_split_on_strided_shard_dim(self):
+        """Verify _StridedShard correctness through split on the shard dim.
+
+        split_strategy uses is_tensor_dim_sharded which calls is_shard(),
+        missing _StridedShard. When split dim == _StridedShard dim, the
+        strategy won't unshard first, producing wrong results.
+        """
+        mesh = init_device_mesh(self.device_type, (self.world_size,))
+        shape = (4, self.world_size * 2, 6)
+        full = torch.randn(*shape, device=self.device_type)
+        dt = distribute_tensor(full, mesh, [Shard(1)])
+        dt_flat = dt.flatten(0, 1)
+        flat_full = full.flatten(0, 1)
+
+        self.assertIsInstance(dt_flat.placements[0], _StridedShard)
+        self.assertEqual(dt_flat.placements[0].dim, 0)
+
+        # split on the _StridedShard dim (dim 0)
+        half = dt_flat.shape[0] // 2
+        results = torch.split(dt_flat, half, dim=0)
+        expected = torch.split(flat_full, half, dim=0)
+        for r, e in zip(results, expected):
+            self.assertEqual(r.full_tensor(), e)
+
+        # split on non-shard dim
+        results2 = torch.split(dt_flat, 3, dim=1)
+        expected2 = torch.split(flat_full, 3, dim=1)
+        for r, e in zip(results2, expected2):
+            self.assertEqual(r.full_tensor(), e)
+
+        # _StridedShard on a higher dim (dim=1), split on that dim
+        shape2 = (3, 5, self.world_size * 2)
+        full2 = torch.randn(*shape2, device=self.device_type)
+        dt2 = distribute_tensor(full2, mesh, [Shard(2)])
+        dt2_flat = dt2.flatten(1, 2)  # (3, 5*ws*2) with _StridedShard(dim=1)
+        flat_full2 = full2.flatten(1, 2)
+
+        self.assertIsInstance(dt2_flat.placements[0], _StridedShard)
+        self.assertEqual(dt2_flat.placements[0].dim, 1)
+
+        half2 = dt2_flat.shape[1] // 2
+        results3 = torch.split(dt2_flat, half2, dim=1)
+        expected3 = torch.split(flat_full2, half2, dim=1)
+        for r, e in zip(results3, expected3):
+            self.assertEqual(r.full_tensor(), e)
+
+    def test_flatten_then_unbind_on_strided_shard_dim(self):
+        """Verify _StridedShard is detected by unbind on the shard dim.
+
+        gen_unbind_strategy uses is_tensor_dim_sharded which calls is_shard(),
+        missing _StridedShard. Unbinding on a _StridedShard dim should raise
+        RuntimeError (same as unbinding on a regular Shard dim).
+        """
+        mesh = init_device_mesh(self.device_type, (self.world_size,))
+        shape = (2, self.world_size * 2, 3)
+        full = torch.randn(*shape, device=self.device_type)
+        dt = distribute_tensor(full, mesh, [Shard(1)])
+        dt_flat = dt.flatten(0, 1)
+
+        self.assertIsInstance(dt_flat.placements[0], _StridedShard)
+        self.assertEqual(dt_flat.placements[0].dim, 0)
+
+        # unbind on the _StridedShard dim (dim 0) — should raise
+        with self.assertRaises(RuntimeError):
+            torch.unbind(dt_flat, dim=0)
+
     def test_view_redistribution(self):
         """
         This test is added to demonstrate "incorrect" view ops behavior if redistribution happens.

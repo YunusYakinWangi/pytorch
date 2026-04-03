@@ -943,7 +943,12 @@ def cat_strategy(op_schema: OpSchema) -> StrategyType:
             # exemplar OpSpec to follow
             exemplar_spec = op_spec.output_spec
             # check if the tensor is sharded on the concat dim
-            if is_tensor_dim_sharded(exemplar_spec, dim):
+            # is_tensor_dim_sharded uses is_shard() which misses _StridedShard
+            strided_shard_on_cat_dim = any(
+                isinstance(p, _StridedShard) and p.dim == dim
+                for p in exemplar_spec.placements
+            )
+            if is_tensor_dim_sharded(exemplar_spec, dim) or strided_shard_on_cat_dim:
                 # if the tensor is sharded on the concat dim, we need to unshard it
                 # first
                 exemplar_placement = unshard_tensor_dim(exemplar_spec.placements, dim)
@@ -1219,7 +1224,11 @@ def split_strategy(op_schema: OpSchema) -> OpStrategy:
     for strategy in input_strategy.strategies:
         spec = strategy.output_spec
         placements = spec.placements
-        if is_tensor_dim_sharded(spec, dim=dim):
+        # is_tensor_dim_sharded uses is_shard() which misses _StridedShard
+        strided_shard_on_split_dim = any(
+            isinstance(p, _StridedShard) and p.dim == dim for p in spec.placements
+        )
+        if is_tensor_dim_sharded(spec, dim=dim) or strided_shard_on_split_dim:
             # if the input is sharded on the split dim, we need to unshard it
             placements = unshard_tensor_dim(spec.placements, dim=dim)
 
@@ -1260,7 +1269,15 @@ def gen_unbind_strategy(op_schema: OpSchema) -> StrategyType:
     unbind_strategy = OpStrategy([])
     for arg_strategy in input_strategy.strategies:
         arg_spec = arg_strategy.output_spec
-        if is_tensor_dim_sharded(arg_spec, dim=unbind_dim):
+        # is_tensor_dim_sharded uses is_shard() which misses _StridedShard
+        strided_shard_on_unbind_dim = any(
+            isinstance(p, _StridedShard) and p.dim == unbind_dim
+            for p in arg_spec.placements
+        )
+        if (
+            is_tensor_dim_sharded(arg_spec, dim=unbind_dim)
+            or strided_shard_on_unbind_dim
+        ):
             raise RuntimeError(
                 f"Attempted to unbind along the sharded dimension {unbind_dim}. ",
                 "It cannot be performed without redistribution, which is disallowed "
