@@ -39,14 +39,14 @@ static void fill_mps_kernel(TensorIterator& iter, const Scalar& value) {
 
   // Use Metal fillBuffer for zero fill and byte-representable fills on
   // linearly-fillable tensors: these map to a single-byte pattern.
-  if (can_fill_linearly && !isComplexType(dtype)) {
-    if (value.toDouble() == 0.0) {
+  if (can_fill_linearly) {
+    if (!isComplexType(dtype) && value.toDouble() == 0.0) {
       stream->fill(getMTLBufferStorage(self), 0, self.nbytes(), self.storage_offset() * self.itemsize());
       return;
     }
     if (dtype == kBool || dtype == kByte || dtype == kChar) {
-      stream->fill(
-          getMTLBufferStorage(self), value.toChar(), self.nbytes(), self.storage_offset());
+      int val = dtype == kBool ? value.toBool() : dtype == kByte ? value.toChar() : value.to<uint8_t>();
+      stream->fill(getMTLBufferStorage(self), val, self.nbytes(), self.storage_offset());
       return;
     }
   }
