@@ -463,7 +463,12 @@ class DeferredTritonCallWrapper:
         )
         call_args_str = self._generate_lazy_scratch(prefix, wrapper, call_args_str)
 
-        launch_args = f"{kernel_name}, grid_0, grid_1, grid_2, {kernel_name}_result.num_warps, {kernel_name}_result.shared_mem, kernel_args_, stream_"
+        launch_args = (
+            f"{kernel_name}, grid_0, grid_1, grid_2,"
+            f" {kernel_name}_result.num_warps,"
+            f" {kernel_name}_result.shared_mem,"
+            f" kernel_args_, stream_"
+        )
 
         prefix.splice(
             f"""\
