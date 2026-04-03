@@ -1175,11 +1175,6 @@ def mark_dynamic(
     """
     Mark a tensor as having a dynamic dim and set corresponding min and max range for the dim.
 
-    The ``index`` argument follows standard Python indexing conventions: negative values
-    are supported (e.g., -1 for the last dimension) and out-of-range values raise
-    ``IndexError``. Calls are additive: mark_dynamic(x, 0) followed by mark_dynamic(x, 1)
-    marks both dims.
-
     [Note - on the state of mark_dynamic]
 
     The behavior of having a dynamic dimension on a tensor is governed by a few factors:

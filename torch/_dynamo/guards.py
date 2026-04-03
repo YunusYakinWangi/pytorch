@@ -3416,7 +3416,7 @@ class GuardBuilder(GuardBuilderBase):
             #   maybe_mark_dynamic(), and guarded on like the other dimension marking
             #   attributes above.
             #   _dynamo_propagated_dynamic_indices is a compiler-internal attribute set by
-            #   AOTAutograd's maybe_mark_dynamic_helper() to propagate dynamism across
+            #   AOTAutograd's mark_dynamo_propagated_dynamic_indices() to propagate dynamism across
             #   graph breaks. It is NOT guarded on. When AOTAutograd discovers that an
             #   output dimension is symbolic, it stamps this attribute on the output tensor
             #   so that Dynamo treats those dims as weakly dynamic when the tensor appears

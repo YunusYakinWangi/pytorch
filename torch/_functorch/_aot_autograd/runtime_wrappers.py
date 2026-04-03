@@ -312,7 +312,7 @@ def make_output_handler(
 # _dynamo_propagated_dynamic_indices, so there is no guarantee that the next graph
 # will have proper dynamism information. It only helps when the output of one compiled
 # graph feeds directly into the next.
-def maybe_mark_dynamic_helper(t: torch.Tensor, dims: set[int]) -> None:
+def mark_dynamo_propagated_dynamic_indices(t: torch.Tensor, dims: set[int]) -> None:
     if hasattr(t, "_dynamo_propagated_dynamic_indices"):
         # pyrefly: ignore [missing-attribute]
         t._dynamo_propagated_dynamic_indices |= dims
@@ -726,7 +726,7 @@ def _create_runtime_wrapper(
             for t, o in zip(ret_outs, runtime_metadata.output_info):
                 if o.dynamic_dims is None:
                     continue
-                maybe_mark_dynamic_helper(t, o.dynamic_dims)
+                mark_dynamo_propagated_dynamic_indices(t, o.dynamic_dims)
         if runtime_metadata.grad_enabled_mutation is not None:
             torch._C._set_grad_enabled(runtime_metadata.grad_enabled_mutation)
         return ret_outs
@@ -2673,9 +2673,11 @@ Your tensor subclass must implement __coerce_same_metadata_as_tangent__."""
                     dims,
                 ) in CompiledFunction.metadata.dynamic_saved_tensors_idxs.items():
                     if idx < num_vc_check:
-                        maybe_mark_dynamic_helper(tensors_to_save[idx], dims)
+                        mark_dynamo_propagated_dynamic_indices(
+                            tensors_to_save[idx], dims
+                        )
                     else:
-                        maybe_mark_dynamic_helper(
+                        mark_dynamo_propagated_dynamic_indices(
                             tensors_no_vc[idx - num_vc_check], dims
                         )
 
