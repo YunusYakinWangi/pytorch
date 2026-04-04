@@ -1990,12 +1990,12 @@ class OutputGraph(OutputGraphCommon):
             ):
                 vt = stack_values_flat[0]
                 if (
-                    isinstance(vt, torch._dynamo.variables.NamedTupleVariable)
-                    and vt.tuple_cls
+                    isinstance(vt, torch._dynamo.variables.UserDefinedTupleVariable)
+                    and type(vt.value)
                     is torch._dynamo.functional_export.ExportTracerOutput
                 ):
-                    flat_returns = vt.items[0]
-                    out_spec = vt.items[1]
+                    flat_returns = vt._tuple_vt.items[0]
+                    out_spec = vt._tuple_vt.items[1]
                     assert isinstance(
                         flat_returns, torch._dynamo.variables.ListVariable
                     )

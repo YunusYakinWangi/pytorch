@@ -47,7 +47,7 @@ from torch._guards import Source, TracingContext
 from torch.utils._python_dispatch import is_traceable_wrapper_subclass_type
 
 from .. import config, graph_break_hints, polyfills, variables
-from ..bytecode_transformation import create_call_function
+from ..bytecode_transformation import create_build_tuple, create_call_function
 from ..create_parameter_op import do_not_convert_to_tracable_parameter
 from ..exc import (
     handle_observed_exception,
@@ -1017,15 +1017,25 @@ class UserDefinedClassVariable(UserDefinedVariable):
 
                 assert all(x is not None for x in items)
 
-            # Modify mutability of namedtuple for sourcelesss instantiations.
             from .base import AttributeMutationNew
-            from .lists import NamedTupleVariable
+            from .lists import TupleVariable
 
-            return NamedTupleVariable(
-                items,
-                self.value,  # type: ignore[arg-type]
+            tuple_cls = self.value
+            if tuple_cls.__module__ == "torch.return_types":
+                dummy_value = tuple_cls(items)  # pyrefly: ignore[bad-argument-count]
+                vt_cls = StructSequenceVariable
+            else:
+                dummy_value = tuple_cls(*items)  # type: ignore[arg-type]
+                vt_cls = NamedTupleVariable
+            tuple_vt = TupleVariable(items, mutation_type=ValueMutationNew())
+            result = vt_cls(
+                dummy_value,
+                tuple_vt=tuple_vt,
                 mutation_type=AttributeMutationNew(),
             )
+            tx.output.side_effects.id_to_variable[id(dummy_value)] = result
+            tx.output.side_effects.keepalive.append(dummy_value)
+            return result
         elif self.value is torch.Size:
             # This simulates `THPSize_pynew`, the C impl for `Size.__new__`.
             from .lists import SizeVariable
@@ -3160,9 +3170,15 @@ class UserDefinedTupleVariable(UserDefinedObjectVariable):
     Internally, it uses a TupleVariable to represent the tuple part of the
     variable tracker. For everything else, it falls back to
     UserDefinedObjectVariable.
+
+    NamedTupleVariable and StructSequenceVariable are subclasses that handle
+    namedtuples and structseqs (torch.return_types.*) respectively.
     """
 
-    _nonvar_fields = UserDefinedObjectVariable._nonvar_fields
+    _nonvar_fields = {
+        "tuple_cls",
+        *UserDefinedObjectVariable._nonvar_fields,
+    }
 
     def __init__(self, value, tuple_vt=None, init_args=None, **kwargs):  # type: ignore[all]
         from .lists import TupleVariable
@@ -3186,21 +3202,7 @@ class UserDefinedTupleVariable(UserDefinedObjectVariable):
             self._tuple_vt = TupleVariable(elems, mutation_type=ValueMutationNew())
         else:
             self._tuple_vt = tuple_vt
-
-    def resolve_data_descriptor(
-        self,
-        tx: "InstructionTranslator",
-        name: str,
-        type_attr: object,
-        source: Source | None,
-    ) -> VariableTracker:
-        if isinstance(type_attr, _collections._tuplegetter):
-            # namedtuple fields are _tuplegetter descriptors implemented in C.
-            # We emulate _tuplegetter.__get__ by indexing into the tracked
-            # tuple items, because self.value may not hold actual runtime values.
-            _, (idx, _) = type_attr.__reduce__()
-            return self._tuple_vt.items[idx]  # type: ignore[union-attr]
-        return super().resolve_data_descriptor(tx, name, type_attr, source)
+        self.tuple_cls = type(value)
 
     def call_method(
         self,
@@ -3241,6 +3243,82 @@ class UserDefinedTupleVariable(UserDefinedObjectVariable):
             other._tuple_vt if isinstance(other, UserDefinedTupleVariable) else other
         )
         return self._tuple_vt.is_python_equal(other)
+
+
+class NamedTupleVariable(UserDefinedTupleVariable):
+    """Represents Python namedtuples (created via collections.namedtuple).
+
+    Namedtuples use _tuplegetter descriptors for field access and
+    Type(*args) / Type._make(iterable) for construction.
+    """
+
+    def resolve_data_descriptor(
+        self,
+        tx: "InstructionTranslator",
+        name: str,
+        type_attr: object,
+        source: Source | None,
+    ) -> VariableTracker:
+        if isinstance(type_attr, _collections._tuplegetter):
+            # namedtuple fields are _tuplegetter descriptors implemented in C.
+            # We emulate _tuplegetter.__get__ by indexing into the tracked
+            # tuple items, because self.value may not hold actual runtime values.
+            _, (idx, _) = type_attr.__reduce__()
+            return self._tuple_vt.items[idx]  # type: ignore[union-attr]
+        return super().resolve_data_descriptor(tx, name, type_attr, source)
+
+    def as_python_constant(self) -> Any:
+        items = [x.as_python_constant() for x in self._tuple_vt.items]
+        return self.tuple_cls(*items)  # type: ignore[arg-type]
+
+    def as_proxy(self) -> Any:
+        items = [x.as_proxy() for x in self._tuple_vt.items]
+        return self.tuple_cls(*items)  # type: ignore[arg-type]
+
+    def reconstruct(self, codegen: "PyCodegen") -> None:
+        create_fn = self.tuple_cls._make  # type: ignore[attr-defined]
+        codegen.add_push_null(
+            lambda: codegen.append_output(
+                codegen.create_load_const_unchecked(create_fn)
+            )
+        )
+        codegen.foreach(self._tuple_vt.items)
+        codegen.extend_output(
+            [
+                create_build_tuple(len(self._tuple_vt.items)),
+            ]
+            + create_call_function(1, False)
+        )
+
+
+class StructSequenceVariable(UserDefinedTupleVariable):
+    """Represents C-implemented PyStructSequence types (torch.return_types.*).
+
+    Structseqs use Type(iterable) calling convention and reject tuple.__new__.
+    """
+
+    def as_python_constant(self) -> Any:
+        items = [x.as_python_constant() for x in self._tuple_vt.items]
+        return self.tuple_cls(items)
+
+    def as_proxy(self) -> Any:
+        items = [x.as_proxy() for x in self._tuple_vt.items]
+        return self.tuple_cls(items)
+
+    def reconstruct(self, codegen: "PyCodegen") -> None:
+        create_fn = self.tuple_cls
+        codegen.add_push_null(
+            lambda: codegen.append_output(
+                codegen.create_load_const_unchecked(create_fn)
+            )
+        )
+        codegen.foreach(self._tuple_vt.items)
+        codegen.extend_output(
+            [
+                create_build_tuple(len(self._tuple_vt.items)),
+            ]
+            + create_call_function(1, False)
+        )
 
 
 class MutableMappingVariable(UserDefinedObjectVariable):
