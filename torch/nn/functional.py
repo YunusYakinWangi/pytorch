@@ -3665,6 +3665,9 @@ class LinearCrossEntropyOptions:
     """Chunk size along the batches dimension. The specified value may
     be overridden by the computed value from chunking method. By
     default, the chunk size is maximal.
+
+    Warning: Specifying a smaller chunk size reduces memory consumption
+    but it may also reduce the performance of the operation.
     """
 
     chunking_method: str | None = None
@@ -3679,8 +3682,36 @@ class LinearCrossEntropyOptions:
         overridden.
     """
 
-    def adjust(self, num_batches, in_features, num_classes):
-        """Adjust options to input sizes.
+    acc_policy: str = "TATAA"
+    """Define a finer control of using acc_dtype in internal variables.
+
+    acc_policy must be a string with length 5 and it must contain only
+    characters 'T' or 'A' that encode the usage of dtype or acc_dtype,
+    respectively. The 5 characters in the acc_policy value correspond
+    to the following internal variables:
+    - output - accumulator of operator output
+    - grad_input - accumulator of input gradients
+    - grad_linear_weight - accumulator of linear_weight gradients
+    - X - a workspace for softmax computations
+    - G - a workspace for grad_input and grad_linear_weight computations
+
+    For instance, acc_policy == "AATAA" means that all internal
+    variables except grad_linear_weight use acc_dtype dtype while the
+    latter uses dtype.
+
+    A set of acc_policy values that lead to a high accuracy of
+    results: TATAA, TAAAA, AATAA, AAAAA.
+
+    Warning: this is an experimental feature that may change in future.
+    """
+
+    acc_dtype: torch.dtype | None = None
+    """A dtype used in accumulating computation results to increase
+    numrical accuracy. By default, use the same as input dtype.
+    """
+
+    def adjust(self, num_batches, in_features, num_classes, dtype):
+        """Adjust options to input sizes and dtype.
 
         Return a new LinearCrossEntropyOptions object with default
         chunk sizes adjusted to the actual input sizes.
@@ -3716,7 +3747,13 @@ class LinearCrossEntropyOptions:
                     " Supported methods: 'liger' or None."
                 )
 
-        return dataclasses.replace(self, batch_chunk_size=batch_chunk_size)
+        if self.acc_dtype is None:
+            acc_dtype = dtype
+        else:
+            acc_dtype = self.acc_dtype
+        return dataclasses.replace(
+            self, batch_chunk_size=batch_chunk_size, acc_dtype=acc_dtype
+        )
 
 
 def linear_cross_entropy(
@@ -3826,7 +3863,7 @@ def linear_cross_entropy(
         and reduction in {"mean", "sum"}
         and label_smoothing == 0.0
         and target.dtype == torch.int64
-        and not out_features
+        and not out_features  # TODO: remove this, requires target reshape
     ):
         if input.dim() == 2:
             num_batches = input.shape[0]
@@ -3844,8 +3881,7 @@ def linear_cross_entropy(
                 dtype=input.dtype,
                 requires_grad=False,
             )
-
-        options = options.adjust(num_batches, in_features, num_classes)
+        options = options.adjust(num_batches, in_features, num_classes, input.dtype)
 
         # global import results a likely circular import
         import torch.nn._linear_cross_entropy as m
@@ -3859,6 +3895,8 @@ def linear_cross_entropy(
             ignore_index,
             label_smoothing,
             options.batch_chunk_size,
+            options.acc_policy,
+            options.acc_dtype,
             options.grad_inplace,
             input.requires_grad,
             linear_weight.requires_grad,
@@ -4742,7 +4780,7 @@ def upsample(  # noqa: F811
     `mini-batch x channels x [optional depth] x [optional height] x width`.
 
     The modes available for upsampling are: `nearest`, `linear` (3D-only),
-    `bilinear`, `bicubic` (4D-only), `trilinear` (5D-only)
+    `bilinear`, `bicubic` (4D-only), `trilinear` (5D-only), `lanczos` (4D-only)
 
     Args:
         input (Tensor): the input tensor
@@ -4751,7 +4789,7 @@ def upsample(  # noqa: F811
         scale_factor (float or Tuple[float]): multiplier for spatial size. Has to match input size if it is a tuple.
         mode (str): algorithm used for upsampling:
             ``'nearest'`` | ``'linear'`` | ``'bilinear'`` | ``'bicubic'`` |
-            ``'trilinear'``. Default: ``'nearest'``
+            ``'trilinear'`` | ``'lanczos'``. Default: ``'nearest'``
         align_corners (bool, optional): Geometrically, we consider the pixels of the
             input and output as squares rather than points.
             If set to ``True``, the input and output tensors are aligned by the
@@ -4764,7 +4802,7 @@ def upsample(  # noqa: F811
             Default: ``False``
 
     .. note::
-        With ``mode='bicubic'``, it's possible to cause overshoot, in other words it can produce
+        With ``mode='bicubic'`` or ``mode='lanczos'``, it's possible to cause overshoot, in other words it can produce
         negative values or values greater than 255 for images.
         Explicitly call ``result.clamp(min=0, max=255)`` if you want to reduce the overshoot
         when displaying the image.
@@ -4882,7 +4920,7 @@ def interpolate(  # noqa: F811
     `mini-batch x channels x [optional depth] x [optional height] x width`.
 
     The modes available for resizing are: `nearest`, `linear` (3D-only),
-    `bilinear`, `bicubic` (4D-only), `trilinear` (5D-only), `area`, `nearest-exact`
+    `bilinear`, `bicubic` (4D-only), `trilinear` (5D-only), `lanczos` (4D-only, CPU only), `area`, `nearest-exact`
 
     Args:
         input (Tensor): the input tensor
@@ -4892,7 +4930,7 @@ def interpolate(  # noqa: F811
             its length has to match the number of spatial dimensions; `input.dim() - 2`.
         mode (str): algorithm used for upsampling:
             ``'nearest'`` | ``'linear'`` | ``'bilinear'`` | ``'bicubic'`` |
-            ``'trilinear'`` | ``'area'`` | ``'nearest-exact'``. Default: ``'nearest'``
+            ``'trilinear'`` | ``'lanczos'`` | ``'area'`` | ``'nearest-exact'``. Default: ``'nearest'``
         align_corners (bool, optional): Geometrically, we consider the pixels of the
             input and output as squares rather than points.
             If set to ``True``, the input and output tensors are aligned by the
@@ -4914,13 +4952,18 @@ def interpolate(  # noqa: F811
             be used directly for interpolation. Default: ``None``.
         antialias (bool, optional): flag to apply anti-aliasing. Default: ``False``. Using anti-alias
             option together with ``align_corners=False``, interpolation result would match Pillow
-            result for downsampling operation. Supported modes: ``'bilinear'``, ``'bicubic'``.
+            result for downsampling operation. Supported modes: ``'bilinear'``, ``'bicubic'``, ``'lanczos'``.
 
     .. note::
-        With ``mode='bicubic'``, it's possible to cause overshoot. For some dtypes, it can produce
+        With ``mode='bicubic'`` or ``mode='lanczos'``, it's possible to cause overshoot. For some dtypes, it can produce
         negative values or values greater than 255 for images. Explicitly call ``result.clamp(min=0,max=255)``
         if you want to reduce the overshoot when displaying the image.
         For ``uint8`` inputs, it already performs saturating cast operation. So, no manual `clamp` operation is needed.
+
+    .. note::
+        Mode ``mode='lanczos'`` uses a Lanczos-3 windowed sinc filter (6 taps) and requires
+        ``antialias=True``. It only supports 4-D input (i.e. 2D spatial) and CPU. With ``antialias=True``
+        and ``align_corners=False``, the result matches PIL's ``Image.LANCZOS`` resampling filter.
 
     .. note::
         Mode ``mode='nearest-exact'`` matches Scikit-Image and PIL nearest neighbours interpolation
@@ -5052,9 +5095,11 @@ def interpolate(  # noqa: F811
             ]
         scale_factors = None
 
-    if antialias and not (mode in ("bilinear", "bicubic") and input.ndim == 4):
+    if antialias and not (
+        mode in ("bilinear", "bicubic", "lanczos") and input.ndim == 4
+    ):
         raise ValueError(
-            "Anti-alias option is restricted to bilinear and bicubic modes and requires a 4-D tensor as input"
+            "Anti-alias option is restricted to bilinear, bicubic, and lanczos modes and requires a 4-D tensor as input"
         )
 
     if input.dim() == 3 and mode == "nearest":
@@ -5168,6 +5213,21 @@ def interpolate(  # noqa: F811
             scale_factors,
         )
 
+    if input.dim() == 4 and mode == "lanczos":
+        if align_corners is None:
+            raise AssertionError("align_corners is unexpectedly None")
+        if align_corners:
+            raise ValueError("Lanczos mode does not support align_corners=True")
+        if not antialias:
+            raise ValueError("Lanczos mode requires antialias=True")
+        return torch._C._nn._upsample_lanczos2d_aa(
+            input,
+            # pyrefly: ignore [bad-argument-type]
+            output_size,
+            align_corners,
+            scale_factors,
+        )
+
     if input.dim() == 3 and mode == "bilinear":
         raise NotImplementedError("Got 3D input, but bilinear mode needs 4D input")
     if input.dim() == 3 and mode == "trilinear":
@@ -5183,7 +5243,7 @@ def interpolate(  # noqa: F811
 
     raise NotImplementedError(
         "Input Error: Only 3D, 4D and 5D input Tensors supported"
-        f" (got {input.dim()}D) for the modes: nearest | linear | bilinear | bicubic | trilinear | area | nearest-exact"
+        f" (got {input.dim()}D) for the modes: nearest | linear | bilinear | bicubic | trilinear | lanczos | area | nearest-exact"
         f" (got {mode})"
     )
 
@@ -6219,7 +6279,7 @@ scaled_dot_product_attention = _add_docstr(
             attn_bias = torch.zeros(L, S, dtype=query.dtype, device=query.device)
             if is_causal:
                 assert attn_mask is None
-                temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0)
+                temp_mask = torch.ones(L, S, dtype=torch.bool, device=query.device).tril(diagonal=0)
                 attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
 
             if attn_mask is not None:

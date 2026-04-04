@@ -11,6 +11,7 @@ import warnings
 import os
 import pickle
 import re
+import dataclasses
 from copy import deepcopy
 from itertools import product
 from functools import partial
@@ -7372,40 +7373,133 @@ tensor(..., device='meta', size=(1,), requires_grad=True)""")
         input_2 = torch.rand([5, 0], dtype=torch.float32)
         torch.nn.CrossEntropyLoss()(input_1, input_2)
 
-    def test_linear_cross_entropy_loss(self, dtype=torch.float32):
+    def _test_linear_cross_entropy_loss(self, device='cpu', dtype=torch.float32, acc_policy=None, acc_dtype=None):
         # tests LinearCrossEntropyLoss with grad_inplace option enabled
 
+        # For assessing the accuracy of chunking algorithms, we'll use
+        # the linear_cross_entropy reference implementation with
+        # float64 dtype.
+        ref_dtype = torch.float64
+
+        def diff_ulp(x, y):
+            # ULP difference between two normal numbers, applied to
+            # input items
+            uint = {torch.float16: torch.uint16, torch.bfloat16: torch.uint16,
+                    torch.float32: torch.uint32}[x.dtype]
+            ix = x.view(uint).to(torch.int64)
+            iy = y.view(uint).to(torch.int64)
+            return torch.where(
+                x == y,
+                0,
+                torch.where(x.sign() == y.sign(), torch.where(ix > iy, ix - iy, iy - ix), ix + iy)
+            )
+
+        eta = torch.finfo(dtype).eps
+        feps = torch.finfo(dtype).eps * 2
+
+        def grad_error(grad, expected):
+            # return relative error of two jacobian tensors
+            if grad.dim() < 2:
+                grad = grad.reshape(-1, 1)
+                expected = expected.reshape(-1, 1)
+            abserr = torch.linalg.matrix_norm(grad - expected, ord="fro")
+            norm = torch.linalg.matrix_norm(expected, ord="fro")
+            return abserr / (eta + norm)
+
+
+        errors, grad_errors1, grad_errors2 = [], [], []
+        ulp, grad_ulp1, grad_ulp2 = [], [], []
         for module_input in module_inputs_torch_nn_LinearCrossEntropyLoss(
-                module_info=None, device=torch.device('cpu'), dtype=dtype, requires_grad=True, training=None, grad_inplace=True):
+                module_info=None, device=torch.device(device), dtype=dtype, requires_grad=True, training=None, grad_inplace=True,
+                acc_dtype=acc_dtype):
             module_args = module_input.constructor_input.args
             module_kwargs = module_input.constructor_input.kwargs
             (input, target) = module_input.forward_input.args
 
-            native_module_kwargs = module_kwargs.copy()
-            native_module_kwargs['options'] = None  # use native implementation, no chunking
+            options = module_kwargs.get('options')
+            if (
+                    options is None
+                    or target.dtype.is_floating_point
+                    or module_kwargs.get('out_features')
+                    or module_kwargs.get('reduction') == 'none'
+                    or module_kwargs.get('label_smoothing') > 0
+            ):
+                # skip samples that are not be processed via chunking
+                # algorithms
+                continue
+            if acc_policy is not None:
+                module_kwargs['options'] = dataclasses.replace(options, acc_policy=acc_policy)
+
+            # use reference implementation, no chunking
+            ref_module_kwargs = module_kwargs.copy()
+            ref_module_kwargs['dtype'] = ref_dtype
+            ref_module_kwargs['options'] = None
 
             torch.manual_seed(1245)
             loss = nn.LinearCrossEntropyLoss(*module_args, **module_kwargs)
+            ref_loss = nn.LinearCrossEntropyLoss(*module_args, **ref_module_kwargs)
+            # ensure equal linear weights in loss and ref_loss:
+            ref_loss.linear.weight.detach().copy_(loss.linear.weight).requires_grad_(True)
 
-            torch.manual_seed(1245)  # ensures equal linear weights in loss and ref_loss
-            ref_loss = nn.LinearCrossEntropyLoss(*module_args, **native_module_kwargs)
-            ref_input = input.clone().detach().requires_grad_(True)
+            self.assertEqual(loss.linear.weight, ref_loss.linear.weight.to(dtype))
+
+            ref_input = input.clone().detach()
+            if dtype != ref_dtype:
+                ref_loss = ref_loss.to(ref_dtype)
+                ref_input = ref_input.to(ref_dtype)
+            ref_input.requires_grad_(True)
 
             out = loss(input, target)
             ref_out = ref_loss(ref_input, target)
 
-            self.assertEqual(out, ref_out)
+            max_ulp_diff = diff_ulp(out, ref_out.to(dtype)).max().item()
+            ulp.append(max_ulp_diff)
+            errors.append((out - ref_out.to(dtype)).abs())
 
-            if (module_kwargs.get('options', F.LinearCrossEntropyOptions()).grad_inplace) or dtype != torch.float64:
+            if dtype in {torch.float16, torch.bfloat16}:
+                self.assertEqual(out, ref_out.to(dtype), atol=0.02, rtol=0.002)
+            else:
+                self.assertEqual(out, ref_out.to(dtype))
+
+            if options.grad_inplace or dtype != torch.float64:
                 # checking backward directly because gradcheck may
-                # fail when grad_inplace=True or dtype is not float64
+                # fail when grad_inplace=True or when dtype is not
+                # float64
                 out.sum().backward()
                 ref_out.sum().backward()
 
-                self.assertEqual(input.grad, ref_input.grad)
-                self.assertEqual(loss.linear.weight.grad, ref_loss.linear.weight.grad)
+                max_ulp_diff = diff_ulp(input.grad, ref_input.grad.to(dtype)).max().item()
+                err = grad_error(input.grad, ref_input.grad.to(dtype))
+                self.assertTrue(err < feps or max_ulp_diff < {torch.float16: 14}.get(dtype, 3))
+                grad_errors1.append(err)
+                grad_ulp1.append(max_ulp_diff)
+
+                max_ulp_diff = diff_ulp(loss.linear.weight.grad, ref_loss.linear.weight.grad.to(dtype)).max().item()
+                err = grad_error(loss.linear.weight.grad, ref_loss.linear.weight.grad.to(dtype))
+                if 0:
+                    self.assertTrue(err < feps or max_ulp_diff < {torch.float16: 14}.get(dtype, 3))
+                grad_errors2.append(err)
+                grad_ulp2.append(max_ulp_diff)
             else:
                 torch.autograd.gradcheck(ref_loss, (ref_input, target))
+        print(f'\n{acc_policy=}')
+        print(f'mean/max(errors)={sum(errors)/len(errors):.2e}/{max(errors):.2e} {max(ulp)=}')
+        print(f'mean/max(grad_errors1)={sum(grad_errors1)/len(grad_errors1):.2e}/{max(grad_errors1):.2e} {max(grad_ulp1)=}')
+        print(f'mean/max(grad_errors2)={sum(grad_errors2)/len(grad_errors2):.2e}/{max(grad_errors2):.2e} {max(grad_ulp2)=}')
+
+    def test_linear_cross_entropy_loss_default(self):
+        self._test_linear_cross_entropy_loss(device='cpu', dtype=torch.float32, acc_dtype=None)
+        # self._test_linear_cross_entropy_loss(device='cpu', dtype=torch.float16, acc_dtype=None)
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
+    def test_linear_cross_entropy_loss_with_acc_dtype(self):
+        import itertools
+        all_acc_policies = [''.join(p) for p in itertools.product('AT', repeat=5)]
+        for acc_policy in all_acc_policies:
+            if acc_policy not in {'TATAA', 'TAAAA', 'AATAA', 'AAAAA'}:
+                continue
+            self._test_linear_cross_entropy_loss(device='cuda', dtype=torch.float16, acc_policy=acc_policy,
+                                                 acc_dtype=torch.float32)
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA not available")
     def test_convert_sync_batchnorm(self):
@@ -10604,13 +10698,21 @@ class TestNNDeviceType(NNTestCase):
 
     @parametrize_test("antialias", [True, False])
     @parametrize_test("align_corners", [True, False])
-    @parametrize_test("mode", ["bilinear", "bicubic"])
+    @parametrize_test("mode", ["bilinear", "bicubic", "lanczos"])
     @parametrize_test("memory_format", [torch.contiguous_format, torch.channels_last])
     @expectedFailureMPS  # double device type
     @onlyNativeDeviceTypes
     def test_upsamplingBiMode2d(self, device, antialias, align_corners, mode, memory_format):
         # Forward AD does not support XLA because XLA tensors don't have storage
         check_forward_ad = torch.device(device).type != 'xla'
+
+        if mode == "lanczos":
+            if torch.device(device).type != "cpu":
+                raise SkipTest("Lanczos mode is only supported on CPU")
+            if not antialias:
+                raise SkipTest("Lanczos mode requires antialias=True")
+            if align_corners:
+                raise SkipTest("Lanczos mode does not support align_corners=True")
 
         kwargs = dict(mode=mode, align_corners=align_corners, antialias=antialias)
         # test float scale factor up & downsampling
@@ -10674,7 +10776,7 @@ class TestNNDeviceType(NNTestCase):
 
     @parametrize_test("antialias", [True, False])
     @parametrize_test("num_channels", [3, 5])
-    @parametrize_test("mode", ["nearest", "nearest-exact", "bilinear", "bicubic"])
+    @parametrize_test("mode", ["nearest", "nearest-exact", "bilinear", "bicubic", "lanczos"])
     @parametrize_test("dtype", integral_types() + floating_types())
     @skipIfMPS  # Error message is wrong for some dtypes
     @onlyNativeDeviceTypes
@@ -10687,6 +10789,14 @@ class TestNNDeviceType(NNTestCase):
             if antialias:
                 raise SkipTest("Nearest mode does not have antialiasing")
             if dtype in (torch.uint8, ) + floating_types():
+                should_raise_runtime_error = False
+
+        elif mode == "lanczos":
+            if torch.device(device).type != "cpu":
+                raise SkipTest("Lanczos mode is only supported on CPU")
+            if not antialias:
+                raise SkipTest("Lanczos mode requires antialias=True")
+            if dtype in floating_types() or (device == "cpu" and dtype == torch.uint8):
                 should_raise_runtime_error = False
 
         elif mode in ("bilinear", "bicubic"):
@@ -10722,7 +10832,7 @@ class TestNNDeviceType(NNTestCase):
     # Partially passes. NotImplementedError: aten::upsample_bicubic2d.out https://github.com/pytorch/pytorch/issues/77764
     @skipIfMPS
     @parametrize_test("memory_format", [torch.contiguous_format, torch.channels_last])
-    @parametrize_test("mode", ["bilinear", "bicubic"])
+    @parametrize_test("mode", ["bilinear", "bicubic", "lanczos"])
     @parametrize_test("antialias", [True, False])
     @parametrize_test("align_corners", [True, False])
     @parametrize_test("num_channels", [3, 5])
@@ -10747,13 +10857,19 @@ class TestNNDeviceType(NNTestCase):
         if torch.device(device).type == "cuda":
             raise SkipTest("CUDA implementation is not yet supporting uint8")
 
+        if mode == "lanczos":
+            if not antialias:
+                raise SkipTest("Lanczos mode requires antialias=True")
+            if align_corners:
+                raise SkipTest("Lanczos mode does not support align_corners=True")
+
         torch.manual_seed(0)
 
-        # - input range is set to [30, 220] for bicubic mode, because the bicubic kernel may create
-        #   [intermediate] values outside of the [0, 255] range, which need
-        #   to be clipped in uint8 path, but not in float path. This isn't
-        #   an issue with bilinear kernel.
-        input_range = (30, 220) if mode == "bicubic" else (0, 256)
+        # - input range is set to [30, 220] for bicubic and lanczos modes,
+        #   because these kernels may create [intermediate] values outside of
+        #   the [0, 255] range, which need to be clipped in uint8 path, but
+        #   not in float path. This isn't an issue with bilinear kernel.
+        input_range = (30, 220) if mode in ("bicubic", "lanczos") else (0, 256)
         input_ui8 = torch.randint(*input_range, size=(batch_size, num_channels, 400, 400), dtype=torch.uint8, device=device)
         input_ui8 = input_ui8.contiguous(memory_format=memory_format)
 
@@ -10791,6 +10907,7 @@ class TestNNDeviceType(NNTestCase):
         if mode == "bilinear":
             torch.testing.assert_close(output_f32, output_ui8.float(), rtol=0, atol=1)
         else:
+            # bicubic and lanczos
             diff = (output_f32 - output_ui8.float()).abs()
             self.assertLess(diff.max(), 15)
 
@@ -10858,6 +10975,50 @@ class TestNNDeviceType(NNTestCase):
         ], device=device, dtype=t_in.dtype).reshape(1, 3, 2, 2)
         t_out = F.interpolate(t_in, size=(2, 2), mode="bicubic", align_corners=False, antialias=True)
         self.assertEqual(expected_out, t_out)
+
+    @onlyCPU
+    @parametrize_test("memory_format", [torch.contiguous_format, torch.channels_last])
+    def test_upsamplingLanczos2d_aa_correctness(self, device, memory_format):
+        t_in = torch.arange(3 * 8 * 8, dtype=torch.float, device=device).reshape(1, 3, 8, 8)
+        t_in = t_in.contiguous(memory_format=memory_format)
+        # This expected result is obtained using PIL.Image.resize
+        # for c in range(3):
+        #   a_in = t_in.numpy()[0, c, ...]
+        #   pil_in = Image.fromarray(a_in)
+        #   pil_out = pil_in.resize((2, 2), resample=Image.LANCZOS)
+        expected_out = torch.tensor([
+            14.267621, 18.097038, 44.902962, 48.732376, 78.267616, 82.097038,
+            108.902962, 112.732384, 142.267624, 146.097031, 172.902969, 176.732376
+        ], device=device, dtype=t_in.dtype).reshape(1, 3, 2, 2)
+        t_out = F.interpolate(t_in, size=(2, 2), mode="lanczos", align_corners=False, antialias=True)
+        self.assertEqual(expected_out, t_out)
+
+    @onlyCPU
+    def test_upsamplingLanczos2d_errors(self, device):
+        # 3D input (1D spatial) not supported
+        x_3d = torch.randn(1, 3, 8, device=device)
+        with self.assertRaisesRegex(ValueError, "4-D tensor"):
+            F.interpolate(x_3d, size=(4,), mode="lanczos", antialias=True)
+
+        # 5D input (3D spatial) not supported
+        x_5d = torch.randn(1, 3, 8, 8, 8, device=device)
+        with self.assertRaisesRegex(ValueError, "4-D tensor"):
+            F.interpolate(x_5d, size=(4, 4, 4), mode="lanczos", antialias=True)
+
+        # antialias=False not supported
+        x_4d = torch.randn(1, 3, 8, 8, device=device)
+        with self.assertRaisesRegex(ValueError, "antialias=True"):
+            F.interpolate(x_4d, size=(4, 4), mode="lanczos", antialias=False)
+
+        # align_corners=True not supported
+        with self.assertRaisesRegex(ValueError, "align_corners=True"):
+            F.interpolate(x_4d, size=(4, 4), mode="lanczos", align_corners=True, antialias=True)
+
+    @onlyCPU
+    def test_upsamplingLanczos2d_identity(self, device):
+        x = torch.randn(1, 3, 8, 8, device=device)
+        out = F.interpolate(x, size=(8, 8), mode="lanczos", align_corners=False, antialias=True)
+        self.assertEqual(x, out)
 
     @onlyCUDA
     def test_upsamplingBicubic2d_many_channels(self, device):
