@@ -385,6 +385,7 @@ def compute_global_tensor_shape(
 
     if isinstance(placements[0], Replicate):
         return shape
+    # NOTE: isinstance(_, Shard) does not match _StridedShard; see is_shard_like().
     elif isinstance(placements[0], Shard):
 
         @maybe_run_for_local_tensor
