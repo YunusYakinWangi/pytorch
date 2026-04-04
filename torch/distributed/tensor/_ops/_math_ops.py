@@ -224,7 +224,6 @@ def map_placements_after_reduction(
                 # (i.e. for the case where keepdims=True), we generate partial
                 new_placements.append(get_placement_from_reduction_op(reduction_op))
             else:
-                # Check _StridedShard before Shard: _StridedShard subclasses Shard
                 if isinstance(placement, _StridedShard):
                     new_placements.append(
                         _StridedShard(
