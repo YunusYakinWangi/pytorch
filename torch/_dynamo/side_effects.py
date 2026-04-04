@@ -832,6 +832,13 @@ class SideEffects:
                 # Namedtuples/structseqs have their own reconstruct() that
                 # handles the specific calling convention (_make vs direct call)
                 # rather than the generic __new__ + init_args pattern.
+                #
+                # Only reconstruct here if there are pending mutations that
+                # codegen_update_mutated needs to replay. Otherwise, let
+                # restore_stack handle reconstruction with the correct
+                # value_from_source setting (needed for export).
+                if not self.has_pending_mutation(var):
+                    continue
                 var.reconstruct(cg)
                 cg.add_cache(var)
                 var.source = TempLocalSource(cg.tempvars[var])
