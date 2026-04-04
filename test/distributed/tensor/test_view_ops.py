@@ -2291,6 +2291,28 @@ class TestViewOps(DTensorContinuousTestBase):
         expected_grad = torch.ones_like(full.flatten(0, 1))
         self.assertEqual(dt_flat.grad.full_tensor(), expected_grad)
 
+    def test_unpack_hook_tp_with_strided_shard(self):
+        """_unpack_hook_tp must redistribute _StridedShard to Replicate.
+
+        _unpack_hook_tp restores activations before recomputation in BWD.
+        If it only checks .is_shard() it misses _StridedShard, returning the
+        tensor still sharded and producing wrong gradients.
+        """
+        from torch.distributed.tensor.parallel.input_reshard import _unpack_hook_tp
+
+        mesh = init_device_mesh(self.device_type, (self.world_size,))
+        shape = (4, self.world_size * 2, 6)
+        full = torch.randn(*shape, device=self.device_type)
+        dt = distribute_tensor(full, mesh, [Shard(1)])
+        dt_flat = dt.flatten(0, 1)
+
+        self.assertIsInstance(dt_flat.placements[0], _StridedShard)
+
+        result = _unpack_hook_tp(mesh, 0, dt_flat)
+        self.assertIsInstance(result, DTensor)
+        self.assertTrue(result.placements[0].is_replicate())
+        self.assertEqual(result.full_tensor(), full.flatten(0, 1))
+
     def test_view_redistribution(self):
         """
         This test is added to demonstrate "incorrect" view ops behavior if redistribution happens.

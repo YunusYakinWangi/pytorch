@@ -214,9 +214,11 @@ def _scaled_mm_scale_placement(
             return None
         return _ShardingPlaceholder(0)
     elif is_shard_like(data_placement):
+        # Currently only called with base strategy placements (never
+        # _StridedShard), but use is_shard_like for consistency so this
+        # stays correct if the call site ever passes actual input placements.
         if data_placement.dim == contracting_dim:
             return None
-        # Scale is 1D so strided sharding doesn't apply; plain Shard suffices.
         return Shard(0)
     elif isinstance(data_placement, (Replicate, Partial)):
         return Replicate()
