@@ -608,7 +608,7 @@ class DTensorSpec:
     def num_shards(self) -> int:
         num_shards = 1
         for i, placement in enumerate(self.placements):
-            if placement.is_shard():
+            if placement.is_shard() or isinstance(placement, _StridedShard):
                 num_shards *= self.mesh.size(i)
         return num_shards
 
@@ -644,8 +644,8 @@ class DTensorSpec:
         # and int >=0 represent shard on that device mesh dim
         r = [-1] * self.ndim
         for i, placement in enumerate(self.placements):
-            if placement.is_shard():
-                shard_dim = cast(Shard, placement).dim
+            if isinstance(placement, Shard | _StridedShard):
+                shard_dim = placement.dim
                 if r[shard_dim] > -1:
                     raise ValueError(
                         f"Tensor dim {shard_dim} is already sharded on mesh dim {r[shard_dim]},"
@@ -672,9 +672,8 @@ class DTensorSpec:
         """
         r = [1] * self.ndim
         for i, placement in enumerate(self.placements):
-            if placement.is_shard():
-                shard_dim = cast(Shard, placement).dim
-                r[shard_dim] *= self.mesh.size(i)
+            if isinstance(placement, Shard | _StridedShard):
+                r[placement.dim] *= self.mesh.size(i)
 
         return r
 

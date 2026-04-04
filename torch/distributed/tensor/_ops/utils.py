@@ -257,6 +257,9 @@ def is_tensor_evenly_shardable_on_dim(
         if isinstance(placement, Shard | _StridedShard) and placement.dim == dim:
             num_shards *= spec.mesh.size(i)
             if isinstance(placement, _StridedShard):
+                # _StridedShard._split_tensor first chunks into split_factor
+                # groups, then into num_shards within each group, so the dim
+                # must be divisible by the product of both.
                 if shape[dim] % (placement.split_factor * num_shards) != 0:
                     return False
 

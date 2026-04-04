@@ -212,7 +212,7 @@ def _scaled_mm_scale_placement(
         if data_placement.dim == contracting_dim:
             return None
         return _ShardingPlaceholder(0)
-    elif isinstance(data_placement, Shard):
+    elif isinstance(data_placement, Shard | _StridedShard):
         if data_placement.dim == contracting_dim:
             return None
         return Shard(0)
