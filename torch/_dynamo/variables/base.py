@@ -602,6 +602,10 @@ class VariableTracker(metaclass=VariableTrackerMeta):
             from .object_protocol import generic_getiter
 
             return generic_getiter(tx, self)
+        elif name == "__next__" and not args and not kwargs:
+            from .object_protocol import generic_iternext
+
+            return generic_iternext(tx, self)
         elif name == "__contains__" and not kwargs:
             from .object_protocol import generic_contains
 
