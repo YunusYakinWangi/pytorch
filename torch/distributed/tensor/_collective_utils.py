@@ -407,6 +407,9 @@ def _compute_placement_transition_cost(
             target_placement, _StridedShard
         ):
             return float("inf"), comm_bytes_gb
+        # Note: _StridedShard -> _StridedShard with different split_factor also
+        # lands here; the +1.0 penalty steers the optimizer toward the two-hop
+        # allgather path (-> Replicate -> target), which handles it correctly.
         # should be alltoall comm, since we haven't implement it yet, add 1.0 as penalty
         # to favor allgather instead
         # TODO: add alltoall_cost

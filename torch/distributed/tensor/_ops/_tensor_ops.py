@@ -738,6 +738,8 @@ def _derive_follow_placements_from_tuple_strategy(
         # check each placement for the current arg placement
         # to see if we want to merge/adjust the placement to follow
         # the priority: Partial -> Shard -> Replicate
+        # _StridedShard.__eq__ compares both dim and split_factor,
+        # so two _StridedShard with different split_factor won't match here.
         if cur_placement == new_placement:
             return cur_placement
 

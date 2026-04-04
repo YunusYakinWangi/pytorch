@@ -722,7 +722,7 @@ class DTensorSpec:
         for i, m in enumerate(dim_map):
             if m >= 0:
                 placement = placements[m]
-                if placement.is_shard():  # only Shard possible here (built above)
+                if placement.is_shard():  # dim_map only produces Shard placements
                     placement = cast(Shard, placement)
                     raise RuntimeError(
                         f"DeviceMesh dimension can't be mapped to two dimension of the same tensor: {i} and {placement.dim}"
