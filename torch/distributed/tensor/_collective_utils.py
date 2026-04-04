@@ -536,6 +536,12 @@ def redistribute_cost(
     # shard_order is None for _StridedShard specs (expected) and for truly
     # unsupported configurations.  Only bail out when neither spec contains
     # _StridedShard — those are the truly unsupported cases.
+    #
+    # Falling through with shard_order=None is safe: _gen_transform_infos
+    # doesn't depend on shard_order — it detects _StridedShard placements
+    # directly and routes to the graph-based transform planner (with a
+    # greedy fallback). shard_order is only used in the early-exit equality
+    # check below (line "current_spec.placements == target_spec.placements").
     from torch.distributed.tensor.placement_types import _StridedShard
 
     if current_spec.shard_order is None or target_spec.shard_order is None:
