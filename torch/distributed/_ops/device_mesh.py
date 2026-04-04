@@ -95,7 +95,9 @@ def _get_submesh_impl(mesh: DeviceMesh, mesh_dims: list[int]) -> DeviceMesh:
     return mesh[dim_names]
 
 
-_get_submesh_cache: dict[tuple[int, tuple[int, ...]], tuple["DeviceMesh", "DeviceMesh"]] = {}
+_get_submesh_cache: dict[
+    tuple[int, tuple[int, ...]], tuple["DeviceMesh", "DeviceMesh"]
+] = {}
 
 
 @torch.library.custom_op("device_mesh::_get_submesh", mutates_args=())
