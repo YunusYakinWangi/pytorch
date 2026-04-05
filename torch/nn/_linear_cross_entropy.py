@@ -167,20 +167,16 @@ def linear_cross_entropy_batch_chunking_cls(
 
     tmp = torch.empty(tmp_shape, device=device, dtype=dtypes["G"], requires_grad=False)
     if tmp_shape:
-        GX = (
-            torch.narrow(
-                tmp, 0, 0, batch_chunk_size // GX_factor if compute_input_grad else 0
-            )
-            .view(dtypes["GX"])
-            .view((batch_chunk_size, in_features))
-        )
-        GL = (
-            torch.narrow(
-                tmp, 0, 0, num_classes // GL_factor if compute_linear_weight_grad else 0
-            )
-            .view(dtypes["GL"])
-            .view((num_classes, in_features))
-        )
+        GX = torch.narrow(
+            tmp, 0, 0, batch_chunk_size // GX_factor if compute_input_grad else 0
+        ).view(dtypes["GX"])
+        GL = torch.narrow(
+            tmp, 0, 0, num_classes // GL_factor if compute_linear_weight_grad else 0
+        ).view(dtypes["GL"])
+        if compute_input_grad:
+            GX = GX.view((batch_chunk_size, in_features))
+        if compute_linear_weight_grad:
+            GL = GL.view((num_classes, in_features))
     else:
         GX = GL = tmp
 
