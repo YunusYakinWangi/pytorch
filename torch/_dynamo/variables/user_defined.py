@@ -284,9 +284,11 @@ class UserDefinedClassVariable(UserDefinedVariable):
 
     @staticmethod
     def is_supported_new_method(value: object) -> bool:
-        # TODO(anijain2305) - Extend this to support objects with default tp_new
-        # functions.
-        return value in UserDefinedClassVariable.supported_c_new_functions()
+        if value in UserDefinedClassVariable.supported_c_new_functions():
+            return True
+        # Structseq types each define their own C tp_new.
+        owner = getattr(value, "__self__", None)
+        return isinstance(owner, type) and is_structseq_class(owner)
 
     def can_constant_fold_through(self) -> bool:
         if self.value in self._constant_fold_classes():
@@ -982,8 +984,6 @@ class UserDefinedClassVariable(UserDefinedVariable):
                 kwargs,
             )
         elif is_namedtuple_cls(self.value):
-            fields = namedtuple_fields(self.value)  # type: ignore[arg-type]
-            # check if this is a structseq or a real namedtuple
             if is_structseq_class(self.value):
                 if kwargs or len(args) != 1:
                     raise_args_mismatch(
@@ -992,53 +992,26 @@ class UserDefinedClassVariable(UserDefinedVariable):
                         "1 args and 0 kwargs",
                         f"{len(args)} args and {len(kwargs)} kwargs",
                     )
-                items = args[0].force_unpack_var_sequence(tx)
+                # Structseq tp_new is a C function, so we can't trace into
+                # it like namedtuples. Use track_new_user_defined_object
+                # directly with self as both base_cls_vt and cls_vt.
+                return tx.output.side_effects.track_new_user_defined_object(
+                    self,
+                    self,
+                    list(args),
+                )
             else:
-                field_defaults = self.value._field_defaults  # type: ignore[attr-defined]
-
-                items = list(args)
-                # pyrefly: ignore[bad-argument-type]
-                items.extend([None] * (len(fields) - len(items)))
-
-                var_tracker_kwargs: dict[str, VariableTracker] = {}
-                for field_name, var_tracker in zip(fields, items):
-                    if var_tracker is None:
-                        if field_name in kwargs:
-                            field_var = kwargs[field_name]
-                        else:
-                            assert field_name in field_defaults
-                            field_var = VariableTracker.build(
-                                tx, field_defaults[field_name]
-                            )
-                        var_tracker_kwargs[field_name] = field_var
-
-                for name, value in var_tracker_kwargs.items():
-                    assert name in fields
-                    items[fields.index(name)] = value  # type: ignore[call-overload]
-
-                assert all(x is not None for x in items)
-
-            from .base import AttributeMutationNew
-            from .lists import TupleVariable
-
-            tuple_cls = self.value
-            vt_cls = UserDefinedTupleVariable.get_vt_cls(tuple_cls)
-            if vt_cls is StructSequenceVariable:
-                dummy_value = tuple_cls(items)  # pyrefly: ignore[bad-argument-count]
-                base_cls_vt = self
-            else:
-                dummy_value = tuple_cls(*items)  # type: ignore[arg-type]
-                base_cls_vt = SourcelessBuilder.create(tx, tuple)
-            tuple_vt = TupleVariable(items, mutation_type=ValueMutationNew())
-            result = vt_cls(
-                dummy_value,
-                tuple_vt=tuple_vt,
-                base_cls_vt=base_cls_vt,
-                init_args=[tuple_vt],
-                mutation_type=AttributeMutationNew(self.source),
-            )
-            tx.output.side_effects.register_new(dummy_value, result)
-            return result
+                # Namedtuple __new__ is a Python function that calls
+                # tuple.__new__(cls, (field_values,)). Let Dynamo trace
+                # into it so default values and kwargs are handled by
+                # the generated __new__ itself.
+                return tx.inline_user_function_return(
+                    VariableTracker.build(
+                        tx, polyfills.instantiate_user_defined_class_object
+                    ),
+                    [self, *args],
+                    kwargs,
+                )
         elif self.value is torch.Size:
             # This simulates `THPSize_pynew`, the C impl for `Size.__new__`.
             from .lists import SizeVariable

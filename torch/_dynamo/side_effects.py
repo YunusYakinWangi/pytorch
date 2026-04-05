@@ -37,6 +37,7 @@ import torch
 import torch.nn
 from torch._dynamo.variables.misc import AutogradFunctionContextVariable
 from torch.utils._ordered_set import OrderedSet
+from torch.utils._pytree import is_structseq_class
 
 from . import config, graph_break_hints, utils, variables
 from .bytecode_transformation import (
@@ -500,12 +501,9 @@ class SideEffects:
             mutation_type=AttributeMutationNew(cls_source),
             **options,
         )
-        self.register_new(obj, variable)
-        return variable
-
-    def register_new(self, obj: Any, variable: VariableTracker) -> None:
         self.id_to_variable[id(obj)] = variable
         self.keepalive.append(obj)
+        return variable
 
     def get_variable_cls(self, user_cls: type) -> type:
         from torch.overrides import TorchFunctionMode
@@ -574,14 +572,12 @@ class SideEffects:
             assert variables.UserDefinedClassVariable.is_supported_new_method(
                 base_cls.__new__
             )
-            # TODO(anijain2305) - Consider adding get_example_value method to
-            # each VT to get an example value for all args. As we expand the
-            # scope to other __new__ methods, we might need to call __new__ with
-            # init_args (like functools.partial)
-            # init_args = [arg.get_example_value() for arg in init_args]
-            # obj = base_cls.__new__(user_cls, *init_args)
-
-            obj = base_cls.__new__(user_cls)
+            if is_structseq_class(user_cls):
+                # Structseq tp_new requires a sequence argument and rejects
+                # tuple.__new__, so create a dummy with None placeholders.
+                obj = user_cls([None] * user_cls.n_fields)
+            else:
+                obj = base_cls.__new__(user_cls)
         return obj
 
     def track_new_user_defined_object(
