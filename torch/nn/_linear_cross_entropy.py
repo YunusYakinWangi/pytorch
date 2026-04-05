@@ -106,7 +106,9 @@ def linear_cross_entropy_batch_chunking_cls(
             grad_input=m[acc_policy[1]],
             grad_linear_weight=m[acc_policy[2]],
             X=m[acc_policy[3]],
-            G=m[acc_policy[4]],
+            G=m[min(acc_policy[4:])],
+            GX=m[acc_policy[4]],
+            GL=m[acc_policy[-1]],
         )
     else:
         dtypes = dict(
@@ -115,6 +117,8 @@ def linear_cross_entropy_batch_chunking_cls(
             grad_linear_weight=dtype,
             X=dtype,
             G=dtype,
+            GX=dtype,
+            GL=dtype,
         )
 
     # A chunk buffer used to hold logits, softmax of logits:
@@ -146,20 +150,37 @@ def linear_cross_entropy_batch_chunking_cls(
         requires_grad=False,
     )
 
+    GX_factor = dtypes["G"].itemsize // dtypes["GX"].itemsize
+    GL_factor = dtypes["G"].itemsize // dtypes["GL"].itemsize
     # A chunk buffer used in grad_linear_weight computation:
     if compute_input_grad and compute_linear_weight_grad:
-        tmp_shape = (max(num_classes, batch_chunk_size), in_features)
+        tmp_shape = (
+            max(num_classes // GL_factor, batch_chunk_size // GX_factor),
+            in_features,
+        )
     elif compute_input_grad:
-        tmp_shape = (batch_chunk_size, in_features)
+        tmp_shape = (batch_chunk_size // GX_factor, in_features)
     elif compute_linear_weight_grad:
-        tmp_shape = (num_classes, in_features)
+        tmp_shape = (num_classes // GL_factor, in_features)
     else:
         tmp_shape = ()
 
     tmp = torch.empty(tmp_shape, device=device, dtype=dtypes["G"], requires_grad=False)
     if tmp_shape:
-        GX = torch.narrow(tmp, 0, 0, batch_chunk_size if compute_input_grad else 0)
-        GL = torch.narrow(tmp, 0, 0, num_classes if compute_linear_weight_grad else 0)
+        GX = (
+            torch.narrow(
+                tmp, 0, 0, batch_chunk_size // GX_factor if compute_input_grad else 0
+            )
+            .view(dtypes["GX"])
+            .view((batch_chunk_size, in_features))
+        )
+        GL = (
+            torch.narrow(
+                tmp, 0, 0, num_classes // GL_factor if compute_linear_weight_grad else 0
+            )
+            .view(dtypes["GL"])
+            .view((num_classes, in_features))
+        )
     else:
         GX = GL = tmp
 
@@ -179,7 +200,6 @@ def linear_cross_entropy_batch_chunking_cls(
         neg_weight_t = neg_weight_target.narrow(0, bchunk_start, bchunk_size)
         neg_weight_t_ = neg_weight_t.to(X.dtype)
         X_ = ensure_size(X, 0, bchunk_size)
-
         # Compute output.
 
         if use_acc_dtype:
@@ -208,10 +228,11 @@ def linear_cross_entropy_batch_chunking_cls(
             if compute_input_grad:
                 grad_x = grad_input.narrow(0, bchunk_start, bchunk_size)
                 if use_acc_dtype:
+                    GX_ = ensure_size(GX, 0, bchunk_size)
                     if X_.dtype != GX.dtype:
-                        GX[:] = torch.mm(X_, linear_weight_)
+                        GX_[:] = torch.mm(X_, linear_weight_)
                     else:
-                        torch.mm(X_, linear_weight_, GX.dtype, out=GX)
+                        torch.mm(X_, linear_weight_, GX_.dtype, out=GX_)
                     if grad_x.dtype == dtype:
                         # addcmul+sub_ and sub_+addcmul lead to different results!
                         # TODO: use the order with better accuracy
@@ -221,7 +242,7 @@ def linear_cross_entropy_batch_chunking_cls(
                             neg_weight_t.unsqueeze(1),
                             out=grad_x,
                         )
-                        grad_x.sub_(GX)
+                        grad_x.sub_(GX_)
                     else:
                         # no accuracy difference between addcmul+sub_ and sub_+addcmul
                         torch.addcmul(
@@ -230,7 +251,7 @@ def linear_cross_entropy_batch_chunking_cls(
                             neg_weight_t_.unsqueeze(1),
                             out=grad_x,
                         )
-                        grad_x.sub_(GX)
+                        grad_x.sub_(GX_)
                 else:
                     torch.addcmul(
                         grad_x,
@@ -274,7 +295,7 @@ def linear_cross_entropy_batch_chunking_cls(
                             GL.index_add_(0, t, x_, alpha=-1)
                     else:
                         GL.index_add_(0, t, x_ * neg_weight_t_.unsqueeze(1), alpha=-1)
-                    grad_linear_weight.narrow(1, 0, in_features).sub_(GL)
+                    grad_linear_weight.sub_(GL)
 
     return output.to(dtype), grad_input.to(dtype), grad_linear_weight.to(dtype)
 

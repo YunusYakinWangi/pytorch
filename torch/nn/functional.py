@@ -3680,29 +3680,32 @@ class LinearCrossEntropyOptions:
         `<https://github.com/linkedin/Liger-Kernel>`__ for computing
         the batch chunk size. Specified ``batch_chunk_size`` will be
         overridden.
+    - "liger:<factor>" - same as "liger" with initial
+        ``batch_chunk_size`` multiplied by ``2 ** factor``. If
+        ``factor == -1`` and ``acc_policy == "TTTTTA"``, the memory
+        usage will be comparable to one when using Liger-Kernel.
     """
 
-    acc_policy: str = "TATAA"
+    acc_policy: str = "TTTTTA"
     """Define a finer control of using acc_dtype in internal variables.
 
-    acc_policy must be a string with length 5 and it must contain only
+    acc_policy must be a string with length 6 and it must contain only
     characters 'T' or 'A' that encode the usage of dtype or acc_dtype,
-    respectively. The 5 characters in the acc_policy value correspond
+    respectively. The 6 characters in the acc_policy value correspond
     to the following internal variables:
     - output - accumulator of operator output
     - grad_input - accumulator of input gradients
     - grad_linear_weight - accumulator of linear_weight gradients
     - X - a workspace for softmax computations
-    - G - a workspace for grad_input and grad_linear_weight computations
+    - GX - a workspace for grad_input computations
+    - GL - a workspace for grad_linear_weight computations
 
-    For instance, acc_policy == "AATAA" means that all internal
+    For instance, acc_policy == "AATAAA" means that all internal
     variables except grad_linear_weight use acc_dtype dtype while the
     latter uses dtype.
 
-    A set of acc_policy values that lead to a high accuracy of
-    results: TATAA, TAAAA, AATAA, AAAAA.
-
-    Warning: this is an experimental feature that may change in future.
+    Warning: this is an experimental feature that may change or be
+    removed in future.
     """
 
     acc_dtype: torch.dtype | None = None
@@ -3722,15 +3725,28 @@ class LinearCrossEntropyOptions:
             batch_chunk_size = min(self.batch_chunk_size, num_batches)
 
         if self.chunking_method is not None:
-            if self.chunking_method == "liger":
-                # Heuristics used in liger_kernel.transformers.LigerFusedLinearCrossEntropyLoss:
-                #   next_pow_of_2(cdiv(num_batches, cdiv(num_classes, in_features)))
+            if self.chunking_method.startswith("liger"):
+                # A modified heuristics used in
+                # liger_kernel.transformers.LigerFusedLinearCrossEntropyLoss:
+                #
+                #   next_pow_of_2(cdiv(num_batches, cdiv(num_classes, in_features))) * 2 ** factor
+                #
+                # where factor is integer.
+                if ":" in self.chunking_method:
+                    factor = int(self.chunking_method.split(":", 1)[1])
+                else:
+                    factor = 0
                 batch_chunk_size = (
                     1
                     << (
                         -(num_batches // (num_classes // -in_features)) - 1
                     ).bit_length()
                 )
+                if factor < 0:
+                    batch_chunk_size //= 2**-factor
+                else:
+                    batch_chunk_size *= 2**factor
+
                 if (
                     self.batch_chunk_size is not None
                     and self.batch_chunk_size != batch_chunk_size
