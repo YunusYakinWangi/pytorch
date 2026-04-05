@@ -360,13 +360,13 @@ class TestFullyShard1DTrainingCore(FSDPTest):
         """
         self.run_subtests(
             {
-                "reshard_after_forward": [2],
+                "reshard_after_forward": [True, False, 2],
                 "test_device_type": [device_type.type],
                 "offload_policy": [OffloadPolicy()],
-                "delay_after_forward": [False],
-                "delay_before_all_gather": [False],
-                "delay_before_reduce_scatter": [False],
-                "delay_before_optim": [False],
+                "delay_after_forward": [False, True],
+                "delay_before_all_gather": [False, True],
+                "delay_before_reduce_scatter": [False, True],
+                "delay_before_optim": [False, True],
                 "unshard_async_op": [False],
             },
             self._test_train_parity_multi_group,
