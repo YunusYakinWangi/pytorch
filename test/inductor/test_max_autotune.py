@@ -906,7 +906,7 @@ class TestMaxAutotune(TestCase):
         a = a.repeat(8, 8)
         b = b.repeat(8, 8)
 
-        torch._dynamo.mark_dynamic(a, 0)
+        torch._dynamo.maybe_mark_dynamic(a, 0)
 
         with config.patch(
             {
