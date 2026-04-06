@@ -861,15 +861,14 @@ class SideEffects:
                 cg.add_cache(var)
                 var.source = TempLocalSource(cg.tempvars[var])
 
-                # For frozen dataclasses (and other objects with custom
-                # __setattr__), we must emit object.__setattr__ immediately
-                # after __new__ — before any other code can access the object.
-                # The suffix-based codegen in codegen_update_mutated runs too
-                # late: if intervening code calls __repr__ (e.g. f-strings),
-                # the attributes won't be set yet.
+                # For frozen dataclasses, we must emit object.__setattr__
+                # immediately after __new__ — before any other code can
+                # access the object.  The suffix-based codegen in
+                # codegen_update_mutated runs too late: if intervening code
+                # calls __repr__ (e.g. f-strings), the attributes won't be
+                # set yet.
                 if (
-                    isinstance(var, variables.UserDefinedObjectVariable)
-                    and var.needs_slow_setattr()
+                    isinstance(var, variables.FrozenDataClassVariable)
                     and var in self.store_attr_mutations
                 ):
                     for name, value in self.store_attr_mutations[var].items():
@@ -1206,13 +1205,11 @@ class SideEffects:
                     _maybe_log_side_effect(var)
 
             elif self.is_attribute_mutation(var):
-                # AttributeMutationNew objects with needs_slow_setattr() had
-                # their attributes emitted in codegen_save_tempvars right after
-                # __new__. Skip the suffix here to avoid double-emitting.
-                if (
-                    isinstance(var.mutation_type, AttributeMutationNew)
-                    and isinstance(var, variables.UserDefinedObjectVariable)
-                    and var.needs_slow_setattr()
+                # FrozenDataClassVariable attributes were emitted in
+                # codegen_save_tempvars right after __new__. Skip here to
+                # avoid double-emitting.
+                if isinstance(var.mutation_type, AttributeMutationNew) and isinstance(
+                    var, variables.FrozenDataClassVariable
                 ):
                     continue
 
