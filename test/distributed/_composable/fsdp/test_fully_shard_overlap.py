@@ -9,7 +9,7 @@ from collections.abc import Callable
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-from torch.distributed.fsdp import fully_shard
+from torch.distributed.fsdp import CPUOffloadPolicy, fully_shard
 from torch.distributed.fsdp._fully_shard._fsdp_common import (
     FSDPMeshInfo,
     ShardPlacementResult,
@@ -506,6 +506,70 @@ class TestFullyShardPerParamMeshOverlap(FSDPTest):
             f"FSDP/replicate ratio {fsdp_time / rep_time:.2f} >= 1.5; "
             f"per-group RS state may not be preventing cross-group stalls",
         )
+
+
+class TestFullyShardCPUOffloadOverlap(FSDPTest):
+    @property
+    def world_size(self) -> int:
+        return 1
+
+    @skip_if_lt_x_gpu(1)
+    @unittest.skipIf(TEST_HPU, "Not supported on HPU")
+    def test_cpu_offload_h2d_prefetch_overlap(self):
+        """Verify that H2D copies for CPU-offloaded params overlap with
+        compute in the world_size=1 code path."""
+        torch.manual_seed(42)
+        dim = 4096
+        num_layers = 8
+        batch_size = 8192
+
+        # --- FSDP model with CPU offload ---
+        model = nn.Sequential(
+            *[nn.Linear(dim, dim, bias=False) for _ in range(num_layers)]
+        )
+        for layer in model:
+            fully_shard(
+                layer,
+                reshard_after_forward=True,
+                offload_policy=CPUOffloadPolicy(pin_memory=True),
+            )
+        fully_shard(
+            model,
+            reshard_after_forward=True,
+            offload_policy=CPUOffloadPolicy(pin_memory=True),
+        )
+
+        inp = torch.randn(batch_size, dim, device=device_type)
+        model(inp).sum().backward()  # warmup
+
+        fsdp_time = _time_fn(lambda: model(inp))
+
+        # --- Serialized reference (no-overlap baseline) ---
+        torch.manual_seed(42)
+        ref_model = nn.Sequential(
+            *[nn.Linear(dim, dim, bias=False) for _ in range(num_layers)]
+        )
+        cpu_params: dict[str, torch.Tensor] = {}
+        for name, p in ref_model.named_parameters():
+            cpu_params[name] = p.data.clone().pin_memory()
+        ref_model.to(device_type)
+        ref_model(inp)  # warmup
+
+        def serialized_fwd():
+            x = inp
+            for i, layer in enumerate(ref_model):
+                for pname, p in layer.named_parameters():
+                    with torch.no_grad():
+                        p.copy_(cpu_params[f"{i}.{pname}"])
+                x = layer(x)
+                for pname, p in layer.named_parameters():
+                    cpu_params[f"{i}.{pname}"].copy_(p.data)
+            return x
+
+        serialized_fwd()  # warmup
+        ref_time = _time_fn(serialized_fwd)
+
+        self.assertLess(fsdp_time, ref_time)
 
 
 if __name__ == "__main__":
