@@ -1064,12 +1064,7 @@ instancecheck = type.__instancecheck__
 _CPYTHON_BASE_URL = "https://github.com/python/cpython/blob/v3.13.0/"
 
 
-def print_cpython_to_vt_mapping() -> None:
-    """Print the mapping from CPython types to Dynamo VariableTracker classes.
-
-    Reads _cpython_type from each VT subclass (own attribute only, not inherited).
-    """
-    # Ensure all VT modules are imported so all_subclasses is complete
+def _ensure_all_vt_modules_imported() -> None:
     from . import (  # noqa: F401
         builtin,
         constant,
@@ -1090,6 +1085,14 @@ def print_cpython_to_vt_mapping() -> None:
         user_defined,
     )
 
+
+def print_cpython_to_vt_mapping() -> None:
+    """Print the mapping from CPython types to Dynamo VariableTracker classes.
+
+    Reads _cpython_type from each VT subclass (own attribute only, not inherited).
+    """
+    _ensure_all_vt_modules_imported()
+
     mapping: dict[type, list[type]] = {}
     for vt_cls in VariableTrackerMeta.all_subclasses:
         cpython_type = vt_cls.__dict__.get("_cpython_type")
@@ -1104,6 +1107,64 @@ def print_cpython_to_vt_mapping() -> None:
             print(
                 f"{py_type.__module__}.{py_type.__qualname__:30s} -> {vt_cls.__name__}"
             )
+
+
+def print_vt_hierarchy() -> None:
+    """Print the VariableTracker class hierarchy as an indented text tree.
+
+    Each class is shown under its primary base class (first VT parent).
+    Classes with _cpython_type set show the mapped Python type in brackets.
+    Multiple inheritance is noted with "(also: OtherBase)" annotations.
+
+    Usage:
+        python -c "from torch._dynamo.variables.base import print_vt_hierarchy; print_vt_hierarchy()"
+    """
+    _ensure_all_vt_modules_imported()
+
+    all_classes = set(VariableTrackerMeta.all_subclasses)
+    all_classes.add(VariableTracker)
+
+    # Build tree: map each class to its primary VT parent (first in MRO)
+    children: dict[type, list[type]] = {}
+    extra_bases: dict[type, list[type]] = {}
+    for cls in all_classes:
+        vt_bases = [b for b in cls.__bases__ if b in all_classes]
+        if not vt_bases:
+            continue
+        primary = vt_bases[0]
+        children.setdefault(primary, []).append(cls)
+        if len(vt_bases) > 1:
+            extra_bases[cls] = vt_bases[1:]
+
+    def _label(cls: type) -> str:
+        module = cls.__module__.rsplit(".", 1)[-1]
+        cpython_type = cls.__dict__.get("_cpython_type")
+        parts = [cls.__name__]
+        if cpython_type is not None:
+            if isinstance(cpython_type, tuple):
+                names = ", ".join(t.__name__ for t in cpython_type)
+            else:
+                names = cpython_type.__name__
+            parts.append(f"[{names}]")
+        parts.append(f"({module})")
+        if cls in extra_bases:
+            also = ", ".join(b.__name__ for b in extra_bases[cls])
+            parts.append(f"(also: {also})")
+        return " ".join(parts)
+
+    def _print_tree(cls: type, prefix: str, is_last: bool) -> None:
+        connector = "└── " if is_last else "├── "
+        print(f"{prefix}{connector}{_label(cls)}")
+        next_prefix = prefix + ("    " if is_last else "│   ")
+        kids = sorted(children.get(cls, []), key=lambda c: c.__name__)
+        for i, child in enumerate(kids):
+            _print_tree(child, next_prefix, i == len(kids) - 1)
+
+    # Print root
+    print(_label(VariableTracker))
+    kids = sorted(children.get(VariableTracker, []), key=lambda c: c.__name__)
+    for i, child in enumerate(kids):
+        _print_tree(child, "", i == len(kids) - 1)
 
 
 from . import builder
