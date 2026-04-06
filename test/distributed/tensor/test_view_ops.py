@@ -2182,6 +2182,16 @@ class TestViewOps(DTensorContinuousTestBase):
                 self.assertEqual(comm_mode.get_total_counts(), 0)
                 self.assertEqual(out.placements, expected_placements)
 
+    def test_view_flatten_split_unrepresentable(self):
+        # (12,8) → (16,6) with Shard(1): the strided pattern (period=8)
+        # can't be represented in group_shape (16,6), so view() must error
+        # instead of silently producing wrong data.
+        mesh = init_device_mesh(self.device_type, (self.world_size,))
+        full = torch.randn(12, 8, device=self.device_type)
+        dt = distribute_tensor(full, mesh, [Shard(1)])
+        with self.assertRaises(RuntimeError):
+            dt.view(16, 6)
+
     def test_input_dim_rejects_int_comparison(self):
         """InputDim.__eq__ should raise TypeError when compared with int.
 
