@@ -388,12 +388,10 @@ class BenchmarkRunner:
         if cuda_sync:
             torch.cuda.synchronize()
 
-        func = test_case.run_backward
-        # Stable timing with Timer
         timer = Timer(
-            stmt="func(iters, print_per_iter, cuda_sync)",
+            stmt="test_case.run_backward(iters, print_per_iter, cuda_sync)",
             globals={
-                "func": func,
+                "test_case": test_case,
                 "iters": iters,
                 "print_per_iter": print_per_iter,
                 "cuda_sync": cuda_sync,
