@@ -58,7 +58,9 @@ def _use_backend(backend):
 
 
 VarlenShape = namedtuple(
-    "VarlenShape", ["batch_size", "max_seq_len", "embed_dim", "num_heads"]
+    "VarlenShape",
+    ["batch_size", "max_seq_len", "embed_dim", "num_heads", "num_kv_heads"],
+    defaults=[None],
 )
 
 
@@ -76,31 +78,48 @@ class OpLoggingMode(TorchDispatchMode):
 
 class AttentionBlock(nn.Module):
     def __init__(
-        self, embed_dim: int, num_heads: int, device: torch.device, dtype: torch.dtype
+        self,
+        embed_dim: int,
+        num_heads: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        num_kv_heads: int | None = None,
     ):
         super().__init__()
         self.embed_dim = embed_dim
         self.num_heads = num_heads
+        self.num_kv_heads = num_kv_heads if num_kv_heads is not None else num_heads
         self.head_dim = embed_dim // num_heads
 
-        self.qkv_proj = nn.Linear(
-            embed_dim, 3 * embed_dim, bias=False, device=device, dtype=dtype
+        self.q_proj = nn.Linear(
+            embed_dim,
+            num_heads * self.head_dim,
+            bias=False,
+            device=device,
+            dtype=dtype,
+        )
+        self.kv_proj = nn.Linear(
+            embed_dim,
+            2 * self.num_kv_heads * self.head_dim,
+            bias=False,
+            device=device,
+            dtype=dtype,
         )
         self.out_proj = nn.Linear(
             embed_dim, embed_dim, bias=False, device=device, dtype=dtype
         )
 
+    @property
+    def enable_gqa(self):
+        return self.num_kv_heads != self.num_heads
+
     def get_varlen_qkv(
         self,
         x_packed: torch.Tensor,
     ):
-        qkv = self.qkv_proj(x_packed)
-        q, k, v = qkv.chunk(3, dim=-1)
-
-        q = q.view(-1, self.num_heads, self.head_dim)
-        k = k.view(-1, self.num_heads, self.head_dim)
-        v = v.view(-1, self.num_heads, self.head_dim)
-
+        q = self.q_proj(x_packed).view(-1, self.num_heads, self.head_dim)
+        kv = self.kv_proj(x_packed).view(-1, 2, self.num_kv_heads, self.head_dim)
+        k, v = kv[:, 0], kv[:, 1]
         return q, k, v
 
     def forward_varlen(
@@ -123,6 +142,7 @@ class AttentionBlock(nn.Module):
             max_len,
             scale=scale,
             window_size=window_size,
+            enable_gqa=self.enable_gqa,
         )
         attn_out = attn_out.view(-1, self.embed_dim)
 
@@ -137,8 +157,11 @@ class AttentionBlock(nn.Module):
     ):
         batch_size, seq_len, _ = x_padded.shape
 
-        qkv = self.qkv_proj(x_padded)
-        q, k, v = qkv.chunk(3, dim=-1)
+        q = self.q_proj(x_padded)
+        kv = self.kv_proj(x_padded)
+        k, v = kv.view(batch_size, seq_len, 2, self.num_kv_heads, self.head_dim).unbind(
+            dim=2
+        )
 
         padding_mask = (
             torch.arange(seq_len, device=x_padded.device)[None, :]
@@ -169,8 +192,18 @@ class AttentionBlock(nn.Module):
             attn_mask = attn_mask & window_mask[None, None, :, :]
 
         q = q.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        k = k.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
-        v = v.view(batch_size, seq_len, self.num_heads, self.head_dim).transpose(1, 2)
+        k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(
+            1, 2
+        )
+        v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim).transpose(
+            1, 2
+        )
+
+        # Expand KV heads to match Q heads for SDPA (which doesn't support GQA with attn_mask)
+        if self.enable_gqa:
+            n_rep = self.num_heads // self.num_kv_heads
+            k = k.repeat_interleave(n_rep, dim=1)
+            v = v.repeat_interleave(n_rep, dim=1)
 
         # Don't pass is_causal since we already incorporated it into attn_mask
         attn_out = F.scaled_dot_product_attention(
@@ -471,11 +504,20 @@ class TestVarlenAttention(NNTestCase):
         "backend",
         ["fa2"] + (["fa3"] if IS_SM90 else []) + (["fa4"] if SM100OrLater else []),
     )
-    def test_varlen_vs_sdpa(self, device, dtype, scale, window_size, backend):
+    @parametrize("enable_gqa", [False, True])
+    def test_varlen_vs_sdpa(
+        self, device, dtype, scale, window_size, backend, enable_gqa
+    ):
         torch.manual_seed(42)
 
+        num_heads = 16
+        num_kv_heads = 4 if enable_gqa else num_heads
         shape = VarlenShape(
-            batch_size=4, max_seq_len=1024, embed_dim=1024, num_heads=16
+            batch_size=4,
+            max_seq_len=1024,
+            embed_dim=1024,
+            num_heads=num_heads,
+            num_kv_heads=num_kv_heads,
         )
 
         batch_data = create_variable_length_batch(shape, device, dtype)
@@ -487,14 +529,25 @@ class TestVarlenAttention(NNTestCase):
         x_padded_ref = batch_data["x_padded_ref"]
 
         golden_attention_block = AttentionBlock(
-            shape.embed_dim, shape.num_heads, device, torch.float32
+            shape.embed_dim,
+            shape.num_heads,
+            device,
+            torch.float32,
+            num_kv_heads=num_kv_heads,
         )
         attention_block = AttentionBlock(
-            shape.embed_dim, shape.num_heads, device, dtype
+            shape.embed_dim,
+            shape.num_heads,
+            device,
+            dtype,
+            num_kv_heads=num_kv_heads,
         )
         with torch.no_grad():
-            attention_block.qkv_proj.weight.copy_(
-                golden_attention_block.qkv_proj.weight.to(dtype)
+            attention_block.q_proj.weight.copy_(
+                golden_attention_block.q_proj.weight.to(dtype)
+            )
+            attention_block.kv_proj.weight.copy_(
+                golden_attention_block.kv_proj.weight.to(dtype)
             )
             attention_block.out_proj.weight.copy_(
                 golden_attention_block.out_proj.weight.to(dtype)
@@ -1024,7 +1077,6 @@ class TestVarlenAttention(NNTestCase):
             [0, seq_len, total_tokens], device=device, dtype=torch.int32
         )
 
-        # Mismatched heads without enable_gqa should raise
         with self.assertRaisesRegex(ValueError, "enable_gqa=True"):
             varlen_attn(q, k, v, cu_seq, cu_seq, seq_len, seq_len)
 
@@ -1033,7 +1085,6 @@ class TestVarlenAttention(NNTestCase):
                 torch.empty_like(q), q, k, v, cu_seq, cu_seq, seq_len, seq_len
             )
 
-        # Non-divisible heads with enable_gqa should raise
         k_bad = torch.randn(total_tokens, 3, head_dim, device=device, dtype=dtype)
         v_bad = torch.randn(total_tokens, 3, head_dim, device=device, dtype=dtype)
         with self.assertRaisesRegex(ValueError, "multiple of kv heads"):
@@ -1041,21 +1092,15 @@ class TestVarlenAttention(NNTestCase):
                 q, k_bad, v_bad, cu_seq, cu_seq, seq_len, seq_len, enable_gqa=True
             )
 
-        # GQA forward should produce valid output
         with _use_backend(backend), torch.no_grad():
             out = varlen_attn(
                 q, k, v, cu_seq, cu_seq, seq_len, seq_len, enable_gqa=True
             )
-        self.assertEqual(out.shape, q.shape)
-        self.assertFalse(out.isnan().any())
-
-        # varlen_attn_out should match
-        with _use_backend(backend), torch.no_grad():
             out_buf = torch.empty_like(q)
             varlen_attn_out(
                 out_buf, q, k, v, cu_seq, cu_seq, seq_len, seq_len, enable_gqa=True
             )
-        self.assertEqual(out_buf, out)
+            self.assertEqual(out_buf, out)
 
 
 device_types = ("cuda",)
