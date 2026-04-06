@@ -437,6 +437,7 @@ class SIMDKernel(Kernel[CSEVariableType], Generic[CSEVariableType]):
         self.code_hash: str | None = None
         # Info to enable multiple store_output calls for epilogue subtiling
         self.store_output_ctr = itertools.count()
+        self.compute_epilogue_ctr = itertools.count()
         self.is_native_matmul = False
         if config.triton.native_matmul:
             for node in self.features.node_schedule:
@@ -499,6 +500,14 @@ class SIMDKernel(Kernel[CSEVariableType], Generic[CSEVariableType]):
     def get_store_output_count(self):
         total = next(self.store_output_ctr)
         self.store_output_ctr = itertools.count(start=total - 1, step=1)
+        return total
+
+    def _get_compute_epilogue_subgraph_name(self, i: int) -> str:
+        return f"<COMPUTE_EPILOGUE_{i}>"
+
+    def get_compute_epilogue_count(self):
+        total = next(self.compute_epilogue_ctr)
+        self.compute_epilogue_ctr = itertools.count(start=total - 1, step=1)
         return total
 
     @property

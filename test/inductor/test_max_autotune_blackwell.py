@@ -29,6 +29,16 @@ def has_tlx() -> bool:
         return False
 
 
+def has_meta_ws() -> bool:
+    """Check if Meta WS (warp specialization) is available in Triton."""
+    try:
+        import triton
+
+        return "fb" in getattr(triton, "__version__", "")
+    except ImportError:
+        return False
+
+
 torch.set_float32_matmul_precision("high")
 
 
@@ -303,6 +313,142 @@ class TestMaxAutotuneBlackwell(TestCase):
         ).check(write_api).run(code[0])
 
         torch.testing.assert_close(c_actual, c_expected, atol=1e-2, rtol=1e-2)
+
+
+@unittest.skipIf(
+    not has_meta_ws(),
+    "TMA store pointwise epilogue fusion requires fb-triton with Meta WS support",
+)
+@instantiate_parametrized_tests
+class TestBlackwellTMAStoreFusion(TestCase):
+    """Tests for TMA store with fused pointwise epilogues on Blackwell.
+
+    Requires fb-triton with Meta WS (TRITON_USE_META_WS=1).
+    """
+
+    def setUp(self):
+        super().setUp()
+        from triton import knobs
+
+        self._orig_use_meta_ws = knobs.nvidia.use_meta_ws
+        self._orig_use_meta_partition = knobs.nvidia.use_meta_partition
+        knobs.nvidia.use_meta_ws = True
+        knobs.nvidia.use_meta_partition = True
+        self._orig_compile_threads = config.compile_threads
+        config.compile_threads = 1
+
+    def tearDown(self):
+        from triton import knobs
+
+        knobs.nvidia.use_meta_ws = self._orig_use_meta_ws
+        knobs.nvidia.use_meta_partition = self._orig_use_meta_partition
+        config.compile_threads = self._orig_compile_threads
+        super().tearDown()
+
+    @staticmethod
+    def _make_tma_store_test_config(epilogue_subtile: int) -> BlackwellGPUGemmConfig:
+        """FLATTEN=False test config for TMA store pointwise epilogue fusion.
+
+        The WS pipeline doesn't yet support FLATTEN=True + TMA descriptor store.
+        """
+        return BlackwellGPUGemmConfig(
+            128,
+            128,
+            128,
+            3,
+            8,
+            epilogue_subtile=epilogue_subtile,
+            warp_specialize=True,
+            flatten=False,
+        )
+
+    @unittest.skipIf(
+        not has_datacenter_blackwell_tma_device(),
+        "Need Blackwell with device-side TMA support in Triton",
+    )
+    @parametrize("shape", ((512, 256, 256), (4096, 256, 256)))
+    @parametrize("epilogue_subtile", (1, 2))
+    def test_blackwell_mm_sigmoid_epilogue_fusion_tma_store(
+        self,
+        shape: tuple[int, int, int],
+        epilogue_subtile: int,
+    ):
+        """Verify fused mm + sigmoid epilogue with TMA store (FLATTEN=False)."""
+
+        def fn(x, W):
+            mm = torch.mm(x, W.T)
+            return x * (2.0 * torch.sigmoid(mm))
+
+        M, N, K = shape
+        x = torch.randn(M, K, dtype=torch.bfloat16, device=GPU_TYPE)
+        W = torch.randn(N, K, dtype=torch.bfloat16, device=GPU_TYPE)
+
+        test_config = self._make_tma_store_test_config(epilogue_subtile)
+        heuristic = CUDABlackwellPersistentTMATemplateConfigHeuristic()
+        orig_configs = heuristic.mm_configs
+        heuristic.mm_configs = [test_config]
+        try:
+            with config.patch(
+                {
+                    "max_autotune": True,
+                    "triton.enable_persistent_tma_matmul": True,
+                    "triton.enable_template_tma_store": True,
+                    "test_configs.autotune_choice_name_regex": "blackwell_ws_persistent_device_tma",
+                }
+            ):
+                actual, code = run_and_get_code(torch.compile(fn), x, W)
+                expected = fn(x, W)
+        finally:
+            heuristic.mm_configs = orig_configs
+
+        torch.testing.assert_close(actual, expected, atol=1e-1, rtol=1e-1)
+
+        FileCheck().check("triton_tem_fused_mm").check("c_desc.store").run(code[0])
+        self.assertNotIn("tl.store(out_ptr", code[0])
+
+    @unittest.skipIf(
+        not has_datacenter_blackwell_tma_device(),
+        "Need Blackwell with device-side TMA support in Triton",
+    )
+    @parametrize("shape", ((512, 256, 256), (4096, 256, 256)))
+    @parametrize("epilogue_subtile", (1, 2))
+    def test_blackwell_addmm_relu_epilogue_fusion_tma_store(
+        self,
+        shape: tuple[int, int, int],
+        epilogue_subtile: int,
+    ):
+        """Verify fused addmm + relu epilogue with TMA store (FLATTEN=False)."""
+
+        def fn(x, W, bias):
+            mm = torch.mm(x, W.T)
+            return torch.relu(mm + bias)
+
+        M, N, K = shape
+        x = torch.randn(M, K, dtype=torch.bfloat16, device=GPU_TYPE)
+        W = torch.randn(N, K, dtype=torch.bfloat16, device=GPU_TYPE)
+        bias = torch.randn(N, dtype=torch.bfloat16, device=GPU_TYPE)
+
+        test_config = self._make_tma_store_test_config(epilogue_subtile)
+        heuristic = CUDABlackwellPersistentTMATemplateConfigHeuristic()
+        orig_configs = heuristic.mm_configs
+        heuristic.mm_configs = [test_config]
+        try:
+            with config.patch(
+                {
+                    "max_autotune": True,
+                    "triton.enable_persistent_tma_matmul": True,
+                    "triton.enable_template_tma_store": True,
+                    "test_configs.autotune_choice_name_regex": "blackwell_ws_persistent_device_tma",
+                }
+            ):
+                actual, code = run_and_get_code(torch.compile(fn), x, W, bias)
+                expected = fn(x, W, bias)
+        finally:
+            heuristic.mm_configs = orig_configs
+
+        torch.testing.assert_close(actual, expected, atol=1e-1, rtol=1e-1)
+
+        FileCheck().check("triton_tem_fused").check("c_desc.store").run(code[0])
 
 
 @instantiate_parametrized_tests

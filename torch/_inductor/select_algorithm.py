@@ -1527,6 +1527,127 @@ class TritonTemplateKernel(TritonKernel):
             subgraph_name, self._make_codegen_hook(subgraph_name, indent_width)
         )
 
+    def output_ptr(self):
+        """Return the output pointer variable name for TMA descriptor creation.
+
+        When epilogue fusion is active, returns the final output buffer pointer
+        (set by codegen_template_body via _final_output_name) so TMA descriptors
+        write directly to the fused output.
+        """
+        name = getattr(self, "_final_output_name", self.output_node.get_name())
+        return self.args.output(name)
+
+    def compute_epilogue(
+        self,
+        indices,
+        val,
+        result_name="fused_result",
+        indent_width=4,
+        val_shape=None,
+    ):
+        """Apply epilogue fusion ops and assign result to result_name, without emitting a store.
+
+        Used by templates that handle the store themselves (e.g., TMA store).
+        Same index setup as store_output with block_indexing=True, tma_store=True.
+        """
+        subgraph_name = self._get_compute_epilogue_subgraph_name(
+            next(self.compute_epilogue_ctr)
+        )
+        with self.create_subgraph_body(subgraph_name, clear_cse=True):
+            assert isinstance(indices, (list, tuple))
+            assert isinstance(val, str)
+            assert val_shape and len(val_shape) == 2, (
+                "compute_epilogue requires a 2D val_shape"
+            )
+            assert self.template_mask is None
+
+            indices = list(map(OpOverrides.paren, indices))
+            index_symbols = [sympy.Symbol(x, integer=True) for x in indices]
+            lengths = [
+                V.graph.sizevars.simplify(s) for s in self.output_node.get_size()
+            ]
+            assert len(indices) == len(lengths)
+
+            output_layout = self.output_node.get_layout()
+            self.template_out = val
+
+            intermediate_lines: list[str] = []
+            epilogue_index_symbols: list[sympy.Symbol] = []
+            val_shape_copy = list(val_shape)
+            for i, range_tree in enumerate(self.range_trees[:-1]):
+                name = range_tree.name
+                symbol = range_tree.symbol()
+                epilogue_index_symbols.append(symbol)
+                lookup_output = range_tree.lookup(sympy.S.One, lengths[i])
+                old_name = lookup_output.symbol()
+                lookup_output.set_name(name)
+                range_tree.var_list[range_tree.var_list.index(old_name)] = symbol
+                range_val = range_tree.var_ranges[old_name]
+                del range_tree.var_ranges[old_name]
+                range_tree.var_ranges[symbol] = range_val
+                intermediate_lines.extend(
+                    self._generate_index_from_tma_index(
+                        name,
+                        "xoffset" if name == "xindex" else "yoffset",
+                        index_symbols[i],
+                        val_shape[i],
+                        i,
+                        len(val_shape),
+                        block_name=range_tree.symt.name,
+                    )
+                )
+                intermediate_lines.append(
+                    self._generated_mask_for_tma(
+                        name,
+                        self.size(None, i),
+                        "xmask" if name == "xindex" else "ymask",
+                    )
+                )
+                val_shape_copy[i] = range_tree.symt.name
+            val_shape = tuple(val_shape_copy)
+
+            index_symbols = epilogue_index_symbols
+            contiguous_index = sympy_dot(output_layout.stride, index_symbols)
+
+            for line in intermediate_lines:
+                self.body.writeline(line)
+
+            self.template_out_shape = val_shape
+            acc_dtype = (
+                triton_type_to_torch(self.meta["ACC_TYPE"])
+                if "ACC_TYPE" in self.meta
+                else torch.float32
+            )
+            epilogue_args = [
+                V.kernel.cse.namedvar(val, dtype=acc_dtype, shape=val_shape)
+            ]
+            for input_node in itertools.chain(
+                self.input_nodes[: self.prefix_args],
+                self.input_nodes[len(self.input_nodes) - self.suffix_args :],
+            ):
+                input_node.freeze_layout()
+                epilogue_arg = V.kernel.cse.generate(
+                    self.compute,
+                    input_node.make_loader()(index_symbols),
+                    dtype=acc_dtype,
+                    shape=input_node.get_size(),
+                )
+                epilogue_args.append(epilogue_arg)
+                self.frozen_layouts_cnt += 1
+
+            fused = self.epilogue_fn(*epilogue_args)
+            V.kernel.cse.store_cache[self.output_node.get_name()] = fused
+            self.compute.writeline(f"{result_name} = {fused}")
+
+            self.store_buffer_names.add(self.output_node.get_name())
+
+            self._compute_epilogue_result_name = result_name
+            self.codegen_body()
+
+        return self._register_hook(
+            subgraph_name, self._make_codegen_hook(subgraph_name, indent_width)
+        )
+
     def _register_hook(
         self,
         hook_name: str,
@@ -1585,6 +1706,8 @@ class TritonTemplateKernel(TritonKernel):
                 self.size,
                 self.stride,
                 self.store_output,
+                self.compute_epilogue,
+                self.output_ptr,
                 self.load_input,
                 self.make_load,
                 self.modification,
@@ -1775,6 +1898,12 @@ class TritonTemplateKernel(TritonKernel):
 
         Returns the final source code string.
         """
+        # Set _final_output_name so output_ptr() resolves to the fused output.
+        if epilogue_nodes:
+            last_names = epilogue_nodes[-1].get_buffer_names()
+            if len(last_names) == 1:
+                self._final_output_name = next(iter(last_names))
+
         self._compute_fusion_metadata(
             scheduling, epilogue_nodes, prologue_nodes, buf_name_to_prologue_group
         )
@@ -1787,6 +1916,31 @@ class TritonTemplateKernel(TritonKernel):
                 with self.set_subgraph_body(subgraph_name):
                     for node in self._epilogue_nodes_by_subgraph[i]:
                         node.codegen(self.split_and_set_ranges(node.get_ranges()))
+                    self.cse.invalidate(OrderedSet())
+
+            # Handle compute_epilogue subgraphs: redirect epilogue stores
+            # to variable assignments instead of tl.store.
+            num_ce = self.get_compute_epilogue_count()
+            for i in range(num_ce):
+                subgraph_name = self._get_compute_epilogue_subgraph_name(i)
+                result_name = getattr(
+                    self, "_compute_epilogue_result_name", "fused_result"
+                )
+                with self.set_subgraph_body(subgraph_name):
+                    orig_store = self.store
+
+                    def _redirect_store(name, index, value, mode=None):
+                        self.store_buffer_names.add(name)
+                        self.cse.store_cache[name] = value
+                        if name not in V.graph.removed_buffers:
+                            self.compute.writeline(f"{result_name} = {value}")
+
+                    self.store = _redirect_store  # type: ignore[method-assign]
+                    try:
+                        for node in epilogue_nodes:
+                            node.codegen(self.split_and_set_ranges(node.get_ranges()))
+                    finally:
+                        self.store = orig_store  # type: ignore[method-assign]
                     self.cse.invalidate(OrderedSet())
 
             self.codegen_prologues_in_subgraphs(
@@ -1820,6 +1974,11 @@ class TritonTemplateKernel(TritonKernel):
                 num_store_subgraphs = self.get_store_output_count()
                 for i in range(num_store_subgraphs):
                     subgraph_name = self._get_store_output_subgraph_name(i)
+                    partial_code.finalize_hook(subgraph_name)
+
+                num_ce = self.get_compute_epilogue_count()
+                for i in range(num_ce):
+                    subgraph_name = self._get_compute_epilogue_subgraph_name(i)
                     partial_code.finalize_hook(subgraph_name)
 
                 # Ensure all hooks are finalized before the kernel is defined.
@@ -2628,6 +2787,12 @@ class TritonTemplate(KernelTemplate):
                 triton_meta=triton_meta,
                 **kernel_options,
             )
+
+        # Disable TMA store for fused pointwise epilogues when FLATTEN=True —
+        # the WS pipeline doesn't support flatten + TMA descriptor store in the
+        # epilogue yet. Non-fused TMA store (via store_output) still works with
+        # FLATTEN=True since it goes through a different code path.
+        kwargs["tma_store"] = tma_store and not kwargs.get("FLATTEN", False)
 
         def generate_code(kernel) -> tuple[str, str] | None:
             def make_extra() -> str:
