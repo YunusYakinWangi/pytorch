@@ -274,15 +274,6 @@ class TestViewOps(DTensorContinuousTestBase):
         with self.assertRaisesRegex(RuntimeError, "Sharding propagation failed"):
             shard.view(8, 2, -1)
 
-        # Split(Flatten) where the strided pattern is not representable
-        # in the output group_shape: (4,6)→(6,4) with Shard(1) has
-        # period=6 which doesn't fit into group_shape (6,4).
-        tensor = torch.randn(4, 6, device=self.device_type)
-        dtensor = distribute_tensor(tensor, device_mesh, [Replicate()])
-        shard = dtensor.redistribute(device_mesh=device_mesh, placements=[Shard(dim=1)])
-        with self.assertRaisesRegex(RuntimeError, "Sharding propagation failed"):
-            shard.view(6, 4)
-
     def test_double_shard_split_validation(self):
         """[Shard(0), Shard(0)] through Split correctly validates divisibility."""
         # Compatible: reshape (24,)→(6,4) with [Shard(0), Shard(0)] on mesh (2,3)
@@ -586,26 +577,6 @@ class TestViewOps(DTensorContinuousTestBase):
             ),
         )
 
-        # Split(Flatten) where a non-first flatten dim produces _StridedShard.
-        # Dim sizes are multiples of all mesh dim sizes so every Shard
-        # placement is exercised by call_dt_test.
-        self.dimmap_test(
-            Tensor.view,
-            (randn(12, 12), (6, 24)),
-            (
-                Split(
-                    Flatten(input_dims=(InputDim(0), InputDim(1))),
-                    group_shape=(6, 24),
-                    split_id=0,
-                ),
-                Split(
-                    Flatten(input_dims=(InputDim(0), InputDim(1))),
-                    group_shape=(6, 24),
-                    split_id=1,
-                ),
-            ),
-        )
-
     # TODO: Currently functional collectives on complex numbers are not fully supported,
     # so we are having a standalone test for view_as_complex and view_as_real combined.
     # Once complex numbers are supported, we can add the following to the dim_map test.
@@ -784,7 +755,12 @@ class TestViewOps(DTensorContinuousTestBase):
         self.assertEqual(out_dt.full_tensor(), expected)
 
     def test_dtensor_flatten_split(self):
-        """Test views producing Split(Flatten) rules — flatten then split.
+        """Test views producing Split(Flatten) rules.
+
+        Complements test_dtensor_flatten_multi_mesh (pure Flatten rules) and
+        test_dtensor_unflatten_multi_mesh (pure Split(InputDim) rules) by
+        covering the hybrid case: an input dim crosses two output groups,
+        so view_groups produces Split(Flatten(...)) rules.
 
         Uses {2*M-1, 2*M, 2*M+1} dim values (M = mesh size for the shard
         mesh dim) to cover even/uneven divisibility, following the same
