@@ -2577,6 +2577,7 @@ def compile(
     options: dict[str, str | builtins.int | builtins.bool | _Callable] | None = None,
     name: str | None = None,
     disable: builtins.bool = False,
+    recompile_limit: builtins.int | None = None,
 ) -> _Callable[_InputT, _RetT]: ...
 
 
@@ -2591,6 +2592,7 @@ def compile(
     options: dict[str, str | builtins.int | builtins.bool | _Callable] | None = None,
     name: str | None = None,
     disable: builtins.bool = False,
+    recompile_limit: builtins.int | None = None,
 ) -> _Callable[[_Callable[_InputT, _RetT]], _Callable[_InputT, _RetT]]: ...
 
 
@@ -2785,13 +2787,18 @@ def compile(
     else:
         backend = _TorchCompileWrapper(backend, mode, options, dynamic)
 
+    from torch._dynamo.compile_options import DynamoCompileOptions
+
+    compile_options = DynamoCompileOptions(
+        fullgraph=fullgraph,
+        dynamic=dynamic,
+        recompile_limit=recompile_limit,
+    )
     return torch._dynamo.optimize(
         backend=backend,
-        nopython=fullgraph,
-        dynamic=dynamic,
+        compile_options=compile_options,
         disable=disable,
         guard_filter_fn=guard_filter_fn,
-        recompile_limit=recompile_limit,
     )(model)  # type: ignore[return-value]
 
 
