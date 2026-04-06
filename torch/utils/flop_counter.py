@@ -635,8 +635,6 @@ def _varlen_attn_forward_flop(
         for query_shape, key_shape, value_shape, _ in sizes
     )
 
-_varlen_attn_forward_flop._get_raw = True
-
 
 def _varlen_attn_out_flop(
     out,
@@ -655,8 +653,6 @@ def _varlen_attn_out_flop(
     return _varlen_attn_forward_flop(
         query, key, value, cu_seq_q, cu_seq_k, max_q, max_k,
     )
-
-_varlen_attn_out_flop._get_raw = True
 
 
 def _varlen_attn_backward_flop(
@@ -689,8 +685,6 @@ def _varlen_attn_backward_flop(
         sdpa_backward_flop_count(grad_out_shape, query_shape, key_shape, value_shape)
         for query_shape, key_shape, value_shape, grad_out_shape in sizes
     )
-
-_varlen_attn_backward_flop._get_raw = True
 
 
 flop_registry = {

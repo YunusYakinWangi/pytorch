@@ -619,6 +619,7 @@ from torch.utils.flop_counter import (
     flop_registry,
 )
 
+
 flop_registry[torch.ops.torch_attn._varlen_attn] = _varlen_attn_forward_flop
 flop_registry[torch.ops.torch_attn._varlen_attn_out] = _varlen_attn_out_flop
 flop_registry[torch.ops.torch_attn._varlen_attn_backward] = _varlen_attn_backward_flop
