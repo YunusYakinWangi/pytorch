@@ -288,7 +288,7 @@ class PythonArgument:
             name += "_"
 
         # pyi merges the _out and functional variants into the same signature, with an optional out arg
-        if name == "out" and type_str == "Tensor" and not deprecated:
+        if name == "out" and not deprecated:
             type_str = f"{type_str} | None".replace(" | None | None", " | None")
 
         # pyi deprecated signatures don't get defaults for their out arg
