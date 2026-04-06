@@ -382,9 +382,10 @@ class BenchmarkRunner:
         """This function runs forward path of an op to get an output. Then the backward path is executed
         and the execution time is reported
         """
-        test_case.run_forward(num_runs=1, print_per_iter=False, cuda_sync=True)
+        cuda_sync = "cuda" in test_case.test_config.test_name
+        test_case.run_forward(num_runs=1, print_per_iter=False, cuda_sync=cuda_sync)
         test_case._output_mean()
-        if torch.cuda.is_available():
+        if cuda_sync:
             torch.cuda.synchronize()
 
         func = test_case.run_backward
@@ -395,7 +396,7 @@ class BenchmarkRunner:
                 "func": func,
                 "iters": iters,
                 "print_per_iter": print_per_iter,
-                "cuda_sync": True,
+                "cuda_sync": cuda_sync,
             },
         )
         result = timer.adaptive_autorange(min_run_time=0.0001)
