@@ -770,6 +770,22 @@ def _create_runtime_wrapper(
             # stash a ref to each input tensor we plan to use after the compiled function
             orig_inputs = runtime_epilogue.capture_orig_inputs(args)
             runtime_epilogue.increment_mutation_versions(args)
+
+            # Resolve AsyncCollectiveTensors before passing args to the
+            # compiled graph. ACTs are transient eager-mode wrappers for
+            # async collective overlap; inductor triton kernels bypass
+            # __torch_dispatch__ entirely, so an unwait-ed ACT would
+            # silently feed stale data to the kernel. Must happen after
+            # capture_orig_inputs (mutation writeback needs the original
+            # tensor refs) but before the compiled function runs.
+            from torch.distributed._functional_collectives import (
+                _maybe_unwrap_tensor,
+            )
+
+            args = [
+                _maybe_unwrap_tensor(a) if isinstance(a, torch.Tensor) else a for a in args
+            ]
+
             all_outs = compiled_invoker.run(args, on_before_call=exit_prologue)
         finally:
             exit_prologue()

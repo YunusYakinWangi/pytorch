@@ -1446,5 +1446,131 @@ class CompileTest(TestCase):
         (FileCheck().check("all_reduce_.default(buf0, 'avg', '0')").run(code))
 
 
+class ACTCompileTest(TestCase):
+    """
+    Test that AsyncCollectiveTensor inputs to compiled regions are resolved
+    before AOT autograd tracing begins. ACTs are transient eager-mode wrappers
+    for async collective overlap; if they leak into the traced graph as input
+    types, AOT autograd records them in tangent metadata and then hits a type
+    mismatch at runtime because autograd produces plain-tensor tangents.
+    """
+
+    def test_maybe_unwrap_tensor(self):
+        """
+        _maybe_unwrap_tensor should resolve ACTs to plain tensors via
+        trigger_wait(), and pass through non-ACT tensors unchanged.
+        """
+        from torch.distributed._functional_collectives import _maybe_unwrap_tensor
+
+        plain = torch.randn(4, 4)
+        self.assertIs(_maybe_unwrap_tensor(plain), plain)
+
+        elem = torch.randn(4, 4)
+        act = AsyncCollectiveTensor(elem)
+        unwrapped = _maybe_unwrap_tensor(act)
+        self.assertNotIsInstance(unwrapped, AsyncCollectiveTensor)
+        self.assertIsInstance(unwrapped, torch.Tensor)
+
+    def test_act_compile_backward_tangent_mismatch(self):
+        """
+        When a bare AsyncCollectiveTensor (ACT) enters a torch.compiled
+        region and passes through a view op, the output remains an ACT.
+        If the ACT is not unwrapped before tracing, AOT autograd
+        fakifies it as-is and records it in SubclassCreationMeta. At runtime, autograd
+        produces a plain tensor tangent, causing:
+            RuntimeError: Expected a AsyncCollectiveTensor tangent
+            but got a plain Tensor.
+
+        This occurs in practice when TP async collectives produce a
+        DTensor(ACT), an eager caller does to_local() to get a bare ACT,
+        and that ACT flows into a compiled sub-module whose forward
+        contains view ops (unsqueeze, reshape, transpose, etc.).
+
+        We use unsqueeze (a view op that preserves ACT) to ensure the
+        compiled function's output carries ACT type, which is what
+        triggers the tangent metadata recording.
+        """
+        from unittest.mock import patch
+
+        elem = torch.randn(4, 4, requires_grad=True)
+        act = AsyncCollectiveTensor(elem)
+
+        compiled_fn = torch.compile(
+            lambda x: x.unsqueeze(0), backend="aot_eager"
+        )
+
+        original_trigger_wait = AsyncCollectiveTensor.trigger_wait
+        wait_called = False
+
+        def tracked_trigger_wait(self):
+            nonlocal wait_called
+            wait_called = True
+            return original_trigger_wait(self)
+
+        with patch.object(AsyncCollectiveTensor, "trigger_wait", tracked_trigger_wait):
+            out = compiled_fn(act)
+            # Without ACT unwrapping, this raises:
+            #   RuntimeError: Expected a AsyncCollectiveTensor tangent
+            #   but got a plain Tensor.
+            out.sum().backward()
+
+        self.assertTrue(wait_called, "trigger_wait() was never called")
+
+        # Verify numerics: trigger_wait() must fire so the correct data
+        # flows through. ACT wraps elem, so results must match elem directly.
+        ref = elem.detach().unsqueeze(0)
+        self.assertEqual(out.detach(), ref)
+
+    def test_act_runtime_unwrap(self):
+        """
+        Verify that ACT inputs are unwrapped at runtime, not just at
+        compile time. On the second call the compiled graph is reused —
+        the runtime wrapper must call trigger_wait() before passing args
+        to the compiled function. Without this, inductor triton kernels
+        bypass __torch_dispatch__ and the async collective is never
+        awaited, causing silent data corruption.
+
+        We patch _maybe_unwrap_tensor to verify the runtime wrapper
+        calls it on the second invocation (when no recompilation
+        occurs). With aot_eager, __torch_dispatch__ would also resolve
+        the ACT, but triton kernels bypass dispatch entirely — the
+        runtime wrapper is the only reliable unwrap point.
+        """
+        from unittest.mock import patch
+
+        import torch.distributed._functional_collectives as fc_mod
+
+        compiled_fn = torch.compile(lambda x: x * 2, backend="aot_eager")
+
+        # First call: compile with ACT input so the graph is cached for this type.
+        elem1 = torch.randn(4, 4)
+        act1 = AsyncCollectiveTensor(elem1)
+        _ = compiled_fn(act1)
+
+        # Second call: same input type → dynamo reuses the cached graph.
+        # process_inputs does NOT run again; only the runtime wrapper can
+        # unwrap ACTs at this point.
+        elem2 = torch.randn(4, 4)
+        act2 = AsyncCollectiveTensor(elem2)
+
+        original_unwrap = fc_mod._maybe_unwrap_tensor
+        unwrap_called_with_act = False
+
+        def tracked_unwrap(tensor):
+            nonlocal unwrap_called_with_act
+            if isinstance(tensor, AsyncCollectiveTensor):
+                unwrap_called_with_act = True
+            return original_unwrap(tensor)
+
+        with patch.object(fc_mod, "_maybe_unwrap_tensor", tracked_unwrap):
+            result = compiled_fn(act2)
+
+        self.assertTrue(
+            unwrap_called_with_act,
+            "_maybe_unwrap_tensor was not called with an ACT by the runtime wrapper",
+        )
+        self.assertEqual(result, elem2 * 2)
+
+
 if __name__ == "__main__":
     run_tests()

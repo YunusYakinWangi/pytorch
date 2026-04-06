@@ -1360,6 +1360,18 @@ def _maybe_wrap_tensor(self) -> torch.Tensor:
     return _wrap_tensor_autograd(self)
 
 
+def _maybe_unwrap_tensor(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    If tensor is an AsyncCollectiveTensor, wait on the underlying collective
+    and return the plain result. Otherwise return the tensor unchanged.
+    This is the inverse of _maybe_wrap_tensor and should be used to resolve
+    ACTs at graph boundaries (e.g. before AOT autograd tracing).
+    """
+    if isinstance(tensor, AsyncCollectiveTensor):
+        return tensor.trigger_wait()
+    return tensor
+
+
 @contextlib.contextmanager
 def allow_inflight_collective_as_graph_input_ctx(value: bool = True):
     """
