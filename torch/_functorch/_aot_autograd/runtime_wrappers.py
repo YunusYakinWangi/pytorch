@@ -3050,6 +3050,21 @@ Your tensor subclass must implement __coerce_same_metadata_as_tangent__."""
         if isinstance(x, torch._subclasses.functional_tensor.FunctionalTensor):
             runtime_type = torch.Tensor
 
+        # Autograd produces plain tensor tangents, but when the forward
+        # traced an AsyncCollectiveTensor (ACT) input the metadata
+        # expects ACT type. Wrap the tangent so the type check passes.
+        # The tangent was never part of an async collective so
+        # trigger_wait() on this wrapper is a no-op.
+        from torch.distributed._functional_collectives import AsyncCollectiveTensor
+
+        if (
+            isinstance(meta, SubclassCreationMeta)
+            and meta.original_subclass_type is AsyncCollectiveTensor
+            and not isinstance(x, AsyncCollectiveTensor)
+        ):
+            x = AsyncCollectiveTensor(x)
+            runtime_type = AsyncCollectiveTensor
+
         runtime_meta = None
         runtime_subclass_keys: Sequence[str] = []
 

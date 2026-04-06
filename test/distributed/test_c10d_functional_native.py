@@ -1446,5 +1446,46 @@ class CompileTest(TestCase):
         (FileCheck().check("all_reduce_.default(buf0, 'avg', '0')").run(code))
 
 
+class ACTCompileTest(TestCase):
+    """
+    Test that AsyncCollectiveTensor (ACT) inputs to compiled regions
+    handle backward correctly. When ACT leaks into a compiled graph
+    via view ops, AOT autograd records ACT in SubclassCreationMeta.
+    At runtime, autograd produces plain tensor tangents which must be
+    wrapped as ACT to satisfy the type check.
+    """
+
+    def test_act_compile_backward_tangent_wrapping(self):
+        """
+        When a bare ACT enters a torch.compiled region and passes
+        through a view op, the output remains an ACT. AOT autograd
+        records ACT in SubclassCreationMeta. At runtime, autograd
+        produces a plain tensor tangent — process_runtime_tangent
+        must wrap it as ACT to avoid:
+            RuntimeError: Expected a AsyncCollectiveTensor tangent
+            but got a plain Tensor.
+
+        This occurs in practice when TP async collectives produce a
+        DTensor(ACT), an eager caller does to_local() to get a bare
+        ACT, and that ACT flows into a compiled sub-module whose
+        forward contains view ops (unsqueeze, reshape, transpose, etc.).
+        """
+        elem = torch.randn(4, 4, requires_grad=True)
+        act = AsyncCollectiveTensor(elem)
+
+        compiled_fn = torch.compile(
+            lambda x: x.unsqueeze(0), backend="aot_eager"
+        )
+        out = compiled_fn(act)
+        # Without tangent wrapping, this raises:
+        #   RuntimeError: Expected a AsyncCollectiveTensor tangent
+        #   but got a plain Tensor.
+        out.sum().backward()
+
+        # Verify numerics match plain tensor execution
+        ref = elem.detach().unsqueeze(0)
+        self.assertEqual(out.detach(), ref)
+
+
 if __name__ == "__main__":
     run_tests()
