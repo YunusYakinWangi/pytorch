@@ -705,11 +705,6 @@ class InvokeLeafFunctionAutogradOp(torch.autograd.Function):
                 requires_grad_indices=requires_grad_indices,
             )
 
-        # Register backward hooks if the leaf function has a hook registered.
-        # Uses register_multi_grad_hook (mode="all") to fire the user hook
-        # exactly once when all gradients are available. This correctly handles
-        # partial backward (e.g. backward(inputs=...)) where some tensors are
-        # skipped by the autograd engine — those positions receive None.
         hook_real = getattr(real_fn_callable, "_leaf_hook_real_fn", None)
         hook_fake = getattr(real_fn_callable, "_leaf_hook_fake_fn", None)
         if hook_real is not None:
@@ -721,27 +716,24 @@ class InvokeLeafFunctionAutogradOp(torch.autograd.Function):
             hook_real_callable = _LeafCallable(wrapped_hook_real)
             hook_fake_callable = _LeafCallable(wrapped_hook_fake)
 
-            grad_indices = [
-                i
-                for i, arg in enumerate(flat_args)
+            grad_tensors = [
+                arg
+                for arg in flat_args
                 if isinstance(arg, torch.Tensor) and arg.requires_grad
             ]
-            if grad_indices:
-                grad_tensors = [flat_args[i] for i in grad_indices]
+            if grad_tensors:
 
                 def _multi_grad_callback(
                     grads: Sequence[torch.Tensor | None],
                 ) -> None:
-                    new_flat_args = list(flat_args)
-                    for idx, g in zip(grad_indices, grads):
-                        if g is not None:
-                            new_flat_args[idx] = g
+                    flat_grads = [g for g in grads if g is not None]
+                    _, hook_spec = pytree.tree_flatten((tuple(flat_grads), {}))
                     invoke_leaf_function(
                         hook_real_callable,
                         hook_fake_callable,
-                        input_spec,
+                        hook_spec,
                         "",
-                        *new_flat_args,
+                        *flat_grads,
                     )
 
                 torch.autograd.graph.register_multi_grad_hook(
