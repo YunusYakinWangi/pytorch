@@ -79,6 +79,14 @@ CacheEntry* extract_cache_entry(
   if (it != extra_state->cache_entry_map.end() && !it->second.empty()) {
     return &it->second.front();
   }
+  // Read-only fallback to the default bucket, matching lookup() behavior.
+  if (isolate_recompiles_id >= 0) {
+    auto default_it = extra_state->cache_entry_map.find(-1);
+    if (default_it != extra_state->cache_entry_map.end() &&
+        !default_it->second.empty()) {
+      return &default_it->second.front();
+    }
+  }
   return nullptr;
 }
 
@@ -223,6 +231,28 @@ void lookup(
         maybe_cached_code);
     if (guard_error) {
       return;
+    }
+  }
+
+  // Read-only fallback: if an isolated compile (id >= 0) has no hit in its
+  // own bucket, also check the default bucket (id -1). This lets isolated
+  // compiles reuse compilations from non-isolated torch.compile() calls,
+  // which is BC friendly. New entries are still written to the isolated bucket.
+  if (found == nullptr && isolate_recompiles_id >= 0) {
+    auto default_it = extra_state->cache_entry_map.find(-1);
+    if (default_it != extra_state->cache_entry_map.end()) {
+      index = 0;
+      found = lookup_in_list(
+          default_it->second,
+          f_locals,
+          backend,
+          index,
+          is_skip_guard_eval_unsafe,
+          &guard_error,
+          maybe_cached_code);
+      if (guard_error) {
+        return;
+      }
     }
   }
 

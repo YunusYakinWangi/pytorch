@@ -668,9 +668,10 @@ class IsolateRecompilesTests(torch._dynamo.test_case.TestCase):
         opt_f(torch.randn(6))
         self.assertEqual(cnt.frame_count, 3)
 
-    def test_non_isolated_entries_not_visible_to_isolated(self):
-        """Isolated regions are fully independent — they do NOT fall back
-        to non-isolated (region -1) cache entries."""
+    def test_non_isolated_entries_visible_to_isolated(self):
+        """Non-isolated (region -1) cache entries are visible to isolated
+        region lookups via read-only fallback, provided the backend matches.
+        This is BC friendly — isolated compiles reuse existing work."""
         cnt = torch._dynamo.testing.CompileCounter()
 
         def f(x):
@@ -680,10 +681,47 @@ class IsolateRecompilesTests(torch._dynamo.test_case.TestCase):
         opt_global(torch.randn(3))
         self.assertEqual(cnt.frame_count, 1)
 
-        # Isolated region compiles independently, even with same backend + input
+        # Isolated region with SAME backend — falls back to global entry
         opt_isolated = torch.compile(f, backend=cnt, isolate_recompiles=True)
         opt_isolated(torch.randn(3))
+        self.assertEqual(cnt.frame_count, 1)
+
+    @torch._dynamo.config.patch(
+        recompile_limit=2,
+        fail_on_recompile_limit_hit=True,
+        automatic_dynamic_shapes=False,
+    )
+    def test_non_isolated_compiles_share_cache(self):
+        """Two non-isolated torch.compile() calls on the same function share
+        the same cache bucket (-1). They share cache hits AND share the
+        recompile limit — a compilation from either counts toward the same limit."""
+        cnt = torch._dynamo.testing.CompileCounter()
+
+        def f(x):
+            return x.exp()
+
+        opt_a = torch.compile(f, backend=cnt, dynamic=False)
+        opt_b = torch.compile(f, backend=cnt, dynamic=False)
+
+        # opt_a compiles shape 3 — entry 1 of 2
+        opt_a(torch.randn(3))
+        self.assertEqual(cnt.frame_count, 1)
+
+        # opt_b gets cache hit on shape 3
+        opt_b(torch.randn(3))
+        self.assertEqual(cnt.frame_count, 1)
+
+        # opt_b compiles shape 4 — entry 2 of 2 (shared limit)
+        opt_b(torch.randn(4))
         self.assertEqual(cnt.frame_count, 2)
+
+        # opt_a gets cache hit on shape 4 (from opt_b)
+        opt_a(torch.randn(4))
+        self.assertEqual(cnt.frame_count, 2)
+
+        # Either hitting shape 5 exceeds the shared recompile_limit
+        with self.assertRaises(FailOnRecompileLimitHit):
+            opt_a(torch.randn(5))
 
     @torch._dynamo.config.patch(automatic_dynamic_shapes=False)
     def test_isolate_recompiles_lru_per_region(self):
