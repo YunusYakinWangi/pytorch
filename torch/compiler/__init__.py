@@ -492,9 +492,6 @@ def _patch_autograd_grad():
 
     import torch.autograd
     import torch.fx.traceback as fx_traceback
-    from torch._functorch._aot_autograd.logging_utils import (
-        setup_stacktrace_preservation_hooks,
-    )
 
     _orig_grad = torch.autograd.grad
 
@@ -505,14 +502,6 @@ def _patch_autograd_grad():
                 "_patch_autograd_grad() must be used under "
                 "_non_strict_tracing_context()"
             )
-
-        roots = [
-            t.grad_fn
-            for t in (outputs if isinstance(outputs, (list, tuple)) else (outputs,))
-            if isinstance(t, torch.Tensor) and t.grad_fn is not None
-        ]
-        if roots:
-            setup_stacktrace_preservation_hooks(roots)
 
         with fx_traceback.annotate({"autograd_backward": True}):
             return _orig_grad(outputs, inputs, *args, **kwargs)
