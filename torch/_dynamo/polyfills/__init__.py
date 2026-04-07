@@ -436,12 +436,12 @@ def reduce_ex_user_defined_object(obj: T, protocol: int, /) -> tuple:  # type: i
 
     cls = type(obj)
     return (
-        copyreg.__newobj__,
+        copyreg.__newobj__,  # pyrefly: ignore[missing-attribute]
         (cls,),
         obj.__dict__,
         None,
         None,
-    )  # pyrefly: ignore[missing-attribute]
+    )
 
 
 def mutable_mapping_update(
