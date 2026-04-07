@@ -49,15 +49,8 @@ from .base import AsPythonConstantNotImplementedError, ValueMutationNew, Variabl
 from .constant import CONSTANT_VARIABLE_FALSE, CONSTANT_VARIABLE_NONE, ConstantVariable
 from .functions import UserFunctionVariable
 from .iter import IteratorVariable
-<<<<<<< HEAD
-<<<<<<< HEAD
-=======
-from .object_protocol import type_implements_nb_index
-=======
 from .object_protocol import type_implements_nb_index, validate_sequence_index
->>>>>>> 078b4cbade0 ([Dynamo][CPython] Make getitem_const self-validating to match CPython subscript functions)
 from .user_defined import UserDefinedTupleVariable
->>>>>>> 1d4377cac40 ([Dynamo][CPython] Add sq_item branch to vt_getitem + C-level _PyIndex_Check)
 
 
 if TYPE_CHECKING:
