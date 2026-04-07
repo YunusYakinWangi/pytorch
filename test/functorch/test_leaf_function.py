@@ -492,7 +492,6 @@ class GraphModule(torch.nn.Module):
         self.assertEqual(compiled_out, eager_out)
         self.assertEqual(buf_compiled, buf_eager)
 
-
     def test_make_fx_unused_input_backward(self):
         @leaf_function
         def my_fn(x, y):

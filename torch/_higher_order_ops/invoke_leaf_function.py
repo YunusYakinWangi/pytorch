@@ -658,6 +658,13 @@ class InvokeLeafFunctionAutogradOp(torch.autograd.Function):
             real_fn_callable, include_keys, exclude_keys
         )
 
+        input_tensor_meta = tuple(
+            (arg.size(), arg.dtype, arg.device)
+            if isinstance(arg, torch.Tensor)
+            else None
+            for arg in flat_args
+        )
+
         def real_backward(*grads):
             if real_state["inputs"] is None or real_state["outputs"] is None:
                 raise RuntimeError(
@@ -670,10 +677,14 @@ class InvokeLeafFunctionAutogradOp(torch.autograd.Function):
                 allow_unused=True,
             )
             result = tuple(
-                g if g is not None
-                else (torch.zeros(arg.size(), dtype=arg.dtype, device=arg.device)
-                      if isinstance(arg, torch.Tensor) else None)
-                for g, arg in zip(result, flat_args)
+                g
+                if g is not None
+                else (
+                    torch.zeros(meta[0], dtype=meta[1], device=meta[2])
+                    if meta is not None
+                    else None
+                )
+                for g, meta in zip(result, input_tensor_meta)
             )
             return result
 
@@ -690,24 +701,17 @@ class InvokeLeafFunctionAutogradOp(torch.autograd.Function):
             for arg in flat_args
         )
 
-        input_tensor_meta_for_fake = tuple(
-            (arg.size(), arg.stride(), arg.dtype, arg.device)
-            if isinstance(arg, torch.Tensor)
-            else None
-            for arg in flat_args
-        )
-
         def fake_backward(*grads):
-            result = []
-            for info, meta in zip(input_infos_for_fake, input_tensor_meta_for_fake):
+            result: list[torch.Tensor | None] = []
+            for info, meta in zip(input_infos_for_fake, input_tensor_meta):
                 if info is not None:
-                    result.append(torch.empty_strided(
-                        info.size, info.stride, dtype=info.dtype, device=info.device
-                    ))
+                    result.append(
+                        torch.empty_strided(
+                            info.size, info.stride, dtype=info.dtype, device=info.device
+                        )
+                    )
                 elif meta is not None:
-                    result.append(torch.zeros(
-                        meta[0], dtype=meta[2], device=meta[3]
-                    ))
+                    result.append(torch.zeros(meta[0], dtype=meta[1], device=meta[2]))
                 else:
                     result.append(None)
             return tuple(result)
