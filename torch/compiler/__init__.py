@@ -482,10 +482,8 @@ def _non_strict_tracing_context():
 def _patch_autograd_grad():
     """Patch autograd.grad for non-strict make_fx tracing.
 
-    Under non-strict make_fx tracing, the autograd engine does not automatically
-    install the hooks that preserve backward stack traces / seq_nr metadata.
-    This patch installs those hooks and annotates the traced backward region
-    with custom["autograd_backward"] before delegating to the real
+    This patch annotates the traced backward region with
+    custom["autograd_backward"] before delegating to the real
     torch.autograd.grad.
     """
     import functools
