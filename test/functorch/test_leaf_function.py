@@ -3,6 +3,7 @@
 """Tests for @leaf_function with make_fx, aot_function, and torch.compile."""
 
 import copy
+import unittest
 from functools import partial
 from unittest.mock import patch
 
@@ -2477,7 +2478,7 @@ instantiate_parametrized_tests(TestLeafFunctionDynamo)
 
 @skipIfTorchDynamo("leaf_function tests manage their own compilation")
 class TestLeafFunctionRegisterHook(TestCase):
-    """Tests for @leaf_function's register_hook API."""
+    """Tests for @leaf_function's register_multi_grad_hook API."""
 
     def test_hook_fires_on_backward(self):
         """Hook fires when gradient is computed during backward."""
@@ -2491,7 +2492,7 @@ class TestLeafFunctionRegisterHook(TestCase):
         def my_fn_fake(x):
             return (torch.empty_like(x),)
 
-        @my_fn.register_hook
+        @my_fn.register_multi_grad_hook
         def my_fn_hook(x_grad):
             hook_grads.append(x_grad.clone())
 
@@ -2515,7 +2516,7 @@ class TestLeafFunctionRegisterHook(TestCase):
         def my_fn_fake(x, tag, scale):
             return (torch.empty_like(x),)
 
-        @my_fn.register_hook
+        @my_fn.register_multi_grad_hook
         def my_fn_hook(x_grad, tag, scale):
             captured["tag"] = tag
             captured["scale"] = scale
@@ -2541,7 +2542,7 @@ class TestLeafFunctionRegisterHook(TestCase):
         def my_fn_fake(x, y):
             return (torch.empty_like(x),)
 
-        @my_fn.register_hook
+        @my_fn.register_multi_grad_hook
         def my_fn_hook(x_grad, y_grad):
             hook_calls.append((x_grad.clone(), y_grad.clone()))
 
@@ -2568,7 +2569,7 @@ class TestLeafFunctionRegisterHook(TestCase):
         def my_fn_fake(x, y):
             return (torch.empty_like(x),)
 
-        @my_fn.register_hook
+        @my_fn.register_multi_grad_hook
         def my_fn_hook(x_or_grad, y_val):
             hook_calls.append((x_or_grad.clone(), y_val.clone()))
 
@@ -2594,7 +2595,7 @@ class TestLeafFunctionRegisterHook(TestCase):
         def my_fn_fake(x):
             return (torch.empty_like(x),)
 
-        @my_fn.register_hook
+        @my_fn.register_multi_grad_hook
         def my_fn_hook(x_grad):
             hook_count[0] += 1
 
@@ -2617,7 +2618,7 @@ class TestLeafFunctionRegisterHook(TestCase):
         def log_fn_fake(x, tag):
             return None
 
-        @log_fn.register_hook
+        @log_fn.register_multi_grad_hook
         def log_fn_hook(x_grad, tag):
             hook_grads.append((x_grad.clone(), tag))
 
@@ -2642,7 +2643,7 @@ class TestLeafFunctionRegisterHook(TestCase):
         def my_fn_fake(x):
             return (torch.empty_like(x),)
 
-        @my_fn.register_hook
+        @my_fn.register_multi_grad_hook
         def my_fn_hook(x_grad):
             hook_grads.append(x_grad.clone())
 
@@ -2667,7 +2668,7 @@ class TestLeafFunctionRegisterHook(TestCase):
         def my_fn_fake(x):
             return (torch.empty_like(x),)
 
-        @my_fn.register_hook
+        @my_fn.register_multi_grad_hook
         def my_fn_hook(x_grad):
             hook_grads.append(x_grad.clone())
 
@@ -2699,7 +2700,7 @@ class TestLeafFunctionRegisterHook(TestCase):
         def my_fn_fake(x):
             return (torch.empty_like(x),)
 
-        @my_fn.register_hook
+        @my_fn.register_multi_grad_hook
         def my_fn_hook(x_grad):
             hook_count[0] += 1
 
@@ -2709,30 +2710,62 @@ class TestLeafFunctionRegisterHook(TestCase):
         out.sum().backward()
         self.assertEqual(hook_count[0], 1)
 
-    def test_register_multi_grad_hook_alias(self):
-        """register_multi_grad_hook is an alias for register_hook."""
-        hook_calls = []
+    @unittest.expectedFailure
+    def test_hook_fires_with_aot_function(self):
+        """Hook fires under aot_function compilation."""
+        hook_grads = []
 
         @leaf_function
-        def my_fn(x, y):
-            return (x * 2 + y * 3,)
+        def my_fn(x):
+            return (x * 3,)
 
         @my_fn.register_fake
-        def my_fn_fake(x, y):
+        def my_fn_fake(x):
             return (torch.empty_like(x),)
 
         @my_fn.register_multi_grad_hook
-        def my_fn_hook(x_grad, y_grad):
-            hook_calls.append((x_grad.clone(), y_grad.clone()))
+        def my_fn_hook(x_grad):
+            hook_grads.append(x_grad.clone())
 
-        x = torch.randn(3, requires_grad=True)
-        y = torch.randn(3, requires_grad=True)
-        out = my_fn(x, y)[0]
+        def f(x):
+            return my_fn(x)[0]
+
+        x = torch.randn(4, requires_grad=True)
+        aot_f = aot_function(f, fw_compiler=nop, bw_compiler=nop)
+        out = aot_f(x)
         out.sum().backward()
 
-        self.assertEqual(len(hook_calls), 1)
-        self.assertEqual(hook_calls[0][0], torch.full((3,), 2.0))
-        self.assertEqual(hook_calls[0][1], torch.full((3,), 3.0))
+        self.assertEqual(len(hook_grads), 1)
+        self.assertEqual(hook_grads[0], torch.full((4,), 3.0))
+
+    @unittest.expectedFailure
+    def test_hook_side_effect_only_aot_function(self):
+        """Hook on side-effect-only leaf function works under aot_function."""
+        hook_grads = []
+
+        @leaf_function
+        def log_fn(x, tag):
+            return None
+
+        @log_fn.register_fake
+        def log_fn_fake(x, tag):
+            return None
+
+        @log_fn.register_multi_grad_hook
+        def log_fn_hook(x_grad, tag):
+            hook_grads.append(tag)
+
+        def f(x):
+            y = x * 2
+            log_fn(y, "compiled")
+            return y
+
+        x = torch.randn(4, requires_grad=True)
+        aot_f = aot_function(f, fw_compiler=nop, bw_compiler=nop)
+        out = aot_f(x)
+        out.sum().backward()
+
+        self.assertEqual(hook_grads, ["compiled"])
 
 
 if __name__ == "__main__":

@@ -514,9 +514,9 @@ def leaf_function(
         To validate that your fake implementation matches the real function's outputs, set
         ``torch._dynamo.config.leaf_function_validate_outputs = True``.
 
-        **register_hook / register_multi_grad_hook (optional)**:
-        You can register a backward hook via ``@fn.register_hook`` (or equivalently
-        ``@fn.register_multi_grad_hook``) to run code when gradients have been computed
+        **register_multi_grad_hook (optional)**:
+        You can register a backward hook via ``@fn.register_multi_grad_hook``
+        to run code when gradients have been computed
         for all requires_grad tensor inputs during backward. The hook fires exactly once
         per backward pass. The hook function has the same signature as the leaf function;
         each requires_grad tensor argument receives the corresponding gradient instead
@@ -535,7 +535,7 @@ def leaf_function(
             ... def debug_log_fake(t, tag):
             ...     return None
             ...
-            >>> @debug_log.register_hook
+            >>> @debug_log.register_multi_grad_hook
             ... def debug_log_hook(t_grad, tag):
             ...     print(f"[{tag}][bwd] norm={t_grad.norm().item()}")
             ...
@@ -780,7 +780,6 @@ def leaf_function(
         inner._torchdynamo_leaf_hook_fake_fn = lambda *args, **kwargs: None  # type: ignore[attr-defined]
         return inner
 
-    inner.register_hook = register_hook_setter  # type: ignore[attr-defined]
     inner.register_multi_grad_hook = register_hook_setter  # type: ignore[attr-defined]
 
     return inner

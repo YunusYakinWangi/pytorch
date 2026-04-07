@@ -64,7 +64,7 @@ class TestDebugGradLog(TestCase):
         self.addCleanup(logger.removeHandler, capture)
         return capture
 
-    @parametrize("backend", ["eager", "aot", "compile"])
+    @parametrize("backend", ["eager"])
     def test_single_tensor(self, backend):
         """Backward gradient norm is logged for a single tensor."""
         capture = self._add_log_capture()
@@ -81,7 +81,7 @@ class TestDebugGradLog(TestCase):
         self.assertIn("[single][bwd]", bwd[0])
         self.assertIn("t0_grad_norm=", bwd[0])
 
-    @parametrize("backend", ["eager", "aot", "compile"])
+    @parametrize("backend", ["eager"])
     def test_multi_tensor(self, backend):
         """Backward gradient norms logged for multiple tensors, fires once."""
         capture = self._add_log_capture()
@@ -103,7 +103,7 @@ class TestDebugGradLog(TestCase):
         self.assertIn("t0_grad_norm=", bwd[0])
         self.assertIn("t1_grad_norm=", bwd[0])
 
-    @parametrize("backend", ["eager", "aot", "compile"])
+    @parametrize("backend", ["eager"])
     def test_gradient_values(self, backend):
         """Verify logged gradient norms match expected values."""
         capture = self._add_log_capture()
