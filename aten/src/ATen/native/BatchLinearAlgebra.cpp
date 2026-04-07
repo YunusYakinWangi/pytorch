@@ -3852,12 +3852,11 @@ Tensor& linalg_solve_triangular_out(
 
   // Some definitions:
   // (A, B) := X denotes the solution to the system in question.
+  //
+  // Let X be a tensor such that X.is_conj()/.is_neg() == False, then
   // X* := X.conj().
   // -X := X._neg_view().
   // -X* := X.conj()._neg_view() <=> X._neg_view().conj().
-  //
-  // We assume that X, A, B are just storages, i.e.
-  // tensors devoid of conj/neg flags.
   //
   // Note the following properties:
   // X = -(-X) = --X.
@@ -4026,6 +4025,7 @@ Tensor& linalg_solve_triangular_out(
     } else {
       // Here A is col-major and B is row-major
       // Match layouts by transposing the problem and picking an op
+      //
       // Optimizations for avoiding conj materializations:
       // (A*, B) -> (A^H, B^T) = (op(A.conj()), B^T), with op(A)=A^H;
       // (A, B*) -> (A^T, B*^T) = (A*^T, B^T)* = (A^H, B^T) = (op(A), B^T), with op(A)=A^H;
