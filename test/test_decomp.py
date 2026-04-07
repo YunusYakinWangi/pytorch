@@ -1327,6 +1327,19 @@ class DecompOneOffTests(TestCase):
             in generated_codes[1]
         )
 
+    @onlyCPU
+    def test_addmm_out_dtype_decomp(self, device):
+        from torch._subclasses.fake_tensor import FakeTensorMode
+
+        with FakeTensorMode():
+            a = torch.randn(4, 8, dtype=torch.bfloat16)
+            b = torch.randn(8, 4, dtype=torch.bfloat16)
+            c = torch.zeros(4, 4, dtype=torch.float32)
+            out = torch.addmm(c, a, b, out_dtype=torch.float32)
+
+        self.assertEqual(out.dtype, torch.float32)
+        self.assertEqual(out.shape, (4, 4))
+
 
 instantiate_device_type_tests(DecompOneOffTests, globals())
 
