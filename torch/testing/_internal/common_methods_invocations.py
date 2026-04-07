@@ -12827,14 +12827,11 @@ op_db: list[OpInfo] = [
                    'TestMathBits', 'test_conj_view', device_type=('cuda', 'xpu')),
                DecorateInfo(
                    unittest.skip('Skipped!'),
-                   'TestMathBits',
-                   'test_neg_view',
                    device_type='xpu',
                    dtypes=(torch.float64,)),
            ],
            sample_inputs_func=sample_inputs_baddbmm,
            skips=(
-               # Issue with conj and torch dispatch, see https://github.com/pytorch/pytorch/issues/82479
                DecorateInfo(
                    unittest.skip("Skipped!"),
                    'TestSchemaCheckModeOpInfo',
