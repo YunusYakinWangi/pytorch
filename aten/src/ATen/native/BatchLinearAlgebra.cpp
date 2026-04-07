@@ -1843,7 +1843,21 @@ TORCH_IMPL_FUNC(linalg_cholesky_ex_out)(const Tensor& A,
 
   cholesky_stub(L.device().type(), L, info, upper);
 
-  if (!cpu) {
+  // On non-CPU devices (MAGMA) the pre-copy doesn't zero the unused triangle,
+  // so we must clean up after. On macOS, Accelerate's LAPACK writes into the
+  // unreferenced triangle for matrices larger than its internal block size
+  // (e.g. n > 64), violating the LAPACK spec which says "not referenced"
+  // elements are "never read, written to, or otherwise accessed"
+  // (see https://www.netlib.org/lapack/lug/node121.html).
+  // We work around this by applying the same cleanup on macOS.
+  // TODO(https://github.com/pytorch/pytorch/issues/179152): always
+  // clean up the unused triangle on all platforms.
+#if defined(__APPLE__)
+  constexpr bool needs_triangle_cleanup = true;
+#else
+  const bool needs_triangle_cleanup = !cpu;
+#endif
+  if (needs_triangle_cleanup) {
     if (upper) {
       L.triu_();
     } else {
@@ -3862,25 +3876,35 @@ Tensor& linalg_solve_triangular_out(
   }
 
   // Prepare A to be BLAS-compliant.
-  // NOTE: mem overlaps are fine as long as either cols or rows are contiguous.
-  // FIXME: batch overlaps are permissible, but the kernel loops over the batch dims,
-  // so the batch dims are being materialized.
-  // This behavior is inhereted from the previous implementations.
-  const auto pA = [&unitriangular](const auto& A) -> c10::MaybeOwned<Tensor> {
-    if (can_flatten_batch_dims(A) && (A.stride(-2) == 1 || A.stride(-1) == 1)) {
+  const auto pA = [unitriangular](const auto& A, const auto& B) -> c10::MaybeOwned<Tensor> {
+    // NOTE: mem overlaps are fine as long as either cols or rows are contiguous.
+    // FIXME: batch overlaps are permissible, but the kernel loops over the batch dims,
+    // so the batch dims are being materialized.
+    // This behavior is inhereted from the previous implementations.
+    if (can_flatten_batch_dims(A) && (A.stride(-2) == 1 || A.stride(-1) == 1)
+      // A.is_neg and unitriangular triggers a clone because (A, B) is not linear in the first argument, i.e.
+      // (-A + I, B) = -(A - I, B) = -(A + I - 2I, B) != (A + I, B) - 2B.
+      && !(A.is_neg() && unitriangular)
+    ) {
       return c10::MaybeOwned<Tensor>::borrowed(A);
     } else {
+      // Here A will be cloned
       // NOTE: This is the only place A is copied!
+      //
+      // Conj materialization optimizations:
+      // (A.is_conj() != B.is_conj()) might imply materialized conj in memory, see solve_with_matching_layout.
+      // So, we make a copy of A such that (A_clone.is_conj() == B.is_conj().
       auto A_clone = cloneMatrix(
-        A.is_neg() ? A._neg_view() : A,
+        B.is_conj() ? A.conj() : A,
         // NOTE: preserve memory format for faster clone
         /*make_col_major_like=*/(A.stride(-1) != 1)
       );
-      A_clone._set_neg(A.is_neg());
+      A_clone._set_conj(B.is_conj());
       return c10::MaybeOwned<Tensor>::owned(std::move(A_clone));
     }
-  }(A_);
+  }(A_, B_);
 
+  // Prepare solve output to be BLAS-compliant.
   auto pOut = [&]() -> c10::MaybeOwned<Tensor> {
     // Out is borrowed when
     // - out is empty, or
@@ -3992,7 +4016,11 @@ Tensor& linalg_solve_triangular_out(
       // (A, B*) = (A*, B)* -> ((A^T)^H, B)*, op(A) = A^H;
       upper = !upper;
       if (A.is_conj() != B.is_conj()) {
-        solve_with_matching_layout(A.mH(), B, TransposeType::ConjTranspose);
+        solve_with_matching_layout(
+          A.is_conj() ? A.mH() : A.mT(),
+          B.is_conj() ? B.conj() : B,
+          TransposeType::ConjTranspose
+        );
       } else {
         solve_with_matching_layout(A.mT(), B, TransposeType::Transpose);
       }
