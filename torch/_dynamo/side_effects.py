@@ -431,9 +431,7 @@ class SideEffects:
 
         if isinstance(item, variables.UserDefinedObjectVariable):
             # Checks if the underlying dict or tuple vt has been modified
-            return item in self.store_attr_mutations or item.is_underlying_vt_modified(
-                self
-            )
+            return item in self.store_attr_mutations or item.is_base_vt_modified(self)
 
         if self.is_attribute_mutation(item):
             return item in self.store_attr_mutations
@@ -536,6 +534,11 @@ class SideEffects:
             variable_cls = FrozenDataClassVariable
         elif issubclass(user_cls, BaseException):
             variable_cls = variables.UserDefinedExceptionObjectVariable
+        elif issubclass(
+            user_cls,
+            variables.user_defined._CONSTANT_BASE_TYPES,
+        ):
+            variable_cls = variables.UserDefinedConstantVariable
         elif variables.InspectVariable.is_matching_class(user_cls):
             variable_cls = variables.InspectVariable
         assert issubclass(variable_cls, variables.UserDefinedObjectVariable)
@@ -568,6 +571,12 @@ class SideEffects:
                 # Structseq tp_new requires a sequence argument and rejects
                 # tuple.__new__, so create a dummy with None placeholders.
                 obj = user_cls([None] * user_cls.n_fields)
+            elif init_args and issubclass(
+                user_cls,
+                variables.user_defined._CONSTANT_BASE_TYPES,
+            ):
+                example_args = [arg.as_python_constant() for arg in init_args]
+                obj = base_cls.__new__(user_cls, *example_args)  # pyrefly: ignore[bad-specialization]
             else:
                 obj = base_cls.__new__(user_cls)
         return obj
@@ -1181,7 +1190,9 @@ class SideEffects:
                 if isinstance(
                     var,
                     variables.UserDefinedDictVariable,
-                ) and self.is_modified(var._dict_vt):
+                ) and self.is_modified(
+                    var._base_vt  # pyrefly: ignore[bad-argument-type]
+                ):
                     # Do dict related update manually here. The store_attr
                     # mutations will be applied later.
                     varname_map = {}
@@ -1213,7 +1224,7 @@ class SideEffects:
                         ]
                     )
 
-                    cg(var._dict_vt, allow_cache=False)  # Don't codegen via source
+                    cg(var._base_vt, allow_cache=False)  # Don't codegen via source
                     cg.extend_output(
                         [
                             create_instruction(
@@ -1232,11 +1243,15 @@ class SideEffects:
                             create_instruction("POP_TOP"),
                         ]
                     )
-                    _maybe_log_side_effect(var._dict_vt)
+                    _maybe_log_side_effect(
+                        var._base_vt  # pyrefly: ignore[bad-argument-type]
+                    )
                 elif isinstance(
                     var,
                     variables.UserDefinedListVariable,
-                ) and self.is_modified(var._list_vt):
+                ) and self.is_modified(
+                    var._base_vt  # pyrefly: ignore[bad-argument-type]
+                ):
                     # Update the list to the updated items. Be careful in
                     # calling the list methods and not the overridden methods.
                     varname_map = {}
@@ -1252,7 +1267,7 @@ class SideEffects:
                         ]
                     )
 
-                    cg(var._list_vt, allow_cache=False)  # Don't codegen via source
+                    cg(var._base_vt, allow_cache=False)  # Don't codegen via source
                     cg.extend_output(
                         [
                             create_instruction(
@@ -1271,7 +1286,9 @@ class SideEffects:
                             create_instruction("POP_TOP"),
                         ]
                     )
-                    _maybe_log_side_effect(var._list_vt)
+                    _maybe_log_side_effect(
+                        var._base_vt  # pyrefly: ignore[bad-argument-type]
+                    )
 
                 # Applying mutations involves two steps: 1) Push all
                 # reconstructed objects onto the stack.  2) Call STORE_ATTR to
