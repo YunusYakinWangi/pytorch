@@ -538,13 +538,15 @@ PyObject* TensorGuards_check_verbose(
     PyObject* item = PyTuple_GET_ITEM(args, i);
     if (Py_TYPE(item) != checks[i].pytype) {
       std::stringstream fail_reason;
-      PyObject* type_str = PyObject_Str(PyObject_Type(item));
+      PyObject* type_str =
+          PyObject_Str(reinterpret_cast<PyObject*>(Py_TYPE(item)));
       fail_reason << "expected type of '" << tensor_check_names[i]
                   << "' to be a tensor type, ";
       if (!type_str) {
         fail_reason << "but found a different type";
       } else {
         fail_reason << "' but found " << PyUnicode_AsUTF8(type_str);
+        Py_DECREF(type_str);
       }
       return Py_BuildValue("s", fail_reason.str().c_str());
     }
@@ -1059,6 +1061,48 @@ static PyObject* assert_alignment(PyObject* dummy, PyObject* args) {
   Py_RETURN_TRUE;
 }
 
+static PyObject* copy_misaligned(PyObject* dummy, PyObject* item) {
+  /*
+   * If the tensor's data pointer is not 16-byte aligned, return a
+   * clone that preserves strides. Otherwise return the original
+   * tensor (new reference).  Implemented in C++ so the aligned
+   * fast-path is just a pointer check with minimal Python overhead.
+   *
+   * NOTE: kAlignment is hardcoded to match torch._inductor.utils.ALIGNMENT.
+   * If alignment requirements ever change or become per-platform, this
+   * constant must be updated (or turned into a parameter).
+   */
+  constexpr size_t kAlignment = 16;
+
+  if (!THPVariable_CheckExact(item) && !THPVariable_Check(item)) {
+    PyErr_SetString(PyExc_TypeError, "expected Tensor()");
+    return nullptr;
+  }
+
+  at::Tensor tensor = THPVariable_Unpack(item);
+
+  if (reinterpret_cast<uintptr_t>(tensor.data_ptr()) % kAlignment == 0) {
+    // Already aligned – return the original tensor.
+    Py_INCREF(item);
+    return item;
+  }
+
+  // Misaligned – clone while preserving strides.
+  // Same logic as torch._inductor.utils.clone_preserve_strides.
+  int64_t needed_size = 0;
+  if (tensor.numel() > 0) {
+    auto sizes = tensor.sizes();
+    auto strides = tensor.strides();
+    for (int64_t i = 0; i < tensor.dim(); ++i) {
+      needed_size += (sizes[i] - 1) * strides[i];
+    }
+    needed_size += 1;
+  }
+  at::Tensor flat = at::as_strided(tensor, {needed_size}, {1}).clone();
+  at::Tensor result = at::as_strided(flat, tensor.sizes(), tensor.strides());
+  return THPVariable_Wrap(std::move(result));
+}
+
 template <typename T>
 static void unwrap_size_tuple(PyObject* obj, T& output) {
   TORCH_CHECK(PyTuple_CheckExact(obj));
@@ -1181,6 +1225,7 @@ static PyMethodDef _methods[] = {
     {"check_obj_id", check_obj_id, METH_VARARGS, nullptr},
     {"assert_size_stride", assert_size_stride, METH_VARARGS, nullptr},
     {"assert_alignment", assert_alignment, METH_VARARGS, nullptr},
+    {"copy_misaligned", copy_misaligned, METH_O, nullptr},
     {"dict_version", dict_version, METH_O, nullptr},
     {"_empty_strided_cpu", _empty_strided_cpu, METH_VARARGS, nullptr},
     {"_empty_strided_cpu_pinned",
@@ -4681,13 +4726,15 @@ class TENSOR_MATCH : public LeafGuard {
 
     if (Py_TYPE(value) != _tensor_check->pytype) {
       std::stringstream fail_reason;
-      PyObject* type_str = PyObject_Str(PyObject_Type(value));
+      PyObject* type_str =
+          PyObject_Str(reinterpret_cast<PyObject*>(Py_TYPE(value)));
       fail_reason << "expected type of '" << _tensor_name
                   << "' to be a tensor type, ";
       if (!type_str) {
         fail_reason << "but found a different type";
       } else {
         fail_reason << "' but found " << PyUnicode_AsUTF8(type_str);
+        Py_DECREF(type_str);
       }
       return GuardDebugInfo(false, fail_reason.str(), 0);
     }
@@ -6020,22 +6067,47 @@ class TypeDictGuardAccessor : public GuardAccessor {
 
   // NB: Intentional duplication between check_nopybind and
   // check_verbose_nopybind.
+  //
+  // In CPython 3.12+, types with Py_TPFLAGS_MANAGED_DICT (e.g. enum.Enum)
+  // can have tp_dict=NULL because the dict is lazily materialized. Use
+  // PyType_GetDict() which handles this transparently. It returns a new
+  // reference, so we must decref after use.
   bool check_nopybind(PyObject* obj, bool matches_dict_tag = false)
       override { // borrowed ref
+#if PY_VERSION_HEX >= 0x030C0000
+    PyObject* x = PyType_GetDict((PyTypeObject*)obj); // new ref
+    if (x == nullptr) {
+      return false;
+    }
+    bool result = _guard_manager->check_nopybind(x);
+    Py_DECREF(x);
+    return result;
+#else
     PyObject* x = ((PyTypeObject*)obj)->tp_dict; // borrowed ref
     if (x == nullptr) {
       return false;
     }
     return _guard_manager->check_nopybind(x);
+#endif
   }
 
   GuardDebugInfo check_verbose_nopybind(
       PyObject* obj) override { // borrowed ref
+#if PY_VERSION_HEX >= 0x030C0000
+    PyObject* x = PyType_GetDict((PyTypeObject*)obj); // new ref
+    if (x == nullptr) {
+      return GuardDebugInfo(false, "null type dict on " + repr(), 0);
+    }
+    auto result = _guard_manager->check_verbose_nopybind(x);
+    Py_DECREF(x);
+    return result;
+#else
     PyObject* x = ((PyTypeObject*)obj)->tp_dict; // borrowed ref
     if (x == nullptr) {
       return GuardDebugInfo(false, "null type dict on " + repr(), 0);
     }
     return _guard_manager->check_verbose_nopybind(x);
+#endif
   }
 
   std::string repr() const override {
