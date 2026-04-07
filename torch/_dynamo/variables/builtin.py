@@ -2107,6 +2107,7 @@ class BuiltinVariable(BaseBuiltinVariable):
             (
                 ConstantVariable,
                 SymNodeVariable,
+                variables.StringFormatVariable,
                 TensorVariable,
                 ListVariable,
                 TupleVariable,
