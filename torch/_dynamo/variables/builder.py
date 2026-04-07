@@ -1843,7 +1843,7 @@ class VariableBuilder:
             isinstance(value, _CONSTANT_BASE_TYPES)
             and type(value) not in common_constant_types
         ):
-            self.install_guards(GuardBuilder.EQUALS_MATCH)
+            self.install_guards(GuardBuilder.CONSTANT_SUBCLASS_MATCH)
             result = UserDefinedConstantVariable(value, source=self.source)
         else:
             result = UserDefinedObjectVariable(value, source=self.source)

@@ -15173,6 +15173,31 @@ def forward(self, L_x_ : torch.Tensor):
         ret2 = compilefn()
         self.assertEqual(ret1, ret2)
 
+    def test_constant_subclass_guard_recompiles(self):
+        class MyInt(int):
+            def __eq__(self, other):
+                raise RuntimeError("should not be called during guard check")
+
+        cnt = torch._dynamo.testing.CompileCounter()
+
+        @torch.compile(backend=cnt)
+        def f(x, y):
+            return x + y
+
+        r1 = f(torch.tensor(1), MyInt(5))
+        self.assertEqual(r1.item(), 6)
+        self.assertEqual(cnt.frame_count, 1)
+
+        # Different value -> recompile
+        r2 = f(torch.tensor(1), MyInt(10))
+        self.assertEqual(r2.item(), 11)
+        self.assertEqual(cnt.frame_count, 2)
+
+        # Same as first -> cache hit
+        r3 = f(torch.tensor(1), MyInt(5))
+        self.assertEqual(r3.item(), 6)
+        self.assertEqual(cnt.frame_count, 2)
+
 
 class MiscTestsPyTree(torch._inductor.test_case.TestCase):
     @parametrize_pytree_module

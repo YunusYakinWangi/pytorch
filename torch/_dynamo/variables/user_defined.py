@@ -280,7 +280,6 @@ class UserDefinedClassVariable(UserDefinedVariable):
             float.__new__,
             str.__new__,
             bytes.__new__,
-            complex.__new__,
         }
         return c_new_fns.union(exceptions)
 
@@ -2803,7 +2802,7 @@ class KeyedJaggedTensorVariable(UserDefinedObjectVariable):
         return super().var_getattr(tx, name)
 
 
-_CONSTANT_BASE_TYPES = (int, float, str, bytes, complex)
+_CONSTANT_BASE_TYPES = (int, float, str, bytes)
 
 _constant_base_methods: dict[type, set[Any]] = {
     t: {m for m in t.__dict__.values() if callable(m)} for t in _CONSTANT_BASE_TYPES
