@@ -2725,15 +2725,24 @@ class ActivationCheckpointingNonStrictTracerTests(torch._dynamo.test_case.TestCa
                 )
 
         gm = self._trace_train_step(Model(), torch.randn(2, 4))
-        backward_seq_nrs = [
+        forward_seq_nrs = {
             node.meta["seq_nr"]
             for node in gm.graph.nodes
-            if node.meta.get("custom", {}).get("autograd_backward", False)
+            if node.op == "call_function"
+            and not node.meta.get("custom", {}).get("autograd_backward", False)
             and "seq_nr" in node.meta
-        ]
+        }
+        backward_seq_nrs = {
+            node.meta["seq_nr"]
+            for node in gm.graph.nodes
+            if node.op == "call_function"
+            and node.meta.get("custom", {}).get("autograd_backward", False)
+            and "seq_nr" in node.meta
+        }
 
+        self.assertTrue(forward_seq_nrs)
         self.assertTrue(backward_seq_nrs)
-        self.assertTrue(all(seq_nr >= 0 for seq_nr in backward_seq_nrs))
+        self.assertSetEqual(backward_seq_nrs, forward_seq_nrs)
 
     def test_patch_autograd_grad_requires_non_strict_tracing(self):
         x = torch.randn(2, 4, requires_grad=True)
