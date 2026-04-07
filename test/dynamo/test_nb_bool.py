@@ -209,27 +209,23 @@ class NbBoolTests(TestCase):
 
     # --- Metaclass with __bool__ (UserDefinedClassVariable path) ---
 
-    def test_metaclass_with_bool_false(self):
-        class FalseMeta(type):
+    def test_metaclass_bool(self):
+        class Foo(type):
             def __bool__(cls):
                 return False
 
-        class A(metaclass=FalseMeta):
+        class A(metaclass=Foo):
+            pass
+
+        class Bar(type):
+            pass
+
+        class B(metaclass=Bar):
             pass
 
         def fn(x):
-            return x + 1 if bool(A) else x - 1
-
-        x = torch.randn(4)
-        compiled = torch.compile(fn, backend="eager", fullgraph=True)
-        self.assertEqual(fn(x), compiled(x))
-
-    def test_metaclass_with_bool_default(self):
-        class B:
-            pass
-
-        def fn(x):
-            return x + 1 if bool(B) else x - 1
+            # A's metaclass defines __bool__ returning False; B's does not (truthy).
+            return x + bool(A) + bool(B)
 
         x = torch.randn(4)
         compiled = torch.compile(fn, backend="eager", fullgraph=True)
