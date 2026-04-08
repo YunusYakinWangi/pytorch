@@ -171,14 +171,19 @@ jobs:
           Your goal is to complete the task below, then create a pull request with your changes.
 
           ENVIRONMENT:
-          - You have a full checkout of pytorch at $(pwd)
-          - PyTorch has already been built$([ "${HAS_GPU}" = "true" ] && echo " with CUDA support") in a Docker container
-          $([ "${HAS_GPU}" = "true" ] && echo "- A ${GPU_NAME} GPU is available inside the container")
-          - To run tests, use: docker exec -t ${CONTAINER} sh -c '<command>'
-            For example: docker exec -t ${CONTAINER} sh -c 'python test/test_torch.py -k test_abs'
-          $([ "${HAS_GPU}" = "true" ] && echo "- To run CUDA tests: docker exec -t ${CONTAINER} sh -c 'python test/test_cuda.py -k test_name'")
-          - To rebuild after making changes: docker exec -t ${CONTAINER} sh -c '.ci/pytorch/build.sh'
-          - The workspace is bind-mounted, so file edits on the host are visible inside the container
+          You are running on the host machine. A Docker container is running alongside
+          you with PyTorch already built and all dependencies installed. The repository
+          checkout is bind-mounted into the container, so when you edit files with
+          Read/Write/Edit they are immediately visible inside the container.
+
+          You MUST use docker exec to run Python, tests, or builds because Python and
+          PyTorch are installed inside the container, not on the host:
+            docker exec -t ${CONTAINER} sh -c 'python test/test_torch.py -k test_abs'
+            docker exec -t ${CONTAINER} sh -c '.ci/pytorch/build.sh'
+          $([ "${HAS_GPU}" = "true" ] && echo "
+          A ${GPU_NAME} GPU is available inside the container.")
+
+          Use git and gh directly on the host (not inside docker exec).
 
           TASK:
           ${PROMPT}
@@ -187,7 +192,7 @@ jobs:
           - Read and understand the relevant code before making changes
           - Follow the coding style in CLAUDE.md
           - Make the necessary code changes
-          - Run relevant tests to validate your changes using docker exec
+          - Run relevant tests inside the container to validate your changes
           - If tests fail, fix the issues and retest
           - Create a new branch, commit your changes with a clear commit message, and push it
           - Create a PR using gh pr create against the main branch
