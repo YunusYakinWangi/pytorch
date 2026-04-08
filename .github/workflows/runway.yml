@@ -23,7 +23,7 @@ on:
           - linux.aws.a100
           - linux.c7i.4xlarge
       build:
-        description: "Build PyTorch (true = incremental build from snapshot, false = wheel-only from snapshot)"
+        description: "Build PyTorch upfront (true = run build.sh eagerly, false = let the agent build on demand)"
         required: false
         type: boolean
         default: true
@@ -172,22 +172,6 @@ jobs:
         run: |
           docker exec -t "${CONTAINER}" sh -c '.ci/pytorch/build.sh'
 
-      # When build is skipped, install the wheel from the snapshot so tests can
-      # still import torch.
-      - name: Install wheel (no-build mode)
-        if: >-
-          (inputs.build == false || github.event.client_payload.build == false)
-          && steps.snapshot.outputs.snapshot-found == 'true'
-        env:
-          CONTAINER: ${{ steps.docker.outputs.container-name }}
-        run: |
-          if ls dist/*.whl 1>/dev/null 2>&1; then
-            echo "Installing wheel from snapshot..."
-            docker exec -t "${CONTAINER}" sh -c 'pip install dist/*.whl'
-          else
-            echo "No wheel found in snapshot"
-          fi
-
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -230,12 +214,13 @@ jobs:
           C++ edits require an incremental rebuild:
             docker exec -t ${CONTAINER} sh -c '.ci/pytorch/build.sh'"
           elif [ "${SNAPSHOT_FOUND}" = "true" ]; then
-            BUILD_STATUS="PyTorch is installed from a pre-built wheel.
-          To make source edits take effect, rebuild:
+            BUILD_STATUS="PyTorch is NOT installed yet, but build artifacts are cached from a
+          recent snapshot. Run this for a fast incremental build (~2-3 min):
             docker exec -t ${CONTAINER} sh -c '.ci/pytorch/build.sh'"
           else
             BUILD_STATUS="PyTorch is NOT built. If you need to build/test, run:
-            docker exec -t ${CONTAINER} sh -c '.ci/pytorch/build.sh'"
+            docker exec -t ${CONTAINER} sh -c '.ci/pytorch/build.sh'
+          Note: this will be a full build (~20 min) since no snapshot was found."
           fi
 
           claude -p "You are running as an autonomous agent in PyTorch CI.
