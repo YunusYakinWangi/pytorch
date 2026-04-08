@@ -490,10 +490,8 @@ class CompiledFxGraph(OutputCode):
     _triton_bundle: TritonBundle | None = None
     _wrap_compiled_regions: bool = False
     _defers_input_alignment: bool = False
-    # Metadata-stripped copy of the FX graph for fake tensor propagation.
-    # Running this graph under FakeTensorMode re-derives output shapes
-    # (including aliasing) from the input shapes.
-    _original_gm: torch.fx.GraphModule | None = None
+    # Lambda for FakeTensor warmup - returns output shapes given fake inputs
+    compiled_meta: Callable[[Sequence[Any]], tuple[Any, ...]] | None = None
 
     def __init__(
         self,
@@ -650,16 +648,38 @@ class CompiledFxGraph(OutputCode):
         # This is set at compile time to avoid runtime overhead
         self._wrap_compiled_regions = config.wrap_inductor_compiled_regions
 
-        if self._wrap_compiled_regions:
-            # Store a metadata-stripped copy of the FX graph. Running this
-            # under FakeTensorMode re-derives output shapes and aliasing
-            # from the input fake tensors.
-            import copy
+        # Create compiled_meta lambda for FakeTensor warmup execution.
+        # Captures output values (FakeTensors, SymInts, constants) from graph's
+        # output node at compile time. These are returned directly during warmup
+        # to preserve symbolic relationships.
+        output_node = list(gm.graph.nodes)[-1]
+        assert output_node.op == "output", "Last node must be output node"
+        output_vals: list[Any] = []
+        for out in output_node.args[0]:
+            if isinstance(out, torch.fx.Node):
+                if "val" not in out.meta:
+                    raise RuntimeError(
+                        f"Output node '{out.name}' missing meta['val']. "
+                        "This indicates a bug in tracing/propagation."
+                    )
+                output_vals.append(out.meta["val"])
+            else:
+                # Non-node constant (None, int, bool, etc.)
+                output_vals.append(out)
 
-            gm_copy = copy.deepcopy(gm)
-            for node in gm_copy.graph.nodes:
-                node.meta.clear()
-            self._original_gm = gm_copy
+        def _compiled_meta(inputs: Sequence[Any]) -> tuple[Any, ...]:
+            return tuple(output_vals)
+
+        self.compiled_meta = _compiled_meta
+
+    def _has_fake_tensor_inputs(self, inputs: Sequence[Any]) -> bool:
+        """Check if any input is a FakeTensor."""
+        from torch._subclasses.fake_tensor import FakeTensor
+        return any(
+            isinstance(inp, FakeTensor)
+            for inp in inputs
+            if isinstance(inp, torch.Tensor)
+        )
 
     def __del__(self) -> None:
         if self.compiled_fn_runner is not None:
@@ -672,6 +692,13 @@ class CompiledFxGraph(OutputCode):
 
     def __call__(self, inputs: Sequence[Any]) -> Any:
         assert self.current_callable is not None
+
+        # FakeTensor short-circuit: if inputs contain FakeTensors, use
+        # compiled_meta to return output shapes. This supports fake tensor
+        # warmup where we compile with FakeTensors to pre-populate the
+        # cache, then run with real tensors later.
+        if self._has_fake_tensor_inputs(inputs):
+            return self.compiled_meta(inputs)
 
         if (
             torch._inductor.debug.RECORD_GRAPH_EXECUTION
