@@ -9367,7 +9367,6 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
         actual_out = compiled_fn(view)
         self.assertEqual(reference_out.stride(), actual_out.stride())
 
-    @xfail_if_mps_unimplemented  # aten::nonzero_static not implemented for MPS
     def test_nonzero_static_stride(self):
         from torch._subclasses import FakeTensorMode
 
@@ -9425,7 +9424,6 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
             ],
         )
 
-    @xfail_if_mps  # MPS does not support float64
     def test_select_scatter_dtype_consistency(self):
         def fn(x, a):
             return (torch.select_scatter(x, a, 1, 0),)
@@ -9434,6 +9432,8 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
             torch.int64,
             torch.float64,
         ]:
+            if not self.is_dtype_supported(dtype):
+                continue
             self.common(
                 fn,
                 [
@@ -9546,7 +9546,6 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
         else:
             assertGeneratedKernelCountEqual(self, 1)
 
-    @xfail_if_mps  # MPS does not support float64
     def test_slice_scatter_dtype_consistency(self):
         # Test dtype consistency of slice_scatter
         def fn(x, y):
@@ -9556,6 +9555,8 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
             torch.int64,
             torch.float64,
         ]:
+            if not self.is_dtype_supported(dtype):
+                continue
             self.common(
                 fn,
                 [
