@@ -13,6 +13,10 @@ on:
         description: "GitHub token for gh CLI auth (e.g. a PAT to create PRs as yourself)"
         required: true
         type: string
+  # TODO: Remove this trigger after initial testing
+  push:
+    branches:
+      - claude-agent-workflow
 
 jobs:
   run_agent:
@@ -46,7 +50,7 @@ jobs:
 
       - name: Authenticate gh CLI
         env:
-          GH_TOKEN: ${{ github.event.client_payload.gh_token || inputs.gh_token }}
+          GH_TOKEN: ${{ github.event.client_payload.gh_token || inputs.gh_token || secrets.GITHUB_TOKEN }}
         run: |
           echo "${GH_TOKEN}" | gh auth login --with-token
           gh auth status
@@ -58,7 +62,7 @@ jobs:
         env:
           CLAUDE_CODE_USE_BEDROCK: "1"
           ANTHROPIC_MODEL: global.anthropic.claude-opus-4-6-v1
-          PROMPT: ${{ github.event.client_payload.prompt || inputs.prompt }}
+          PROMPT: ${{ github.event.client_payload.prompt || inputs.prompt || 'List the files in the current directory and print hello world. Do not make any changes.' }}
         run: |
           set -euo pipefail
 
