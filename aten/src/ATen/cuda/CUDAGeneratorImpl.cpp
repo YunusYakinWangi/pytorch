@@ -219,7 +219,7 @@ void CUDAGeneratorState::increase(uint64_t increment) {
   // see Note [Why enforce RNG offset % 4 == 0?]
   increment = ((increment + 3) / 4) * 4;
 
-  auto capture_id = c10::cuda::currentStreamCaptureIdMayInitCtx();
+  auto capture_id = at::cuda::currentStreamCaptureId();
   if (capture_id.has_value()) {
     auto* capture_state = get_capture_state(capture_id.value(), true);
     capture_state->increase(increment);
@@ -318,7 +318,7 @@ CUDAGeneratorImpl::CUDAGeneratorImpl(
  * See Note [Acquire lock when using random generators]
  */
 void CUDAGeneratorImpl::set_current_seed(uint64_t seed) {
-  auto capture_id = c10::cuda::currentStreamCaptureIdMayInitCtx();
+  auto capture_id = at::cuda::currentStreamCaptureId();
   if (C10_LIKELY(!capture_id.has_value())) {
     state_->seed_ = seed;
     state_->philox_offset_per_thread_ = 0;
@@ -458,7 +458,7 @@ void CUDAGeneratorImpl::set_philox_offset_per_thread(uint64_t offset) {
   // set_philox_offset_per_thread instead of set_offset will cause the
   // cudnn RNN rng state to become stale.
   TORCH_CHECK(offset % 4 == 0, "offset must be a multiple of 4");
-  auto capture_id = c10::cuda::currentStreamCaptureIdMayInitCtx();
+  auto capture_id = at::cuda::currentStreamCaptureId();
   if (C10_LIKELY(!capture_id.has_value())) {
     state_->philox_offset_per_thread_ = offset;
   } else {
@@ -471,7 +471,7 @@ void CUDAGeneratorImpl::set_philox_offset_per_thread(uint64_t offset) {
  * Gets the current philox_offset_per_thread_ of CUDAGeneratorImpl.
  */
 uint64_t CUDAGeneratorImpl::philox_offset_per_thread() const {
-  auto capture_id = c10::cuda::currentStreamCaptureIdMayInitCtx();
+  auto capture_id = at::cuda::currentStreamCaptureId();
   if (C10_LIKELY(!capture_id.has_value())) {
     return state_->philox_offset_per_thread_;
   } else {
@@ -502,7 +502,7 @@ uint64_t CUDAGeneratorImpl::philox_offset_per_thread() const {
  * See Note [Acquire lock when using random generators]
  */
 PhiloxCudaState CUDAGeneratorImpl::philox_cuda_state(uint64_t increment) {
-  auto capture_id = c10::cuda::currentStreamCaptureIdMayInitCtx();
+  auto capture_id = at::cuda::currentStreamCaptureId();
   if (capture_id.has_value()) {
     auto* capture_state = state_->get_capture_state(capture_id.value(), true);
     uint64_t offset = capture_state->offset_intragraph_;
