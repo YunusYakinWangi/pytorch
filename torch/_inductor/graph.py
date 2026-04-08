@@ -1488,7 +1488,7 @@ class GraphLowering(torch.fx.Interpreter):
         target: str,  # type: ignore[override]
         args: tuple[()],  # type: ignore[override]
         kwargs: dict[str, object],
-    ) -> Constant | TensorBox | ShapeAsConstantBuffer | ir.Subgraph | TorchBindObject:
+    ) -> Constant | TensorBox | ShapeAsConstantBuffer | ir.Subgraph | TorchBindObject | ir.GeneratorState:
         # this is a constant
         value = getattr_recursive(self.module, target)  # type: ignore[arg-type]
 
@@ -1513,6 +1513,10 @@ class GraphLowering(torch.fx.Interpreter):
             self.torchbind_constants[target] = value  # type: ignore[arg-type]
             self.constant_reprs[target] = ""
             return TorchBindObject(name=target, value=value)  # type: ignore[arg-type]
+        elif isinstance(value, torch.Generator):
+            self.torchbind_constants[target] = value  # type: ignore[arg-type]
+            self.constant_reprs[target] = ""
+            return ir.GeneratorState(name=target, device=value.device)
 
         assert isinstance(value, torch.Tensor)
         if (

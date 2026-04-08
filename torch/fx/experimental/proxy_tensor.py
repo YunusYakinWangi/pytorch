@@ -1440,6 +1440,14 @@ class PythonKeyTracer(Tracer):
                 raise AssertionError("a.node.constant should not be None")
             return a.node.constant
 
+        # Generators are mutable state objects (e.g. CUDA RNG generators) that
+        # appear as arguments to higher-order ops like graphsafe_run_with_rng_state.
+        # Hoist them as module attributes so they survive as get_attr nodes in the graph.
+        if isinstance(a, torch.Generator):
+            qualname = self.get_fresh_qualname("_generator_constant")
+            setattr(self.root, qualname, a)
+            return self.create_node("get_attr", qualname, (), {})
+
         # Try reconstructing untracked opaque reference types from existing
         # graph inputs (e.g. derive a DeviceMesh submesh from its root mesh).
         if isinstance(a, (FakeScriptObject, OpaqueBase)):
