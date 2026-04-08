@@ -2968,7 +2968,7 @@ Call this whenever a new thread is created in order to propagate values from
       },
       py::arg("converter"),
       py::arg("shape_env") = py::none(),
-      py::arg("fallback_mode") = py::none());
+      py::arg("fallback_mode"));
   py_module.def("_exit_fake_tensor_mode", []() {
     c10::impl::FakeTensorModeTLS::reset_state();
   });
