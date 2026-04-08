@@ -9,6 +9,10 @@ on:
         description: "Prompt for the Claude agent"
         required: true
         type: string
+      gh_token:
+        description: "GitHub token for gh CLI auth (e.g. a PAT to create PRs as yourself)"
+        required: true
+        type: string
 
 jobs:
   run_agent:
@@ -42,7 +46,7 @@ jobs:
 
       - name: Authenticate gh CLI
         env:
-          GH_TOKEN: ${{ secrets.CLAUDE_AGENT_TOKEN }}
+          GH_TOKEN: ${{ github.event.client_payload.gh_token || inputs.gh_token }}
         run: |
           echo "${GH_TOKEN}" | gh auth login --with-token
           gh auth status
