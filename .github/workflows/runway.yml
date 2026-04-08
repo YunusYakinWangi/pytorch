@@ -18,7 +18,7 @@ jobs:
   run_agent:
     name: runway_${{ github.run_id }}
     if: github.repository == 'pytorch/pytorch'
-    runs-on: linux.c7i.4xlarge
+    runs-on: linux.aws.h100
     timeout-minutes: 120
     environment: bedrock
     permissions:
@@ -26,8 +26,9 @@ jobs:
       pull-requests: write
       id-token: write
     env:
-      BUILD_ENVIRONMENT: linux-jammy-py3.10-gcc11
-      DOCKER_IMAGE_NAME: ci-image:pytorch-linux-jammy-py3.10-gcc11
+      BUILD_ENVIRONMENT: linux-jammy-cuda12.8-cudnn9-py3-gcc11
+      DOCKER_IMAGE_NAME: ci-image:pytorch-linux-jammy-cuda12.8-cudnn9-py3-gcc11
+      TORCH_CUDA_ARCH_LIST: "9.0"
       GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
       - name: Checkout PyTorch
@@ -61,14 +62,18 @@ jobs:
           TOTAL_MEMORY_WITH_SWAP=$((TOTAL_AVAILABLE_MEMORY_IN_GB + 3))
 
           container_name=$(docker run \
+            --gpus all \
+            -e NVIDIA_DRIVER_CAPABILITIES=all \
             -e BUILD_ENVIRONMENT \
             -e MAX_JOBS="$(nproc --ignore=2)" \
+            -e TORCH_CUDA_ARCH_LIST \
             -e SCCACHE_BUCKET=ossci-compiler-cache-circleci-v2 \
             -e SCCACHE_REGION=us-east-1 \
             -e SKIP_SCCACHE_INITIALIZATION=1 \
             --env-file="/tmp/github_env_${GITHUB_RUN_ID}" \
             --memory="${TOTAL_AVAILABLE_MEMORY_IN_GB}g" \
             --memory-swap="${TOTAL_MEMORY_WITH_SWAP}g" \
+            --shm-size=2g \
             --security-opt seccomp=unconfined \
             --cap-add=SYS_PTRACE \
             --tty \
@@ -122,9 +127,11 @@ jobs:
 
           ENVIRONMENT:
           - You have a full checkout of pytorch at $(pwd)
-          - PyTorch has already been built in a Docker container
+          - PyTorch has already been built with CUDA support in a Docker container
+          - An H100 GPU is available inside the container
           - To run tests, use: docker exec -t ${CONTAINER} sh -c '<command>'
             For example: docker exec -t ${CONTAINER} sh -c 'python test/test_torch.py -k test_abs'
+          - To run CUDA tests: docker exec -t ${CONTAINER} sh -c 'python test/test_cuda.py -k test_name'
           - To rebuild after making changes: docker exec -t ${CONTAINER} sh -c '.ci/pytorch/build.sh'
           - The workspace is bind-mounted, so file edits on the host are visible inside the container
 
