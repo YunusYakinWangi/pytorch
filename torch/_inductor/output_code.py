@@ -652,10 +652,17 @@ class CompiledFxGraph(OutputCode):
         # Captures output values (FakeTensors, SymInts, constants) from graph's
         # output node at compile time. These are returned directly during warmup
         # to preserve symbolic relationships.
-        output_node = list(gm.graph.nodes)[-1]
-        assert output_node.op == "output", "Last node must be output node"
+        #
+        # NOTE: If outputs have unbacked SymInts (from data-dependent ops like
+        # .nonzero(), .item()), subsequent tracing will propagate unbacked symbols,
+        # causing downstream graphs to have unbacked inputs instead of backed ones.
+        gm_output_node = list(gm.graph.nodes)[-1]
+        if gm_output_node.op != "output":
+            raise RuntimeError(
+                f"Expected last node to be output node, got {gm_output_node.op}"
+            )
         output_vals: list[Any] = []
-        for out in output_node.args[0]:
+        for out in gm_output_node.args[0]:
             if isinstance(out, torch.fx.Node):
                 if "val" not in out.meta:
                     raise RuntimeError(
@@ -675,6 +682,7 @@ class CompiledFxGraph(OutputCode):
     def _has_fake_tensor_inputs(self, inputs: Sequence[Any]) -> bool:
         """Check if any input is a FakeTensor."""
         from torch._subclasses.fake_tensor import FakeTensor
+
         return any(
             isinstance(inp, FakeTensor)
             for inp in inputs

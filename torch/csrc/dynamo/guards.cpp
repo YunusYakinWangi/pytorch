@@ -164,7 +164,8 @@ TensorCheck::TensorCheck(
     } else if (v.device().is_cpu()) {
       ks = ks.add(c10::DispatchKey::CPU);
     } else {
-      TORCH_CHECK(false, "fake_warmup: unsupported device type ", v.device().type());
+      TORCH_CHECK(
+          false, "fake_warmup: unsupported device type ", v.device().type());
     }
   }
   dispatch_key_ = ks.raw_repr();
@@ -196,7 +197,8 @@ TensorCheck::TensorCheck(
     } else if (device_index == -1) {
       ks = ks.add(c10::DispatchKey::CPU);
     } else {
-      TORCH_CHECK(false, "fake_warmup: unsupported device_index ", device_index);
+      TORCH_CHECK(
+          false, "fake_warmup: unsupported device_index ", device_index);
     }
   }
   dispatch_key_ = ks.raw_repr();
@@ -271,25 +273,27 @@ std::string TensorCheck::check_verbose(
     const std::string& tensor_name) {
   std::stringstream fail_reason;
   fail_reason << "tensor '" << tensor_name << "' ";
-  
+
   if (dispatch_key_ != state.apply(v.key_set()).raw_repr()) {
     fail_reason << "dispatch key set mismatch. expected "
                 << c10::DispatchKeySet(c10::DispatchKeySet::RAW, dispatch_key_)
                 << ", actual " << state.apply(v.key_set());
     return fail_reason.str();
   }
-  
+
   if (dtype_ != v.dtype().toScalarType()) {
     // return fmt::format("tensor dtype mismatch. expected {}, actual {}",
     // dtype_, v.dtype().toScalarType());
     fail_reason << "dtype mismatch. expected " << dtype_ << ", actual "
                 << v.dtype().toScalarType();
     return fail_reason.str();
-  } else if (device_index_ != v.device().index()) {
+  }
+  else if (device_index_ != v.device().index()) {
     fail_reason << "Tensor device index mismatch. Expected device index to be "
                 << device_index_ << ", actual " << v.device().index();
     return fail_reason.str();
-  } else if (requires_grad_ != v.requires_grad()) {
+  }
+  else if (requires_grad_ != v.requires_grad()) {
     // return fmt::format("tensor requires_grad mismatch. expected {}",
     // requires_grad_);
     fail_reason << "requires_grad mismatch. expected requires_grad="
@@ -8382,3 +8386,4 @@ PyObject* torch_c_dynamo_guards_init() {
 }
 
 } // namespace torch::dynamo
+    
