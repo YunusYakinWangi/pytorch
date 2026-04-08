@@ -42,6 +42,29 @@ inp_tgt, out_plc = propagate_single_dim(
 )
 ```
 
+## Migration status
+
+All view ops now use `register_single_dim_view_strategy`. The old
+`register_op_strategy_map` has been deleted.
+
+## strict_view and reject_redistribution
+
+`aten.view.default` and `aten._unsafe_view.default` use `strict_view=True`,
+which forbids communication. At strategy enumeration time, `_smallest_factor`
+mesh sizes guarantee divisibility, so the propagator doesn't see the real mesh.
+At expansion time, a `reject_redistribution` callback re-runs
+`propagate_shape_and_sharding` with the actual mesh sizes across all mesh dims
+simultaneously, preserving cross-mesh-dim validation (e.g. SS double-shard,
+progressive local_tensor_shapes division). On success it returns a zero-cost
+`OpStrategy`; on failure it raises `RuntimeError`.
+
+## Inplace view ops
+
+View ops are metadata-only, so inplace variants (e.g. `squeeze_`) are
+registered with `is_view_op=True`. This skips the inplace placement
+constraint in `expand_to_full_mesh_op_strategy` that would otherwise reject
+valid dim-index shifts (e.g. `Shard(1) → Shard(0)` after squeezing dim 0).
+
 ## Refactoring
 
 `_build_input_to_output_map(rule)` was extracted from `analyze()` as a

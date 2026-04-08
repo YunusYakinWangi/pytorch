@@ -14,19 +14,13 @@ from torch.distributed.tensor._op_schema import (
     OpSpec,
     OpStrategy,
     RuntimeSchemaInfo,
-    StrategyType,
 )
 from torch.distributed.tensor._ops.single_dim_strategy import (
     _ShardingPlaceholder,
     register_single_dim_strategy,
 )
-from torch.distributed.tensor._ops.utils import (
-    generate_redistribute_costs,
-    normalize_dim,
-    normalize_dims,
-    prod,
-    register_op_strategy,
-)
+from torch.distributed.tensor._ops.utils import normalize_dim, normalize_dims, prod
+from torch.distributed.tensor.device_mesh import DeviceMesh
 from torch.distributed.tensor.placement_types import (
     _StridedShard,
     Partial,
@@ -1416,68 +1410,76 @@ class _ViewShardingPropagator:
         return _StridedShard(tgt_shard_dim, split_factor=p.split_factor), new_shapes
 
 
-def register_op_strategy_map(
-    aten_op_overload: torch._ops.OpOverload,
-    local_op_name: Callable[..., torch.Tensor],
-    schema_info: RuntimeSchemaInfo | None = None,
-    strict_view: bool = False,
-) -> None:
+def _make_view_reject_redistribution(
+    dim_map_fn: Callable[..., DimMap],
+    strict_view: bool,
+) -> Callable[
+    [OpSchema, DeviceMesh, TensorMeta | Sequence[TensorMeta | None] | None],
+    OpStrategy,
+]:
+    """Create a reject_redistribution function for strict view ops.
+
+    Re-runs propagate_shape_and_sharding with the actual mesh sizes across
+    all mesh dims simultaneously.  This catches uneven-divisibility errors
+    (e.g. flatten of an unevenly sharded non-last dim) and handles cross-
+    mesh-dim interactions (e.g. SS sharding) that the strategy enumeration
+    phase cannot detect because it uses _smallest_factor per dim independently.
     """
-    Helper that registers strategies for view-like operators that follow a pattern:
-      (1) define the way input dims are split/combined to form output dims (dim_maps)
-      (2) register a strategy for the op schema that uses the dim_map as a sharding prop rule
 
-    strict_view: if True, we will error out if the view-operation would require resharding the input.
-       Currently, this should be set to 'true' for any "view" ops.
-       We could diverge behavior for "reshape" ops which could perform a redistribute implicitly.
-    """
-    dim_map: Callable[..., DimMap] = dim_maps[local_op_name]
+    def reject_fn(
+        op_schema: OpSchema,
+        mesh: DeviceMesh,
+        output_tensor_meta: TensorMeta | Sequence[TensorMeta | None] | None,
+    ) -> OpStrategy:
+        input_meta = cast(TensorMeta, op_schema.args_meta[0])
+        shimmed_args = (_MetaShim(input_meta), *op_schema.args_meta[1:])
+        rule = dim_map_fn(*shimmed_args, **op_schema.kwargs_meta)
+        global_shape = tuple(input_meta.shape)
 
-    @register_op_strategy(aten_op_overload, schema_info=schema_info)
-    def reshape_strategy(op_schema: OpSchema) -> StrategyType:
-        rules = dim_map(*op_schema.args_schema, **op_schema.kwargs_schema)
-        input_strategy = cast(OpStrategy, op_schema.args_schema[0])
-        mesh = op_schema.get_mesh_from_args(validate=False)
+        # Extract input specs from OpStrategy-wrapped args
+        input_specs: list[DTensorSpec] = []
+        for arg in op_schema.args_schema:
+            if isinstance(arg, OpStrategy):
+                if len(arg.strategies) != 1:
+                    raise AssertionError
+                input_specs.append(arg.strategies[0].output_spec)
+        if len(input_specs) == 0:
+            raise AssertionError("No tensor inputs found")
 
-        global_in_shape = input_strategy.shape
-        if global_in_shape is None:
-            raise AssertionError("Shape required.")
+        # Validate with all mesh dims simultaneously via the multi-dim
+        # propagator.  This will raise RuntimeError if the view is invalid
+        # (e.g. uneven flatten on a non-last dim).
+        mesh_sizes = tuple(mesh.size(i) for i in range(mesh.ndim))
+        input_placements = input_specs[0].placements
+        _, out_placements = propagate_shape_and_sharding(
+            input_placements, global_shape, rule, mesh_sizes, strict_view
+        )
 
-        output_strategy = OpStrategy([])
-        for input_placement_strategy in input_strategy.strategies:
-            input_src_spec = input_placement_strategy.output_spec
+        # Build OpStrategy with zero redistribute cost
+        out_placements_tuple = tuple(out_placements)
+        if output_tensor_meta is None:
+            out_meta = None
+        elif isinstance(output_tensor_meta, TensorMeta):
+            out_meta = output_tensor_meta
+        else:
+            out_meta = output_tensor_meta[0] if output_tensor_meta else None
 
-            input_tgt_placements, output_placements = propagate_shape_and_sharding(
-                input_src_spec.placements,
-                tuple(global_in_shape),
-                rules,
-                mesh.shape,
-                strict_view,
-            )
-
-            # TODO: optimize this. we shouldn't simply blindly replicate
-            #       unshardable dims ...
-            # FIXME: this can be wrong for situations where we have
-            #        [Shard(0), Shard(0)]
-            input_tgt_spec = DTensorSpec(
-                placements=tuple(input_tgt_placements),
-                mesh=mesh,
-                tensor_meta=input_src_spec.tensor_meta,
-            )
-            redistribute_costs: list[list[float]] = [
-                generate_redistribute_costs(input_strategy, input_tgt_spec)
-            ]
-
-            output_spec = DTensorSpec(mesh=mesh, placements=tuple(output_placements))
-            output_strategy.strategies.append(
+        output_spec = DTensorSpec(mesh, out_placements_tuple, tensor_meta=out_meta)
+        arg_specs = [
+            DTensorSpec(mesh, spec.placements, tensor_meta=spec.tensor_meta)
+            for spec in input_specs
+        ]
+        return OpStrategy(
+            [
                 OpSpec(
                     output_specs=output_spec,
-                    input_specs=(input_tgt_spec,),
-                    redistribute_cost=redistribute_costs,
+                    input_specs=arg_specs,
+                    redistribute_cost=[[0.0] for _ in input_specs],
                 )
-            )
+            ]
+        )
 
-        return output_strategy
+    return reject_fn
 
 
 def register_single_dim_view_strategy(
@@ -1495,7 +1497,18 @@ def register_single_dim_view_strategy(
     """
     dim_map_fn: Callable[..., DimMap] = dim_maps[local_op_name]
 
-    @register_single_dim_strategy(aten_op_overload, schema_info=schema_info)
+    reject_fn = (
+        _make_view_reject_redistribution(dim_map_fn, strict_view)
+        if strict_view
+        else None
+    )
+
+    @register_single_dim_strategy(
+        aten_op_overload,
+        schema_info=schema_info,
+        reject_redistribution=reject_fn,
+        is_view_op=True,
+    )
     def view_single_dim(op, args_schema, kwargs_schema):
         input_meta = cast(TensorMeta, args_schema[0])
         shimmed_args = (_MetaShim(input_meta), *args_schema[1:])
@@ -1507,9 +1520,16 @@ def register_single_dim_view_strategy(
             if dim_size <= 1:
                 continue
             mesh_dim_size = _smallest_factor(dim_size)
-            inp_tgt, out_plc = propagate_single_dim(
-                Shard(d), tuple(input_meta.shape), rule, mesh_dim_size, strict_view
-            )
+            try:
+                inp_tgt, out_plc = propagate_single_dim(
+                    Shard(d), tuple(input_meta.shape), rule, mesh_dim_size, strict_view
+                )
+            except RuntimeError:
+                # strict_view can raise for unflatten patterns where the first
+                # output dim isn't divisible by _smallest_factor of the input
+                # dim.  Skip this candidate; actual shardability is validated
+                # at match time by is_tensor_shardable.
+                continue
             if isinstance(inp_tgt, (Shard, _StridedShard)):
                 strategies.append([out_plc, inp_tgt])
         # Partial placements pass through unchanged for view ops.
@@ -1519,8 +1539,8 @@ def register_single_dim_view_strategy(
 
 
 register_single_dim_view_strategy(aten.squeeze.default, torch.squeeze)
-register_op_strategy_map(aten.squeeze_.default, torch.squeeze)
-register_op_strategy_map(
+register_single_dim_view_strategy(aten.squeeze_.default, torch.squeeze)
+register_single_dim_view_strategy(
     aten.squeeze_.dim, torch.squeeze, schema_info=RuntimeSchemaInfo(1)
 )
 register_single_dim_view_strategy(
@@ -1529,10 +1549,10 @@ register_single_dim_view_strategy(
 register_single_dim_view_strategy(
     aten.squeeze.dims, torch.squeeze, schema_info=RuntimeSchemaInfo(1)
 )
-register_op_strategy_map(
+register_single_dim_view_strategy(
     aten.squeeze_.dims, torch.squeeze, schema_info=RuntimeSchemaInfo(1)
 )
-register_op_strategy_map(
+register_single_dim_view_strategy(
     aten.view.default,
     Tensor.view,
     schema_info=RuntimeSchemaInfo(1),
@@ -1546,7 +1566,7 @@ register_single_dim_view_strategy(
 register_single_dim_view_strategy(
     aten.reshape.default, torch.reshape, schema_info=RuntimeSchemaInfo(1)
 )
-register_op_strategy_map(
+register_single_dim_view_strategy(
     aten._unsafe_view.default,
     Tensor.view,
     schema_info=RuntimeSchemaInfo(1),
