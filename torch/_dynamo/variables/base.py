@@ -23,9 +23,6 @@ from contextvars import ContextVar
 from enum import Enum
 from typing import Any, NoReturn, TYPE_CHECKING
 
-from torch._guards import Guard
-from torch.fx.proxy import Node
-
 from .. import graph_break_hints, variables
 from ..current_scope_id import current_scope_id
 from ..exc import raise_observed_exception, unimplemented
@@ -35,6 +32,9 @@ from ..utils import cmp_name_to_op_mapping, istype
 
 
 if TYPE_CHECKING:
+    from torch._guards import Guard
+    from torch.fx.proxy import Node
+
     from ..codegen import PyCodegen
     from ..side_effects import SideEffects
     from ..symbolic_convert import InstructionTranslator
