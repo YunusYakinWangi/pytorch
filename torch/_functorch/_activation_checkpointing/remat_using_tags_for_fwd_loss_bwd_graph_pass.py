@@ -1,5 +1,6 @@
 """AC rematerialize pass: Duplicates recompute nodes for backward, then DCE removes unused forward versions."""
 
+import itertools
 import logging
 from typing import Any, overload
 
@@ -17,6 +18,7 @@ from torch._functorch.partitioners import (
 
 
 log = logging.getLogger(__name__)
+_EMPTY_CUSTOM_META: dict[str, object] = {}
 
 
 def is_impure_node_for_dce(node: fx.Node) -> bool:
@@ -34,15 +36,15 @@ def is_impure_node_for_dce(node: fx.Node) -> bool:
     return node.is_impure(impure_random)
 
 
-def _is_backward_node(node: fx.Node, use_phase_only: bool = False) -> bool:
+def _is_backward_node(node: fx.Node, use_phase: bool = False) -> bool:
     """Check if node is in backward region.
 
-    If use_phase_only is True, only checks custom["phase"] == "backward"
+    If use_phase is True, only checks custom["phase"] == "backward"
     (user annotation). Otherwise falls back to custom["autograd_backward"],
     which Dynamo adds when tracing torch.autograd.grad.
     """
-    custom = node.meta.get("custom", {})
-    if use_phase_only:
+    custom = node.meta.get("custom", _EMPTY_CUSTOM_META)
+    if use_phase:
         return custom.get("phase") == "backward"
     return custom.get("autograd_backward", False)
 
@@ -50,31 +52,31 @@ def _is_backward_node(node: fx.Node, use_phase_only: bool = False) -> bool:
 def _has_user_phase_annotation(gm: fx.GraphModule) -> bool:
     """Check if any node has the user-level phase: backward annotation."""
     return any(
-        node.meta.get("custom", {}).get("phase") == "backward"
+        node.meta.get("custom", _EMPTY_CUSTOM_META).get("phase") == "backward"
         for node in gm.graph.nodes
     )
 
 
 def _collect_backward_region_data(
     gm: fx.GraphModule,
-) -> tuple[bool, int | None, set[fx.Node], int]:
-    use_phase_only = _has_user_phase_annotation(gm)
+) -> tuple[bool, int | None, int | None, int]:
+    use_phase = _has_user_phase_annotation(gm)
     bwd_start: int | None = None
-    bwd_node_set: set[fx.Node] = set()
+    bwd_end: int | None = None
     num_regions = 0
     in_backward = False
 
     for idx, node in enumerate(gm.graph.nodes):
-        is_bwd = _is_backward_node(node, use_phase_only=use_phase_only)
+        is_bwd = _is_backward_node(node, use_phase=use_phase)
         if is_bwd:
-            bwd_node_set.add(node)
             if bwd_start is None:
                 bwd_start = idx
-        if is_bwd and not in_backward:
-            num_regions += 1
+            bwd_end = idx + 1
+            if not in_backward:
+                num_regions += 1
         in_backward = is_bwd
 
-    return use_phase_only, bwd_start, bwd_node_set, num_regions
+    return use_phase, bwd_start, bwd_end, num_regions
 
 
 def remat_using_tags_for_fwd_loss_bwd_graph(gm: fx.GraphModule) -> fx.GraphModule:
@@ -94,11 +96,9 @@ def remat_using_tags_for_fwd_loss_bwd_graph(gm: fx.GraphModule) -> fx.GraphModul
     if not has_recomputable_ops(gm):
         return gm
 
-    use_phase_only, bwd_start, bwd_node_set, num_regions = (
-        _collect_backward_region_data(gm)
-    )
+    use_phase, bwd_start, bwd_end, num_regions = _collect_backward_region_data(gm)
     if num_regions > 1:
-        if use_phase_only:
+        if use_phase:
             raise RuntimeError(
                 f"Detected {num_regions} disjoint backward regions annotated with "
                 'phase: "backward" but remat only supports a single backward region. '
@@ -113,6 +113,10 @@ def remat_using_tags_for_fwd_loss_bwd_graph(gm: fx.GraphModule) -> fx.GraphModul
 
     if bwd_start is None:
         return gm
+    if bwd_end is None:
+        raise AssertionError(
+            "backward region should end somewhere when there was explicit backward region start."
+        )
 
     order = {node: idx for idx, node in enumerate(gm.graph.nodes)}
 
@@ -133,7 +137,7 @@ def remat_using_tags_for_fwd_loss_bwd_graph(gm: fx.GraphModule) -> fx.GraphModul
     recomputed_nodes: dict[fx.Node, fx.Node] = {}
 
     # Insert forward nodes
-    for node in list(gm.graph.nodes)[:bwd_start]:
+    for node in itertools.islice(gm.graph.nodes, 0, bwd_start):
         env[node] = new_graph.node_copy(node, lambda x: env[x])
 
     @overload
@@ -164,10 +168,7 @@ def remat_using_tags_for_fwd_loss_bwd_graph(gm: fx.GraphModule) -> fx.GraphModul
         return deps
 
     # Insert backward nodes
-    for node in list(gm.graph.nodes)[bwd_start:]:
-        if node not in bwd_node_set:
-            env[node] = new_graph.node_copy(node, lambda x: env[x])
-            continue
+    for node in itertools.islice(gm.graph.nodes, bwd_start, bwd_end):
         # Gather all deps that need to be recomputed for this node
         deps = gather_recompute_deps(node)
 
@@ -187,6 +188,9 @@ def remat_using_tags_for_fwd_loss_bwd_graph(gm: fx.GraphModule) -> fx.GraphModul
             recomputed_nodes[dep] = dup
 
         env[node] = new_graph.node_copy(node, remat_input)
+
+    for node in itertools.islice(gm.graph.nodes, bwd_end, None):
+        env[node] = new_graph.node_copy(node, lambda x: env[x])
 
     new_gm = torch.fx.GraphModule(gm, new_graph)
 
