@@ -1,6 +1,7 @@
 #pragma once
 
 #include <torch/csrc/distributed/c10d/Backend.hpp>
+#include <torch/csrc/distributed/c10d/Utils.hpp>
 #include <torch/csrc/utils.h>
 
 namespace c10d {
@@ -117,6 +118,13 @@ class FakeProcessGroup : public Backend {
       std::vector<at::Tensor>& inputTensors,
       const AllgatherOptions& /* opts */ = AllgatherOptions()) override {
     checkCollectiveError();
+    TORCH_CHECK(
+        outputTensorLists.size() == inputTensors.size(),
+        "allgather_coalesced: output tensor lists (",
+        outputTensorLists.size(),
+        ") must have the same length as input tensor list (",
+        inputTensors.size(),
+        ")");
     for (size_t i = 0; i < inputTensors.size(); ++i) {
       for (auto& tensor : outputTensorLists[i]) {
         tensor.copy_(inputTensors[i]);
@@ -158,6 +166,13 @@ class FakeProcessGroup : public Backend {
       const ScatterOptions& /* opts */ = ScatterOptions()) override {
     checkCollectiveError();
     if (!inputTensors.empty()) {
+      TORCH_CHECK(
+          static_cast<int>(inputTensors[0].size()) == size_,
+          "Incorrect input list size ",
+          inputTensors[0].size(),
+          ". Input list size should be ",
+          size_,
+          ", same as size of the process group.");
       outputTensors[0].copy_(inputTensors[0][rank_]);
     }
     return c10::make_intrusive<FakeWork>();
@@ -170,6 +185,9 @@ class FakeProcessGroup : public Backend {
           ReduceScatterOptions()) override {
     checkCollectiveError();
     for (size_t i = 0; i < outputTensors.size(); ++i) {
+      TORCH_CHECK(
+          static_cast<int>(inputTensors[i].size()) == size_,
+          "invalid input tensor list size, must be world size");
       outputTensors[i].copy_(inputTensors[i][rank_]);
     }
     return c10::make_intrusive<FakeWork>();
@@ -181,6 +199,9 @@ class FakeProcessGroup : public Backend {
       const ReduceScatterOptions& /* opts */ =
           ReduceScatterOptions()) override {
     checkCollectiveError();
+    TORCH_CHECK(
+        inputBuffer.numel() == outputBuffer.numel() * size_,
+        "input tensor must be the same size as output size times world size");
     auto chunks = inputBuffer.chunk(size_);
     outputBuffer.copy_(chunks[rank_]);
     return c10::make_intrusive<FakeWork>();
@@ -193,6 +214,9 @@ class FakeProcessGroup : public Backend {
           ReduceScatterOptions()) override {
     checkCollectiveError();
     for (size_t i = 0; i < outputs.size(); ++i) {
+      TORCH_CHECK(
+          inputs[i].numel() == outputs[i].numel() * size_,
+          "input tensor must be the same size as output size times world size");
       auto chunks = inputs[i].chunk(size_);
       outputs[i].copy_(chunks[rank_]);
     }
@@ -202,11 +226,28 @@ class FakeProcessGroup : public Backend {
   c10::intrusive_ptr<Work> alltoall_base(
       at::Tensor& outputBuffer,
       at::Tensor& inputBuffer,
-      std::vector<int64_t>& /* outputSplitSizes */,
-      std::vector<int64_t>& /* inputSplitSizes */,
+      std::vector<int64_t>& outputSplitSizes,
+      std::vector<int64_t>& inputSplitSizes,
       const AllToAllOptions& /* opts */ = AllToAllOptions()) override {
     checkCollectiveError();
-    outputBuffer.copy_(inputBuffer);
+    c10d::checkSplitSizes(inputSplitSizes, inputBuffer, size_);
+    c10d::checkSplitSizes(outputSplitSizes, outputBuffer, size_);
+    if (outputSplitSizes.empty() && inputSplitSizes.empty()) {
+      outputBuffer.copy_(inputBuffer);
+    } else {
+      // We receive outputSplitSizes[j] elements from rank j. In reality,
+      // rank j would send from an offset determined by rank j's own
+      // inputSplitSizes, which we don't have. As an approximation, we
+      // copy from input[0:outputSplitSizes[j]] for each output slot.
+      int64_t out_offset = 0;
+      for (int j = 0; j < size_; ++j) {
+        if (outputSplitSizes[j] > 0) {
+          outputBuffer.narrow(0, out_offset, outputSplitSizes[j])
+              .copy_(inputBuffer.narrow(0, 0, outputSplitSizes[j]));
+        }
+        out_offset += outputSplitSizes[j];
+      }
+    }
     return c10::make_intrusive<FakeWork>();
   }
 

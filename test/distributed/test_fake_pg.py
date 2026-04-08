@@ -160,12 +160,12 @@ class TestFakePG(TestCase):
         store = FakeStore()
         dist.init_process_group(backend="fake", rank=0, world_size=2, store=store)
 
-        out_tensor = torch.ones(3, 3)
-        in_tensor = torch.ones(3, 3)
-        output_split = [1, 1]
-        input_split = [1, 1]
+        out_tensor = torch.ones(4, 3)
+        in_tensor = torch.ones(4, 3)
+        output_split = [2, 2]
+        input_split = [2, 2]
         dist.all_to_all_single(out_tensor, in_tensor, output_split, input_split)
-        self.assertEqual(tuple(out_tensor.shape), (3, 3))
+        self.assertEqual(tuple(out_tensor.shape), (4, 3))
 
     def test_send(self):
         store = FakeStore()
@@ -265,8 +265,8 @@ class TestFakePG(TestCase):
         store = FakeStore()
         dist.init_process_group(backend="fake", rank=rank, world_size=2, store=store)
 
-        in_tensor = torch.arange(6.0).reshape(3, 2)
-        out_tensor = torch.empty(3, 2)
+        in_tensor = torch.arange(8.0).reshape(4, 2)
+        out_tensor = torch.empty(4, 2)
         dist.all_to_all_single(out_tensor, in_tensor)
         self.assertEqual(out_tensor, in_tensor)
 
@@ -406,6 +406,39 @@ class TestFakePG(TestCase):
         op_names = [str(op) for op in mode.ops]
         self.assertIn("aten.lift_fresh.default", op_names)
         self.assertIn("c10d.allreduce_.default", op_names)
+
+
+    def test_reduce_scatter_wrong_input_list_size(self):
+        store = FakeStore()
+        dist.init_process_group(backend="fake", rank=1, world_size=2, store=store)
+
+        output = torch.empty(3, 3)
+        with self.assertRaisesRegex(
+            RuntimeError, "invalid input tensor list size, must be world size"
+        ):
+            dist.reduce_scatter(output, [torch.ones(3, 3)])
+
+    def test_scatter_wrong_input_list_size(self):
+        store = FakeStore()
+        dist.init_process_group(backend="fake", rank=0, world_size=2, store=store)
+
+        output = torch.empty(3, 3)
+        with self.assertRaisesRegex(
+            RuntimeError, "Incorrect input list size"
+        ):
+            dist.scatter(output, [torch.ones(3, 3)])
+
+    def test_reduce_scatter_base_wrong_input_size(self):
+        store = FakeStore()
+        dist.init_process_group(backend="fake", rank=0, world_size=2, store=store)
+
+        out_buf = torch.empty(3, 2)
+        in_buf = torch.ones(3, 2)
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "input tensor must be the same size as output size times world size",
+        ):
+            dist._reduce_scatter_base(out_buf, in_buf)
 
 
 instantiate_parametrized_tests(TestFakePG)
