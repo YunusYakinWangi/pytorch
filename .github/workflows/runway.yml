@@ -22,6 +22,11 @@ on:
           - linux.aws.h100
           - linux.aws.a100
           - linux.c7i.4xlarge
+      build:
+        description: "Build PyTorch (true = incremental build from snapshot, false = wheel-only from snapshot)"
+        required: false
+        type: boolean
+        default: true
 
 jobs:
   run_agent:
@@ -31,6 +36,7 @@ jobs:
     timeout-minutes: 120
     environment: bedrock
     permissions:
+      actions: read
       contents: write
       pull-requests: write
       id-token: write
@@ -128,11 +134,59 @@ jobs:
           )
           echo "container-name=${container_name}" >> "$GITHUB_OUTPUT"
 
+      - name: Download build snapshot
+        id: snapshot
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "Looking for latest build snapshot..."
+          RUN_ID=$(gh api 'repos/pytorch/pytorch/actions/workflows/runway-snapshot.yml/runs?status=completed&conclusion=success&per_page=1' \
+            --jq '.workflow_runs[0].id' 2>/dev/null || echo "")
+
+          if [ -z "${RUN_ID}" ] || [ "${RUN_ID}" = "null" ]; then
+            echo "No snapshot runs found"
+            echo "snapshot-found=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          URL="https://gha-artifacts.s3.amazonaws.com/pytorch/pytorch/${RUN_ID}/runway-snapshot/build-snapshot.tar.gz"
+          echo "Downloading snapshot from run ${RUN_ID}..."
+          if curl -sfL --connect-timeout 10 --max-time 600 -o build-snapshot.tar.gz "${URL}"; then
+            echo "Extracting snapshot..."
+            tar xzf build-snapshot.tar.gz
+            rm build-snapshot.tar.gz
+            echo "snapshot-found=true" >> "$GITHUB_OUTPUT"
+            echo "Snapshot extracted (build/ and dist/ restored)"
+          else
+            echo "Failed to download snapshot"
+            echo "snapshot-found=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # With a snapshot, build.sh runs an incremental check (~2-3 min).
+      # Without a snapshot, this is a full build (~20 min).
       - name: Build PyTorch
+        if: inputs.build != false && github.event.client_payload.build != false
         env:
           CONTAINER: ${{ steps.docker.outputs.container-name }}
         run: |
           docker exec -t "${CONTAINER}" sh -c '.ci/pytorch/build.sh'
+
+      # When build is skipped, install the wheel from the snapshot so tests can
+      # still import torch.
+      - name: Install wheel (no-build mode)
+        if: >-
+          (inputs.build == false || github.event.client_payload.build == false)
+          && steps.snapshot.outputs.snapshot-found == 'true'
+        env:
+          CONTAINER: ${{ steps.docker.outputs.container-name }}
+        run: |
+          if ls dist/*.whl 1>/dev/null 2>&1; then
+            echo "Installing wheel from snapshot..."
+            docker exec -t "${CONTAINER}" sh -c 'pip install dist/*.whl'
+          else
+            echo "No wheel found in snapshot"
+          fi
 
       - name: Configure AWS credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
@@ -164,24 +218,44 @@ jobs:
           CONTAINER: ${{ steps.docker.outputs.container-name }}
           GPU_NAME: ${{ steps.config.outputs.gpu-name }}
           HAS_GPU: ${{ steps.config.outputs.gpu }}
+          SNAPSHOT_FOUND: ${{ steps.snapshot.outputs.snapshot-found }}
+          DID_BUILD: ${{ inputs.build != false && github.event.client_payload.build != false }}
         run: |
           set -euo pipefail
+
+          # Build the environment description based on what was set up
+          if [ "${DID_BUILD}" = "true" ]; then
+            BUILD_STATUS="PyTorch is built and installed in develop mode (editable install).
+          Python source edits under torch/ are immediately visible.
+          C++ edits require an incremental rebuild:
+            docker exec -t ${CONTAINER} sh -c '.ci/pytorch/build.sh'"
+          elif [ "${SNAPSHOT_FOUND}" = "true" ]; then
+            BUILD_STATUS="PyTorch is installed from a pre-built wheel.
+          To make source edits take effect, rebuild:
+            docker exec -t ${CONTAINER} sh -c '.ci/pytorch/build.sh'"
+          else
+            BUILD_STATUS="PyTorch is NOT built. If you need to build/test, run:
+            docker exec -t ${CONTAINER} sh -c '.ci/pytorch/build.sh'"
+          fi
 
           claude -p "You are running as an autonomous agent in PyTorch CI.
           Your goal is to complete the task below, then create a pull request with your changes.
 
           ENVIRONMENT:
-          You are running on the host machine. A Docker container is running alongside
-          you with PyTorch already built and all dependencies installed. The repository
+          A Docker container is running with all dependencies installed. The repository
           checkout is bind-mounted into the container, so when you edit files with
           Read/Write/Edit they are immediately visible inside the container.
 
-          You MUST use docker exec to run Python, tests, or builds because Python and
-          PyTorch are installed inside the container, not on the host:
+          Claude runs on the host (not inside the container) because it needs direct
+          access to git, gh, and AWS credentials. Python and PyTorch are inside the
+          container, so you MUST use docker exec to run Python, tests, or builds:
             docker exec -t ${CONTAINER} sh -c 'python test/test_torch.py -k test_abs'
             docker exec -t ${CONTAINER} sh -c '.ci/pytorch/build.sh'
           $([ "${HAS_GPU}" = "true" ] && echo "
           A ${GPU_NAME} GPU is available inside the container.")
+
+          BUILD STATUS:
+          ${BUILD_STATUS}
 
           Use git and gh directly on the host (not inside docker exec).
 

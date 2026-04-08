@@ -1,0 +1,95 @@
+name: Runway Snapshot
+
+on:
+  schedule:
+    # Build a snapshot every 2 hours to keep it fresh
+    - cron: '7 */2 * * *'
+  workflow_dispatch:
+
+jobs:
+  snapshot:
+    name: runway-snapshot
+    if: github.repository == 'pytorch/pytorch'
+    runs-on: linux.c7i.4xlarge
+    timeout-minutes: 180
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      DOCKER_IMAGE_NAME: ci-image:pytorch-linux-jammy-cuda12.8-cudnn9-py3-gcc11
+      BUILD_ENVIRONMENT: runway-snapshot
+      TORCH_CUDA_ARCH_LIST: "9.0"
+    steps:
+      - name: Checkout PyTorch
+        uses: pytorch/pytorch/.github/actions/checkout-pytorch@main
+        with:
+          no-sudo: true
+
+      - name: Setup Linux
+        uses: ./.github/actions/setup-linux
+
+      - name: Login to ECR
+        uses: ./.github/actions/ecr-login
+
+      - name: Calculate docker image
+        id: calculate-docker-image
+        uses: pytorch/test-infra/.github/actions/calculate-docker-image@main
+        with:
+          docker-image-name: ${{ env.DOCKER_IMAGE_NAME }}
+
+      - name: Pull docker image
+        uses: pytorch/test-infra/.github/actions/pull-docker-image@main
+        with:
+          docker-image: ${{ steps.calculate-docker-image.outputs.docker-image }}
+
+      - name: Start container and build
+        id: build
+        env:
+          DOCKER_IMAGE: ${{ steps.calculate-docker-image.outputs.docker-image }}
+        run: |
+          TOTAL_AVAILABLE_MEMORY_IN_GB=$(awk '/MemTotal/ { printf "%.0f", $2/1024/1024 - 1 }' /proc/meminfo)
+          TOTAL_MEMORY_WITH_SWAP=$((TOTAL_AVAILABLE_MEMORY_IN_GB + 3))
+
+          CONTAINER=$(docker run \
+            -e BUILD_ENVIRONMENT \
+            -e MAX_JOBS="$(nproc --ignore=2)" \
+            -e TORCH_CUDA_ARCH_LIST \
+            -e SCCACHE_BUCKET=ossci-compiler-cache-circleci-v2 \
+            -e SCCACHE_REGION=us-east-1 \
+            -e SKIP_SCCACHE_INITIALIZATION=1 \
+            --env-file="/tmp/github_env_${GITHUB_RUN_ID}" \
+            --memory="${TOTAL_AVAILABLE_MEMORY_IN_GB}g" \
+            --memory-swap="${TOTAL_MEMORY_WITH_SWAP}g" \
+            --security-opt seccomp=unconfined \
+            --cap-add=SYS_PTRACE \
+            --tty \
+            --detach \
+            --user jenkins \
+            -v "${GITHUB_WORKSPACE}:/var/lib/jenkins/workspace" \
+            -w /var/lib/jenkins/workspace \
+            "${DOCKER_IMAGE}" \
+          )
+
+          docker exec -t "${CONTAINER}" sh -c '.ci/pytorch/build.sh'
+
+          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Package build snapshot
+        run: |
+          echo "Packaging build snapshot..."
+          tar czf build-snapshot.tar.gz build/ dist/
+          echo "Snapshot size: $(du -h build-snapshot.tar.gz | cut -f1)"
+          echo "Built from commit: $(git rev-parse --short HEAD)"
+
+      - name: Upload snapshot to S3
+        uses: seemethere/upload-artifact-s3@baba72d0712b404f646cebe0730933554ebce96a # v5.1.0
+        with:
+          name: runway-snapshot
+          retention-days: 7
+          if-no-files-found: error
+          path: build-snapshot.tar.gz
+          s3-bucket: gha-artifacts
+
+concurrency:
+  group: runway-snapshot
+  cancel-in-progress: true
