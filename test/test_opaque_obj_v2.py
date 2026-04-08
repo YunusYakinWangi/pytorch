@@ -3890,7 +3890,6 @@ class GraphModule(torch.nn.Module):
         from torch.utils.checkpoint import CheckpointPolicy
 
         m = OpaqueMultiplier(2.0)
-        x = torch.randn(3, requires_grad=True)
 
         fake_mode = FakeTensorMode(shape_env=ShapeEnv())
 
