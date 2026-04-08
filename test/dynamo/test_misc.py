@@ -246,7 +246,7 @@ class MiscTests(torch._inductor.test_case.TestCase):
         self.assertTrue(same(val4, correct1))
         self.assertEqual(counter.frame_count, 3)
 
-    @unittest.skipIf(not TEST_CUDA, "cuda needed")
+    @requires_gpu
     def test_assume_32_bit_indexing(self):
         @torch.compile(backend="inductor")
         def func(a, b):
