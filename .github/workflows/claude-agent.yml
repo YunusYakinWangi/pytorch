@@ -13,10 +13,6 @@ on:
         description: "GitHub token for gh CLI auth (e.g. a PAT to create PRs as yourself)"
         required: true
         type: string
-  # TODO: Remove this trigger after initial testing
-  push:
-    branches:
-      - claude-agent-workflow
 
 jobs:
   run_agent:
