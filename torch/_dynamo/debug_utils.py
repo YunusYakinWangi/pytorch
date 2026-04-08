@@ -684,7 +684,8 @@ class InputReader:
         self.args.append(None)
 
     def generator(self, device_type: str, device_index: int) -> Any:
-        gen = torch.cuda.default_generators[device_index].clone_state()
+        device = torch.device(device_type, device_index)
+        gen = torch.Generator(device=device)
         self.args.append(gen)
         return gen
 

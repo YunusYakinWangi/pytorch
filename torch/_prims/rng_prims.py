@@ -395,7 +395,14 @@ graphsafe_run_with_rng_state = register_graphsafe_run_with_rng_state_op()
 
 
 torch._library.opaque_object.register_opaque_type(
-    torch._C.Generator, typ="value"
+    torch._C.Generator,
+    typ="reference",
+    guard_fn=lambda gen: [gen.device],
+    members={
+        "device": torch._library.opaque_object.MemberType.USE_REAL,
+        "__eq__": torch._library.opaque_object.MemberType.USE_REAL,
+        "__ne__": torch._library.opaque_object.MemberType.USE_REAL,
+    },
 )
 
 

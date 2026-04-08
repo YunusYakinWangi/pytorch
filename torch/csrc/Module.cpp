@@ -241,7 +241,7 @@ static PyObject* THPModule_initExtension(
 
   auto module = THPObjectPtr(PyImport_ImportModule("torch"));
   if (!module)
-    throw python_error();
+    throw python_error(); // @allow-raw-throw
 
   THPStorage_postInit(module);
   THPAutograd_initFunctions();
@@ -682,7 +682,7 @@ static PyObject* THPModule_torchDeviceToDLDevice(
 
   auto tuple = PyTuple_New(2);
   if (!tuple) {
-    throw python_error();
+    throw python_error(); // @allow-raw-throw
   }
 
   PyTuple_SET_ITEM(tuple, 0, THPUtils_packInt64(dl_device.device_type));
@@ -2382,7 +2382,7 @@ PyObject* initModule() {
   ASSERT_TRUE(set_module_attr("has_spectral", has_spectral));
 
   // force ATen to initialize because it handles
-  // setting up TH Errors so that they throw C++ exceptions
+  // setting up TH Errors so that they throw C++ exceptions // @allow-raw-throw
   at::init();
 
   // Automatically translate errors thrown from pybind11 functions
