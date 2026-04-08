@@ -61,56 +61,6 @@ except ImportError:
     )
 
 
-class CppFakeFallbackMode(TorchDispatchMode):
-    """Handles ops without Meta kernels for C++ FakeTensor mode.
-
-    When C++ fakeFallback encounters an op without a Meta kernel, it pushes
-    this mode and redispatches via the Python key. This mode looks up the
-    appropriate Python handler (decomposition, meta impl, fake impl) and
-    calls it. Sub-ops within that handler re-enter the C++ dispatcher and
-    are handled by C++ fakeFallback, so all results remain C++ fake tensors.
-    """
-
-    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
-        kwargs = kwargs or {}
-
-        from torch._decomp import decomposition_table, meta_table
-
-        # Python meta implementations (registered via @register_decomposition
-        # into meta_table but not as C++ Meta dispatch keys).
-        if func in meta_table:
-            return meta_table[func](*args, **kwargs)
-
-        # Python decompositions
-        if func in decomposition_table:
-            return decomposition_table[func](*args, **kwargs)
-
-        # CompositeImplicitAutograd decomposition
-        r = func.decompose(*args, **kwargs)
-        if r is not NotImplemented:
-            return r
-
-        # prims with a meta impl
-        if "prims::" in func._schema.name and hasattr(func, "prim_meta_impl"):
-            return func.prim_meta_impl(*args, **kwargs)
-
-        # User-registered fake impl (torch.library)
-        maybe_fake_impl = torch._library.simple_registry.singleton.find(
-            func.name()
-        ).fake_impl.kernel
-        if maybe_fake_impl:
-            return maybe_fake_impl(*args, **kwargs)
-
-        # Mutable ops that return nothing have a trivial fake impl
-        if torch._library.utils.can_generate_trivial_fake_impl(func):
-            return None
-
-        raise RuntimeError(
-            f"C++ FakeTensor: no Meta kernel, decomposition, or fake impl for {func}. "
-            f"Please add a decomposition or fake impl for this op."
-        )
-
-
 @contextlib.contextmanager
 def cpp_fake_tensor_mode(*, shape_env=None):
     """Activate C++ FakeTensor mode with a Python fallback for unhandled ops.
@@ -124,8 +74,9 @@ def cpp_fake_tensor_mode(*, shape_env=None):
     if shape_env is None:
         shape_env = ShapeEnv()
     converter = FakeTensorConverter()
-    fallback = CppFakeFallbackMode()
-    torch._C._create_and_enter_fake_tensor_mode(converter, shape_env, fallback)
+    # fallback = CppFakeFallbackMode()
+    # torch._C._create_and_enter_fake_tensor_mode(converter, shape_env, fallback)
+    torch._C._create_and_enter_fake_tensor_mode(converter, shape_env)
     try:
         yield shape_env
     finally:
@@ -810,6 +761,331 @@ def forward(self, x_1):
             gm = make_fx(f, tracing_mode="real")(torch.randn(3, device="cuda"))
         x = torch.randn(3, device="cuda")
         self.assertEqual(gm(x), f(x))
+
+
+# class TestCppFakeSymbolicTracing(TestCase):
+#     """Symbolic tracing tests ported from TestSymbolicTracing.
+
+#     These use tracing_mode="symbolic" which creates its own FakeTensorMode
+#     internally. We wrap in cpp_fake_tensor_mode() to test that C++ fake
+#     tensors interoperate with the symbolic tracing machinery.
+#     """
+
+#     def _test_dynamic(self, fn, trace_inputs, test_inputs, assert_eq=True):
+#         trace_inputs = [torch.randn(shape) for shape in trace_inputs]
+#         with cpp_fake_tensor_mode():
+#             traced_f = make_fx(fn, tracing_mode="symbolic")(*trace_inputs)
+#         for input in test_inputs:
+#             input = [torch.randn(shape) for shape in input]
+#             rx, ry = traced_f(*input), fn(*input)
+#             if assert_eq:
+#                 self.assertEqual(rx, ry)
+#         return traced_f
+
+#     def test_int_input(self):
+#         def f(x, y):
+#             return x.view(y)
+
+#         with cpp_fake_tensor_mode():
+#             r = str(
+#                 make_fx(f, tracing_mode="symbolic")(torch.empty(3, 4), 12).code
+#             ).strip()
+#         self.assertExpectedInline(
+#             r,
+#             """\
+# def forward(self, x_1, y_1):
+#     view = torch.ops.aten.view.default(x_1, [y_1]);  x_1 = y_1 = None
+#     return view""",
+#         )
+
+#     def test_resize_from_zero(self):
+#         def f(x, y):
+#             x.resize_(y.size(0))
+
+#         with cpp_fake_tensor_mode():
+#             r = str(
+#                 make_fx(f, tracing_mode="symbolic")(torch.empty(0), torch.empty(2)).code
+#             ).strip()
+#         self.assertExpectedInline(
+#             r,
+#             """\
+# def forward(self, x_1, y_1):
+#     sym_size_int = torch.ops.aten.sym_size.int(y_1, 0);  y_1 = None
+#     resize_ = torch.ops.aten.resize_.default(x_1, [sym_size_int]);  x_1 = sym_size_int = resize_ = None
+#     return None""",
+#         )
+
+#     def test_broadcast_shapes(self):
+#         def f(x, y):
+#             return torch.functional.broadcast_shapes(x.size(), y.size()[0])
+
+#         with cpp_fake_tensor_mode():
+#             r = str(
+#                 make_fx(f, tracing_mode="symbolic")(
+#                     torch.empty(3, 1), torch.empty(5)
+#                 ).code
+#             ).strip()
+#         self.assertExpectedInline(
+#             r,
+#             """\
+# def forward(self, x_1, y_1):
+#     sym_size_int = torch.ops.aten.sym_size.int(x_1, 0);  x_1 = None
+#     sym_size_int_1 = torch.ops.aten.sym_size.int(y_1, 0);  y_1 = None
+#     return (sym_size_int, sym_size_int_1)""",
+#         )
+
+#     def test_unary(self):
+#         def f(x):
+#             if x.shape[0] >= 20:
+#                 raise AssertionError(f"expected x.shape[0] < 20, got {x.shape[0]}")
+#             return x.cos()
+
+#         test_inputs = []
+#         test_inputs.append([(2, 5)])
+#         test_inputs.append([(6, 8)])
+#         self._test_dynamic(f, [(3, 4)], test_inputs)
+
+#     def test_multiply_shape(self):
+#         def f(a):
+#             return torch.empty(a.shape[0] * 2)
+
+#         with cpp_fake_tensor_mode():
+#             r = str(make_fx(f, tracing_mode="symbolic")(torch.empty(4)).code).strip()
+#         self.assertExpectedInline(
+#             r,
+#             """\
+# def forward(self, a_1):
+#     sym_size_int = torch.ops.aten.sym_size.int(a_1, 0);  a_1 = None
+#     mul = sym_size_int * 2;  sym_size_int = None
+#     empty = torch.ops.aten.empty.memory_format([mul], device = device(type='cpu'), pin_memory = False);  mul = None
+#     return empty""",
+#         )
+
+#     def test_item(self):
+#         def f(a):
+#             r = a.item()
+#             return r * a
+
+#         with cpp_fake_tensor_mode():
+#             r = str(make_fx(f, tracing_mode="symbolic")(torch.randn(1)).code).strip()
+#         self.assertExpectedInline(
+#             r,
+#             """\
+# def forward(self, a_1):
+#     _local_scalar_dense = torch.ops.aten._local_scalar_dense.default(a_1)
+#     mul = torch.ops.aten.mul.Tensor(a_1, _local_scalar_dense);  a_1 = _local_scalar_dense = None
+#     return mul""",
+#         )
+
+#     def test_item_to_constructor(self):
+#         def f(a):
+#             r = a.item()
+#             return torch.empty(r)
+
+#         with cpp_fake_tensor_mode():
+#             r = str(
+#                 make_fx(f, tracing_mode="symbolic")(torch.randint(5, (1,))).code
+#             ).strip()
+#         self.assertExpectedInline(
+#             r,
+#             """\
+# def forward(self, a_1):
+#     _local_scalar_dense = torch.ops.aten._local_scalar_dense.default(a_1);  a_1 = None
+#     empty = torch.ops.aten.empty.memory_format([_local_scalar_dense], device = device(type='cpu'), pin_memory = False);  _local_scalar_dense = None
+#     return empty""",  # noqa: B950
+#         )
+
+#     def test_neg_shape(self):
+#         def f(a):
+#             return torch.empty(-a.shape[0] + 10)
+
+#         with cpp_fake_tensor_mode():
+#             r = str(make_fx(f, tracing_mode="symbolic")(torch.empty(2)).code).strip()
+#         self.assertExpectedInline(
+#             r,
+#             """\
+# def forward(self, a_1):
+#     sym_size_int = torch.ops.aten.sym_size.int(a_1, 0);  a_1 = None
+#     neg = -sym_size_int;  sym_size_int = None
+#     add = neg + 10;  neg = None
+#     empty = torch.ops.aten.empty.memory_format([add], device = device(type='cpu'), pin_memory = False);  add = None
+#     return empty""",
+#         )
+
+#     def test_binary_broadcast(self):
+#         def f(a, b):
+#             c = a * b
+#             return c
+
+#         test_inputs = []
+#         test_inputs.append([(1, 5), (3, 1)])
+#         test_inputs.append([(1, 4), (4, 1)])
+#         self._test_dynamic(f, [(1, 2), (3, 1)], test_inputs)
+
+#     def test_expand(self):
+#         def f(a):
+#             b = torch.mul(a, a)
+#             c = b.expand(a.shape)
+#             return c
+
+#         self._test_dynamic(f, [(3,)], [[(3,)], [(4,)], [(2,)]])
+#         self._test_dynamic(f, [(5, 1)], [[(4, 1)], [(3, 1)], [(6, 1)]])
+
+#     def test_return_symint(self):
+#         def f(x):
+#             return x.shape[0], x.cos(), x.shape[0] / 5
+
+#         self._test_dynamic(f, [(5,)], [[(4,)], [(12,)]])
+
+#         def f(x):
+#             return x.shape
+
+#         self._test_dynamic(f, [(5, 3)], [[(4, 6)]])
+
+#     def test_rmethod(self):
+#         def f(x):
+#             return x.size(0) + x
+
+#         self._test_dynamic(f, [(5,)], [[(4,)], [(12,)]])
+
+#     def test_symint_to_tensor(self):
+#         def f(a):
+#             return a / a.shape[0]
+
+#         with cpp_fake_tensor_mode():
+#             r = str(make_fx(f, tracing_mode="symbolic")(torch.empty(4)).code).strip()
+#         self.assertExpectedInline(
+#             r,
+#             """\
+# def forward(self, a_1):
+#     sym_size_int = torch.ops.aten.sym_size.int(a_1, 0)
+#     div = torch.ops.aten.div.Tensor(a_1, sym_size_int);  a_1 = sym_size_int = None
+#     return div""",
+#         )
+
+#     def test_sqrt_size(self):
+#         def f(a):
+#             return a / a.size(-1) ** 0.5
+
+#         with cpp_fake_tensor_mode():
+#             r = str(make_fx(f, tracing_mode="symbolic")(torch.empty(4)).code).strip()
+#         self.assertExpectedInline(
+#             r,
+#             """\
+# def forward(self, a_1):
+#     sym_size_int = torch.ops.aten.sym_size.int(a_1, 0)
+#     sym_float = torch.sym_float(sym_size_int);  sym_size_int = None
+#     pow_1 = sym_float ** 0.5;  sym_float = None
+#     div = torch.ops.aten.div.Tensor(a_1, pow_1);  a_1 = pow_1 = None
+#     return div""",
+#         )
+
+#     def test_sym_storage_offset(self):
+#         def f(x, y):
+#             return x + y
+
+#         inp = (torch.randn(8)[3:], torch.randn(5))
+#         with cpp_fake_tensor_mode():
+#             fx_g = make_fx(f, tracing_mode="symbolic")(*inp)
+#         inp = (torch.randn(8)[3:], torch.randn(5))
+#         self.assertEqual(fx_g(*inp), f(*inp))
+
+#     def test_setitem_symint(self):
+#         def f(x):
+#             x[0] = x.size(0)
+#             return x
+
+#         with cpp_fake_tensor_mode():
+#             r = str(make_fx(f, tracing_mode="symbolic")(torch.randn(10)).code).strip()
+#         self.assertExpectedInline(
+#             r,
+#             """\
+# def forward(self, x_1):
+#     sym_size_int = torch.ops.aten.sym_size.int(x_1, 0)
+#     scalar_tensor = torch.ops.aten.scalar_tensor.default(sym_size_int, dtype = torch.float32, layout = torch.strided, device = device(type='cpu'));  sym_size_int = None
+#     select = torch.ops.aten.select.int(x_1, 0, 0)
+#     copy_ = torch.ops.aten.copy_.default(select, scalar_tensor);  select = scalar_tensor = copy_ = None
+#     return x_1""",  # noqa: B950
+#         )
+
+#     def test_non_symint_size_spec(self):
+#         def f(x):
+#             torch._C._non_sym_sizes(x)
+#             return x + 1
+
+#         x = torch.randn(2, 3)
+#         with cpp_fake_tensor_mode():
+#             make_fx(f, tracing_mode="symbolic")(x)
+
+#     def test_new_empty(self):
+#         def f(a, b):
+#             return a.new_empty(b.shape[0], b.shape[1] * 2)
+
+#         self._test_dynamic(
+#             f, [(2, 4), (4, 5)], [[(2, 3), (5, 7)], [(3, 7), (9, 3)]], assert_eq=False
+#         )
+
+#     def test_unbacked_slice(self):
+#         def f(x, m):
+#             x = x[m]
+#             return x[
+#                 slice(None, None, None), slice(None, None, None), slice(None, 2, None)
+#             ]
+
+#         with cpp_fake_tensor_mode():
+#             make_fx(f, tracing_mode="symbolic")(
+#                 torch.randn((12, 3, 3)), torch.randint(0, 2, (12,), dtype=torch.bool)
+#             )
+
+#     def test_dynamic_pointwise_scalar(self):
+#         def f(gravity, mask):
+#             gravity[mask, 0] = gravity[mask, 0] * -1
+
+#         with cpp_fake_tensor_mode():
+#             r = str(
+#                 make_fx(f, tracing_mode="symbolic")(
+#                     torch.randn((12, 4)), torch.randint(0, 2, (12,), dtype=torch.bool)
+#                 ).code
+#             ).strip()
+#         self.assertExpectedInline(
+#             r,
+#             """\
+# def forward(self, gravity_1, mask_1):
+#     select = torch.ops.aten.select.int(gravity_1, 1, 0)
+#     index = torch.ops.aten.index.Tensor(select, [mask_1]);  select = None
+#     mul = torch.ops.aten.mul.Tensor(index, -1);  index = None
+#     select_1 = torch.ops.aten.select.int(gravity_1, 1, 0);  gravity_1 = None
+#     index_put_ = torch.ops.aten.index_put_.default(select_1, [mask_1], mul);  select_1 = mask_1 = mul = index_put_ = None
+#     return None""",
+#         )
+
+#     def test_boolean_index(self):
+#         def f(images, handedness, valid):
+#             images = images[valid]
+#             handedness = handedness[valid]
+#             right_hand_mask = handedness == 1
+#             images[right_hand_mask] = images[right_hand_mask].flip(-1)
+
+#         with cpp_fake_tensor_mode():
+#             r = str(
+#                 make_fx(f, tracing_mode="symbolic")(
+#                     torch.randint(0, 256, (512, 1, 96, 96)),
+#                     torch.randint(0, 1, (512,)),
+#                     torch.randint(0, 2, (512,), dtype=torch.bool),
+#                 ).code
+#             ).strip()
+#         self.assertExpectedInline(
+#             r,
+#             """\
+# def forward(self, images_1, handedness_1, valid_1):
+#     index = torch.ops.aten.index.Tensor(images_1, [valid_1]);  images_1 = None
+#     index_1 = torch.ops.aten.index.Tensor(handedness_1, [valid_1]);  handedness_1 = valid_1 = None
+#     eq = torch.ops.aten.eq.Scalar(index_1, 1);  index_1 = None
+#     index_2 = torch.ops.aten.index.Tensor(index, [eq])
+#     flip = torch.ops.aten.flip.default(index_2, [-1]);  index_2 = None
+#     index_put_ = torch.ops.aten.index_put_.default(index, [eq], flip);  index = eq = flip = index_put_ = None
+#     return None""",
+#         )
 
 
 if __name__ == "__main__":

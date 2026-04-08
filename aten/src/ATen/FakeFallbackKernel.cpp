@@ -216,23 +216,6 @@ void fakeFallback(
   auto mode = c10::impl::FakeTensorModeTLS::get_state();
   convert_non_fake_inputs(stack, arguments_begin, num_arguments, mode);
 
-  // op fallback to python dispatch
-  if (!op.hasComputedKernelForDispatchKey(c10::DispatchKey::Meta)) {
-    if (mode && mode->python_fallback_mode_) {
-      // need to push mode onto stack so when python key is it hit it routes to
-      // __torch_dispatch__ and has smth to pop off the stack (the python
-      // fallback mode)
-      c10::impl::TorchDispatchModeTLS::push_non_infra_mode_onto_stack(
-          mode->python_fallback_mode_);
-      c10::impl::IncludeDispatchKeyGuard python_guard(c10::DispatchKey::Python);
-      auto ks = dispatchKeySet.remove(c10::DispatchKey::Fake) |
-          c10::DispatchKeySet(c10::DispatchKey::Python);
-      op.redispatchBoxed(ks, stack);
-      c10::impl::TorchDispatchModeTLS::pop_stack();
-      return;
-    }
-  }
-
   auto fake_device = get_common_device(stack, num_arguments);
 
   if (!fake_device.has_value()) {
