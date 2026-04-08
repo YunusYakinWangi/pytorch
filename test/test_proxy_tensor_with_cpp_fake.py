@@ -306,7 +306,7 @@ def forward(self, x_1):
             )
         )
 
-    @unittest.skip("C++ fake mode has no constant propagation — .item() fails on meta tensors")
+    @unittest.skip("C++ fake mode has no constant propagation")
     def test_tensor_constants(self):
         def f():
             val = torch.tensor(float("inf"))
@@ -314,7 +314,7 @@ def forward(self, x_1):
 
         self._test(f, [])
 
-    @unittest.skip("C++ fake mode has no constant propagation — .item() fails on meta tensors")
+    @unittest.skip("C++ fake mode has no constant propagation")
     def test_constant_proxy_tensor_mut(self):
         def f():
             val = torch.tensor(float(1))
@@ -326,7 +326,7 @@ def forward(self, x_1):
         self.assertEqual(g(), f())
         self.assertEqual(g(), f())
 
-    @unittest.skip("C++ fake mode has no constant propagation — .item() fails on meta tensors")
+    @unittest.skip("C++ fake mode has no constant propagation")
     def test_constant_unbind(self):
         def f():
             val = torch.tensor([2])
@@ -455,6 +455,27 @@ def forward(self, x_1):
             )
         )
 
+    def test_make_fx_model_double_param(self):
+        class Emformer(torch.nn.Module):
+            def __init__(
+                self,
+                input_dim: int = 256,
+            ) -> None:
+                super().__init__()
+                self.layer_norm = torch.nn.LayerNorm(input_dim)
+
+            def forward(mod_self, x):  # noqa: B902
+                self.assertTrue(isinstance(mod_self.layer_norm.weight, torch.Tensor))
+                y = mod_self.layer_norm(x)
+                self.assertTrue(isinstance(mod_self.layer_norm.weight, torch.Tensor))
+                z = mod_self.layer_norm(y)
+                return z
+
+        with cpp_fake_tensor_mode():
+            gm = make_fx(Emformer(), tracing_mode="real")(torch.randn(16, 1, 256))
+        ops = {n.target for n in gm.graph.nodes if n.op == "call_function"}
+        self.assertEqual(len(ops), 2)
+
     def test_partial_decomp(self):
         def f(a, b, c):
             x = torch.addmm(a, b, c)
@@ -553,8 +574,6 @@ def forward(self, x_1):
             return torch.ops.aten.nll_loss_forward(a, b, None, 1, 10)
 
         self._test(f, [torch.randn(1, 10), torch.zeros(1, dtype=torch.long)])
-
-    # --- Tests from TestFakeProxyTensor adapted for C++ fake mode ---
 
     def test_use_fake_and_tensor(self):
         def f(x, y):

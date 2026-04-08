@@ -667,8 +667,6 @@ _ExtractValType: TypeAlias = (
 
 def extract_val(val: _ExtractValType, include_real: bool = False) -> _ExtractValType:
     if is_fake(val):
-        # Handles both Python FakeTensors and C++ fake tensors.
-        # Python FakeTensors use fast_detach; C++ fake tensors use detach.
         return snapshot_fake(val, include_real=include_real)
     elif isinstance(val, py_sym_types):
         return val
@@ -1464,10 +1462,11 @@ class PythonKeyTracer(Tracer):
             val = v.meta["val"]
             # other subclasses like FunctionalTensor error on `extract_val`
             # "Attempting to use FunctionalTensor on its own." just store FakeTensors for now
-            # NB: intentionally isinstance(FakeTensor), NOT is_fake() — is_fake recurses
-            # into subclass attrs via getattr, which triggers proxy tracking during export.
-            # Also accept C++ fake tensors.
-            if isinstance(val, torch.Tensor) and not isinstance(val, FakeTensor) and not (_has_cpp_fake_tensor and torch._C._is_fake_tensor(val)):
+            if (
+                isinstance(val, torch.Tensor)
+                and not isinstance(val, FakeTensor)
+                and not (_has_cpp_fake_tensor and torch._C._is_fake_tensor(val))
+            ):
                 return None
             return extract_val(v.meta["val"])
 

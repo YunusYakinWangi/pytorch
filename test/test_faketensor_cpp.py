@@ -1,7 +1,7 @@
 import contextlib
 
 import torch
-from torch._subclasses.fake_tensor import FakeTensorConverter, FakeTensorMode
+from torch._subclasses.fake_tensor import FakeTensorConverter
 from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.testing._internal.common_device_type import instantiate_device_type_tests

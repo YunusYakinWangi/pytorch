@@ -117,24 +117,19 @@ static bool needs_transmute(const at::Tensor& t) {
   return t.device().is_meta();
 }
 
-// C++ equivalent of Python's validate_and_convert_non_fake_tensors.
-// Converts real tensor inputs to C++ fake tensors by creating a meta tensor
-// with matching shape/strides/dtype and stamping it as fake with the original
-// device. This handles the case where captured real tensors (e.g. nn.Parameters,
-// closed-over variables) are mixed with fake tensors in an op call.
+// Takes in real tensor inputs and creates a corresponding meta tensor
+// with the original device
 static at::Tensor real_tensor_to_fake(
     const at::Tensor& t,
     const std::shared_ptr<c10::FakeTensorMode>& mode) {
   auto original_device = t.device();
   at::Tensor meta_t;
   {
-    // Exclude Fake key so empty_strided doesn't re-enter fakeFallback.
+    // Exclude Fake key so empty_strided doesn't re-enter fakeFallback
     c10::impl::ExcludeDispatchKeyGuard guard(
         c10::DispatchKeySet(c10::DispatchKey::Fake));
     meta_t = at::empty_strided(
-        t.sizes(),
-        t.strides(),
-        t.options().device(c10::DeviceType::Meta));
+        t.sizes(), t.strides(), t.options().device(c10::DeviceType::Meta));
   }
   if (t.requires_grad()) {
     meta_t.set_requires_grad(true);
@@ -143,12 +138,13 @@ static at::Tensor real_tensor_to_fake(
   return meta_t;
 }
 
+// C++ equivalent of Python's validate_and_convert_non_fake_tensors.
 static void convert_non_fake_inputs(
     torch::jit::Stack* stack,
     size_t arguments_begin,
     size_t num_arguments,
     const std::shared_ptr<c10::FakeTensorMode>& mode) {
-  for (size_t idx = 0; idx < num_arguments; ++idx) {
+  for (const auto idx : c10::irange(num_arguments)) {
     auto& ivalue = (*stack)[arguments_begin + idx];
     if (ivalue.isTensor()) {
       const auto& t = ivalue.toTensor();
@@ -157,47 +153,19 @@ static void convert_non_fake_inputs(
       }
     } else if (ivalue.isTensorList()) {
       auto tensors = ivalue.toTensorList();
-      bool needs_convert = false;
       for (const auto i : c10::irange(tensors.size())) {
         at::Tensor t = tensors[i];
         if (t.defined() && !t.is_fake()) {
-          needs_convert = true;
-          break;
+          tensors[i] = real_tensor_to_fake(t, mode);
         }
-      }
-      if (needs_convert) {
-        auto new_list = c10::List<at::Tensor>();
-        for (const auto i : c10::irange(tensors.size())) {
-          at::Tensor t = tensors[i];
-          if (t.defined() && !t.is_fake()) {
-            new_list.push_back(real_tensor_to_fake(t, mode));
-          } else {
-            new_list.push_back(t);
-          }
-        }
-        (*stack)[arguments_begin + idx] = new_list;
       }
     } else if (ivalue.isOptionalTensorList()) {
       auto opt_tensors = ivalue.toOptionalTensorList();
-      bool needs_convert = false;
       for (const auto i : c10::irange(opt_tensors.size())) {
         std::optional<at::Tensor> ot = opt_tensors[i];
         if (ot.has_value() && ot->defined() && !ot->is_fake()) {
-          needs_convert = true;
-          break;
+          opt_tensors[i] = real_tensor_to_fake(*ot, mode);
         }
-      }
-      if (needs_convert) {
-        auto new_list = c10::List<std::optional<at::Tensor>>();
-        for (const auto i : c10::irange(opt_tensors.size())) {
-          std::optional<at::Tensor> ot = opt_tensors[i];
-          if (ot.has_value() && ot->defined() && !ot->is_fake()) {
-            new_list.push_back(real_tensor_to_fake(*ot, mode));
-          } else {
-            new_list.push_back(ot);
-          }
-        }
-        (*stack)[arguments_begin + idx] = new_list;
       }
     }
   }
@@ -246,16 +214,14 @@ void fakeFallback(
   const auto arguments_begin = stack->size() - num_arguments;
 
   auto mode = c10::impl::FakeTensorModeTLS::get_state();
-
-  // Convert any real tensor inputs to C++ fake tensors. This handles
-  // captured variables, nn.Parameters, and inline tensor constants that
-  // aren't already fake.
   convert_non_fake_inputs(stack, arguments_begin, num_arguments, mode);
 
-  // If this op has no computed Meta kernel, fall back to Python handling
-  // (decompositions, fake_impls, etc.) via the stored bridge mode.
+  // op fallback to python dispatch
   if (!op.hasComputedKernelForDispatchKey(c10::DispatchKey::Meta)) {
     if (mode && mode->python_fallback_mode_) {
+      // need to push mode onto stack so when python key is it hit it routes to
+      // __torch_dispatch__ and has smth to pop off the stack (the python
+      // fallback mode)
       c10::impl::TorchDispatchModeTLS::push_non_infra_mode_onto_stack(
           mode->python_fallback_mode_);
       c10::impl::IncludeDispatchKeyGuard python_guard(c10::DispatchKey::Python);
