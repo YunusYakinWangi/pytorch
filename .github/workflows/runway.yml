@@ -13,12 +13,21 @@ on:
         description: "GitHub token for gh CLI auth (e.g. a PAT to create PRs as yourself)"
         required: true
         type: string
+      runner:
+        description: "Runner to use"
+        required: false
+        type: choice
+        default: "linux.aws.h100"
+        options:
+          - linux.aws.h100
+          - linux.aws.a100
+          - linux.c7i.4xlarge
 
 jobs:
   run_agent:
     name: runway_${{ github.run_id }}
     if: github.repository == 'pytorch/pytorch'
-    runs-on: linux.aws.h100
+    runs-on: ${{ github.event.client_payload.runner || inputs.runner || 'linux.aws.h100' }}
     timeout-minutes: 120
     environment: bedrock
     permissions:
@@ -26,11 +35,37 @@ jobs:
       pull-requests: write
       id-token: write
     env:
-      BUILD_ENVIRONMENT: linux-jammy-cuda12.8-cudnn9-py3-gcc11
-      DOCKER_IMAGE_NAME: ci-image:pytorch-linux-jammy-cuda12.8-cudnn9-py3-gcc11
-      TORCH_CUDA_ARCH_LIST: "9.0"
       GH_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:
+      - name: Resolve runner config
+        id: config
+        env:
+          RUNNER: ${{ github.event.client_payload.runner || inputs.runner || 'linux.aws.h100' }}
+        run: |
+          case "${RUNNER}" in
+            linux.aws.h100*)
+              echo "docker-image=ci-image:pytorch-linux-jammy-cuda12.8-cudnn9-py3-gcc11" >> "$GITHUB_OUTPUT"
+              echo "build-env=linux-jammy-cuda12.8-cudnn9-py3-gcc11" >> "$GITHUB_OUTPUT"
+              echo "cuda-arch=9.0" >> "$GITHUB_OUTPUT"
+              echo "gpu=true" >> "$GITHUB_OUTPUT"
+              echo "gpu-name=H100" >> "$GITHUB_OUTPUT"
+              ;;
+            linux.aws.a100*)
+              echo "docker-image=ci-image:pytorch-linux-jammy-cuda12.8-cudnn9-py3-gcc11" >> "$GITHUB_OUTPUT"
+              echo "build-env=linux-jammy-cuda12.8-cudnn9-py3-gcc11" >> "$GITHUB_OUTPUT"
+              echo "cuda-arch=8.0" >> "$GITHUB_OUTPUT"
+              echo "gpu=true" >> "$GITHUB_OUTPUT"
+              echo "gpu-name=A100" >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "docker-image=ci-image:pytorch-linux-jammy-py3.10-gcc11" >> "$GITHUB_OUTPUT"
+              echo "build-env=linux-jammy-py3.10-gcc11" >> "$GITHUB_OUTPUT"
+              echo "cuda-arch=" >> "$GITHUB_OUTPUT"
+              echo "gpu=false" >> "$GITHUB_OUTPUT"
+              echo "gpu-name=none" >> "$GITHUB_OUTPUT"
+              ;;
+          esac
+
       - name: Checkout PyTorch
         uses: pytorch/pytorch/.github/actions/checkout-pytorch@main
         with:
@@ -46,7 +81,7 @@ jobs:
         id: calculate-docker-image
         uses: pytorch/test-infra/.github/actions/calculate-docker-image@main
         with:
-          docker-image-name: ${{ env.DOCKER_IMAGE_NAME }}
+          docker-image-name: ${{ steps.config.outputs.docker-image }}
 
       - name: Pull docker image
         uses: pytorch/test-infra/.github/actions/pull-docker-image@main
@@ -57,13 +92,22 @@ jobs:
         id: docker
         env:
           DOCKER_IMAGE: ${{ steps.calculate-docker-image.outputs.docker-image }}
+          BUILD_ENVIRONMENT: ${{ steps.config.outputs.build-env }}
+          TORCH_CUDA_ARCH_LIST: ${{ steps.config.outputs.cuda-arch }}
+          HAS_GPU: ${{ steps.config.outputs.gpu }}
         run: |
           TOTAL_AVAILABLE_MEMORY_IN_GB=$(awk '/MemTotal/ { printf "%.0f", $2/1024/1024 - 1 }' /proc/meminfo)
           TOTAL_MEMORY_WITH_SWAP=$((TOTAL_AVAILABLE_MEMORY_IN_GB + 3))
 
+          GPU_ARGS=""
+          if [ "${HAS_GPU}" = "true" ]; then
+            GPU_ARGS="--gpus all -e NVIDIA_DRIVER_CAPABILITIES=all --shm-size=2g"
+          fi
+
+          # GPU_ARGS is intentionally unquoted to allow word splitting
+          # shellcheck disable=SC2086
           container_name=$(docker run \
-            --gpus all \
-            -e NVIDIA_DRIVER_CAPABILITIES=all \
+            ${GPU_ARGS} \
             -e BUILD_ENVIRONMENT \
             -e MAX_JOBS="$(nproc --ignore=2)" \
             -e TORCH_CUDA_ARCH_LIST \
@@ -73,7 +117,6 @@ jobs:
             --env-file="/tmp/github_env_${GITHUB_RUN_ID}" \
             --memory="${TOTAL_AVAILABLE_MEMORY_IN_GB}g" \
             --memory-swap="${TOTAL_MEMORY_WITH_SWAP}g" \
-            --shm-size=2g \
             --security-opt seccomp=unconfined \
             --cap-add=SYS_PTRACE \
             --tty \
@@ -119,6 +162,8 @@ jobs:
           ANTHROPIC_MODEL: global.anthropic.claude-opus-4-6-v1
           PROMPT: ${{ github.event.client_payload.prompt || inputs.prompt || 'List the files in the current directory and print hello world. Do not make any changes.' }}
           CONTAINER: ${{ steps.docker.outputs.container-name }}
+          GPU_NAME: ${{ steps.config.outputs.gpu-name }}
+          HAS_GPU: ${{ steps.config.outputs.gpu }}
         run: |
           set -euo pipefail
 
@@ -127,11 +172,11 @@ jobs:
 
           ENVIRONMENT:
           - You have a full checkout of pytorch at $(pwd)
-          - PyTorch has already been built with CUDA support in a Docker container
-          - An H100 GPU is available inside the container
+          - PyTorch has already been built$([ "${HAS_GPU}" = "true" ] && echo " with CUDA support") in a Docker container
+          $([ "${HAS_GPU}" = "true" ] && echo "- A ${GPU_NAME} GPU is available inside the container")
           - To run tests, use: docker exec -t ${CONTAINER} sh -c '<command>'
             For example: docker exec -t ${CONTAINER} sh -c 'python test/test_torch.py -k test_abs'
-          - To run CUDA tests: docker exec -t ${CONTAINER} sh -c 'python test/test_cuda.py -k test_name'
+          $([ "${HAS_GPU}" = "true" ] && echo "- To run CUDA tests: docker exec -t ${CONTAINER} sh -c 'python test/test_cuda.py -k test_name'")
           - To rebuild after making changes: docker exec -t ${CONTAINER} sh -c '.ci/pytorch/build.sh'
           - The workspace is bind-mounted, so file edits on the host are visible inside the container
 
