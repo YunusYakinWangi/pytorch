@@ -1480,6 +1480,10 @@ def _should_use_fused_scaled_matmul_reduce_scatter_native(
         and orig_scatter_dim == 0
         and scatter_dim_after_maybe_reshape == 0
         and local_M % group.size() == 0
+        # Native RS+scaled_mm helps the latency-sensitive small-M regime, but
+        # starts to lose once M gets large enough that the default pipeline
+        # amortizes its orchestration overhead.
+        and local_M <= 1024
     )
 
 
