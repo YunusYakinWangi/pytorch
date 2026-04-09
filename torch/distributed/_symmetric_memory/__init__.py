@@ -911,8 +911,7 @@ def _should_use_fused_all_gather_matmul_native(
     local_M = math.prod(A_shard.shape[:-1])
 
     return (
-        "TORCH_SYMM_MEM_ENABLE_NATIVE_ASYNC_TP" in os.environ
-        and A_shard.is_contiguous()
+        A_shard.is_contiguous()
         and gather_dim == 0
         # _async_input_mm requires local_M to be divisible by world_size.
         and local_M % group.size() == 0
@@ -1475,8 +1474,7 @@ def _should_use_fused_scaled_matmul_reduce_scatter_native(
     local_M = math.prod(A.shape[:-1])
 
     return (
-        "TORCH_SYMM_MEM_ENABLE_NATIVE_ASYNC_TP" in os.environ
-        and A.is_contiguous()
+        A.is_contiguous()
         and orig_scatter_dim == 0
         and scatter_dim_after_maybe_reshape == 0
         and local_M % group.size() == 0
