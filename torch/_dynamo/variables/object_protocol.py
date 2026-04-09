@@ -10,7 +10,13 @@ live in their respective VT files.
 from functools import lru_cache
 from typing import TYPE_CHECKING
 
-from torch._C._dynamo import get_type_slots, has_slot, PyMappingSlots, PySequenceSlots
+from torch._C._dynamo import (
+    get_type_slots,
+    has_slot,
+    PyMappingSlots,
+    PyNumberSlots,
+    PySequenceSlots,
+)
 
 from .. import graph_break_hints
 from ..exc import (
@@ -101,6 +107,12 @@ def type_implements_mp_length(obj_type: type) -> bool:
     return has_slot(map_slots, PyMappingSlots.MP_LENGTH)
 
 
+def type_implements_nb_bool(obj_type: type) -> bool:
+    """Check whether obj_type implements the nb_bool slot (i.e. has __bool__ or __len__)."""
+    _, _, _, number_slots = _get_cached_slots(obj_type)
+    return has_slot(number_slots, PyNumberSlots.NB_BOOL)
+
+
 def maybe_get_python_type(obj: VariableTracker) -> type:
     try:
         return obj.python_type()
@@ -157,9 +169,12 @@ def generic_bool(tx: "InstructionTranslator", obj: VariableTracker) -> VariableT
     if obj.is_python_constant():
         return ConstantVariable.create(bool(obj.as_python_constant()))
 
-    result = obj.bool_impl(tx)
-    if result is not None:
-        return result
+    obj_type = maybe_get_python_type(obj)
+
+    if type_implements_nb_bool(obj_type):
+        result = obj.bool_impl(tx)
+        if result is not None:
+            return result
 
     try:
         length = generic_len(tx, obj)
