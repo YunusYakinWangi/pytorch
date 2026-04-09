@@ -3412,7 +3412,6 @@ class TestTemplateConfigPruning(TestCase):
             )
             # Configure heuristics to use only this specific config
             heuristic.mm_configs = [c]
-            exceeds = exceeds_checker(c, dtype_size)
 
             original_precompile = CachingAutotuner.precompile
 
