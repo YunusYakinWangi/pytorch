@@ -4,6 +4,7 @@
 #include <iostream>
 #include <optional>
 
+#include <ATen/ExpandUtils.h>
 #include <ATen/core/Tensor.h>
 #include <ATen/native/mps/OperationUtils.h>
 #include <ATen/native/transformers/attention.h>
@@ -27,15 +28,16 @@ static auto& lib = mps::MetalShaderLibrary::getBundledLibrary();
 
 static constexpr int SIMD_SIZE = 32;
 
-// expand potential 3d to 4d tensor
-static inline std::tuple<Tensor, bool> ensure_4d(const Tensor& x) {
+static inline Tensor view_as_4d(const Tensor& x) {
   if (x.dim() == 3) {
-    return {x.unsqueeze(0), true};
+    return x.unsqueeze(0);
+  } else if (x.dim() == 2) {
+    return x.view({1, 1, x.size(-2), x.size(-1)});
   } else if (x.dim() > 4) {
     auto batchSize = c10::multiply_integers(x.sizes().begin(), x.sizes().end() - 3);
-    return {x.view({batchSize, x.size(-3), x.size(-2), x.size(-1)}), true};
+    return x.view({batchSize, x.size(-3), x.size(-2), x.size(-1)});
   } else {
-    return {x, false};
+    return x;
   }
 }
 
@@ -48,8 +50,8 @@ static std::tuple<Tensor, Tensor> sdpa_general_mps(const Tensor& query,
                                                    bool is_causal,
                                                    const std::optional<Tensor>& dropout_mask,
                                                    std::optional<double> scale,
-                                                   const Tensor& orig_query,
-                                                   bool unsqueezed) {
+                                                   IntArrayRef out_shape,
+                                                   IntArrayRef attn_shape) {
   using namespace mps;
   struct CachedGraph : public MPSCachedGraph {
     CachedGraph(MPSGraph* graph) : MPSCachedGraph(graph) {}
@@ -149,26 +151,8 @@ static std::tuple<Tensor, Tensor> sdpa_general_mps(const Tensor& query,
     runMPSGraph(getCurrentMPSStream(), cachedGraph->graph(), feeds, outs);
   }
 
-  auto final_out = out;
-  auto final_attn = attn;
-  if (unsqueezed) {
-    if (orig_query.dim() == 3) {
-      final_out = out.squeeze(0);
-      final_attn = attn.squeeze(0);
-    } else {
-      std::vector<int64_t> prefix_shape(orig_query.sizes().begin(), orig_query.sizes().end() - 3);
-
-      auto out_shape = prefix_shape;
-      auto attn_shape = prefix_shape;
-
-      out_shape.insert(out_shape.end(), {out.size(1), out.size(2), out.size(3)});
-      attn_shape.insert(attn_shape.end(), {attn.size(1), attn.size(2), attn.size(3)});
-
-      final_out = out.view(out_shape);
-      final_attn = attn.view(attn_shape);
-    }
-  }
-
+  auto final_out = out.view(out_shape);
+  auto final_attn = attn.view(attn_shape);
   return {std::move(final_out), std::move(final_attn)};
 }
 
@@ -181,8 +165,8 @@ static std::tuple<Tensor, Tensor> sdpa_vector_fast_mps(const Tensor& q_,
                                                        bool is_causal,
                                                        const std::optional<Tensor>& dropout_mask,
                                                        std::optional<double> scale,
-                                                       const Tensor& orig_query,
-                                                       bool unsqueezed) {
+                                                       IntArrayRef out_shape,
+                                                       IntArrayRef attn_shape) {
   TORCH_CHECK(q_.size(3) == k_.size(3) && q_.size(3) == v_.size(3),
               "sdpa_vector_fast_mps expects query, key, and value to have the same head dimension");
   const auto macOS15_0_plus = is_macos_13_or_newer(MacOSVersion::MACOS_VER_15_0_PLUS);
@@ -240,13 +224,8 @@ static std::tuple<Tensor, Tensor> sdpa_vector_fast_mps(const Tensor& q_,
     }
   });
   // reshape back to original dimension
-  auto final_out = unsqueezed ? out.view_as(orig_query) : out;
-  auto final_attn = unsqueezed ? (orig_query.dim() == 3 ? attn.squeeze(0) : [&]{
-    std::vector<int64_t> shape(orig_query.sizes().begin(), orig_query.sizes().end() - 3);
-    shape.insert(shape.end(), {attn.size(1), attn.size(2), attn.size(3)});
-    return attn.view(shape);
-  }()) : attn;
-
+  auto final_out = out.view(out_shape);
+  auto final_attn = attn.view(attn_shape);
   return {std::move(final_out), std::move(final_attn)};
 }
 
@@ -259,8 +238,7 @@ static std::tuple<Tensor, Tensor> sdpa_vector_2pass_mps(const Tensor& q_,
                                                         bool is_causal,
                                                         const std::optional<Tensor>& dropout_mask,
                                                         std::optional<double> scale,
-                                                        const Tensor& orig_query,
-                                                        bool unsqueezed) {
+                                                        IntArrayRef out_shape) {
   TORCH_CHECK(q_.size(3) == k_.size(3) && q_.size(3) == v_.size(3),
               "sdpa_vector_2pass_mps expects query, key, and value to have the same head dimension");
   using namespace mps;
@@ -285,7 +263,7 @@ static std::tuple<Tensor, Tensor> sdpa_vector_2pass_mps(const Tensor& q_,
   auto sums = at::empty({batchSize, num_heads, seq_len_q, blocks}, q_.options().dtype(kFloat));
   auto maxs = at::empty({batchSize, num_heads, seq_len_q, blocks}, q_.options().dtype(kFloat));
 
-  auto scale_factor = sdp::calculate_scale(orig_query, scale).expect_float();
+  auto scale_factor = sdp::calculate_scale(q_, scale).expect_float();
   bool has_mask = mask_.has_value();
 
   MPSStream* mpsStream = getCurrentMPSStream();
@@ -333,7 +311,7 @@ static std::tuple<Tensor, Tensor> sdpa_vector_2pass_mps(const Tensor& q_,
     }
   });
 
-  auto final_out = unsqueezed ? out.view_as(orig_query) : out;
+  auto final_out = out.view(out_shape);
   return {std::move(final_out), std::move(intermediate)};
 }
 
@@ -475,22 +453,30 @@ std::tuple<Tensor, Tensor> _scaled_dot_product_attention_math_mps(const Tensor& 
     }
   }
 
-  auto query_tuple = ensure_4d(query);
-  Tensor q_ = std::get<0>(query_tuple);
-  bool unsqueezed = std::get<1>(query_tuple);
+  auto L = query.size(-2);
+  auto S = key.size(-2);
+  auto Ev = value.size(-1);
 
-  auto key_tuple = ensure_4d(key);
-  Tensor k_ = std::get<0>(key_tuple);
+  std::vector<int64_t> query_batch(query.sizes().begin(), query.sizes().end() - 2);
+  std::vector<int64_t> key_batch(key.sizes().begin(), key.sizes().end() - 2);
+  std::vector<int64_t> value_batch(value.sizes().begin(), value.sizes().end() - 2);
 
-  auto value_tuple = ensure_4d(value);
-  Tensor v_ = std::get<0>(value_tuple);
+  auto attn_shape = at::infer_size(query_batch, key_batch);
+  auto out_shape = at::infer_size(attn_shape, value_batch);
+
+  attn_shape.insert(attn_shape.end(), {L, S});
+  out_shape.insert(out_shape.end(), {L, Ev});
+
+  auto q_ = view_as_4d(query);
+  auto k_ = view_as_4d(key);
+  auto v_ = view_as_4d(value);
 
   std::optional<Tensor> mask_;
   if (attn_mask) {
     auto maskExpandedDims = query.sizes().vec();
     maskExpandedDims[maskExpandedDims.size() - 1] = k_.size(2);
     mask_ = attn_mask->expand(maskExpandedDims);
-    std::tie(*mask_, std::ignore) = ensure_4d(*mask_);
+    *mask_ = view_as_4d(*mask_);
   }
 
   int query_head_dim = q_.size(3);
@@ -512,7 +498,7 @@ std::tuple<Tensor, Tensor> _scaled_dot_product_attention_math_mps(const Tensor& 
 
   // if none of the fast paths apply, fall back to the generic mps graph solution
   if (!supports_fast_sdpa) {
-    return sdpa_general_mps(q_, k_, v_, mask_, dropout_p, is_causal, dropout_mask, scale, query, unsqueezed);
+    return sdpa_general_mps(q_, k_, v_, mask_, dropout_p, is_causal, dropout_mask, scale, out_shape, attn_shape);
   }
 
   // dispatch to the fast SDPA implementation
@@ -532,10 +518,10 @@ std::tuple<Tensor, Tensor> _scaled_dot_product_attention_math_mps(const Tensor& 
   // for short sequences, differentiate based on key sequence length
   if ((k_.size(2) >= 1024) || (k_.size(1) < q_.size(1) && k_.size(2) >= 4096)) {
     return sdpa_vector_2pass_mps(
-        q_contig, k_contig, v_contig, mask_, dropout_p, is_causal, dropout_mask, scale, query, unsqueezed);
+        q_contig, k_contig, v_contig, mask_, dropout_p, is_causal, dropout_mask, scale, out_shape);
   } else {
     return sdpa_vector_fast_mps(
-        q_contig, k_contig, v_contig, mask_, dropout_p, is_causal, dropout_mask, scale, query, unsqueezed);
+        q_contig, k_contig, v_contig, mask_, dropout_p, is_causal, dropout_mask, scale, out_shape, attn_shape);
   }
 }
 } // namespace native
