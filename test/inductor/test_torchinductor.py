@@ -8252,6 +8252,17 @@ def forward(self, arg0_1: "Sym(s77)", arg1_1: "Sym(s27)", arg2_1: "Sym(s53)", ar
 
         self.common(fn, (torch.randn([2, 4, 37, 38, 39]),))
 
+    def test_upsample_nearest3d_non_contiguous(self):
+        def fn(a):
+            return (aten.upsample_nearest3d(a, [6, 7, 8], None),)
+
+        # Permuted 5D input: stride order should be preserved in compiled output
+        self.common(
+            fn,
+            (torch.randn([2, 4, 2, 2, 3]).permute(0, 4, 1, 2, 3),),
+            exact_stride=True,
+        )
+
     def test_upsample_nearest2d_backward(self):
         func = torch.ops.aten.upsample_nearest2d_backward
 
