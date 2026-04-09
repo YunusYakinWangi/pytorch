@@ -283,6 +283,11 @@ class VariableTracker(metaclass=VariableTrackerMeta):
     Prefer the factory function VariableTracker.build() over VariableTracker.__init__().
     """
 
+    # The CPython type(s) this VT is designed to represent.
+    # Single type or tuple of types. None means no static CPython type mapping
+    # (e.g., dynamic types like UserDefinedObjectVariable, or Dynamo-internal VTs).
+    _cpython_type: type | tuple[type, ...] | None = None
+
     # fields to leave unmodified in apply()
     _nonvar_fields = {
         "value",
@@ -632,6 +637,20 @@ class VariableTracker(metaclass=VariableTrackerMeta):
                     tx,
                     args=list(e.args),
                 )
+        # __reduce_ex__ is a C builtin (object.__reduce_ex__) that Dynamo
+        # cannot trace into. Polyfill it for constant VTs so that
+        # copy.deepcopy can trace through its __reduce_ex__ fallback path.
+        if (
+            name == "__reduce_ex__"
+            and len(args) == 1
+            and not kwargs
+            and self.is_python_constant()
+        ):
+            protocol = args[0].as_python_constant()
+            return VariableTracker.build(
+                tx, self.as_python_constant().__reduce_ex__(protocol)
+            )
+
         hints = [
             f"Avoid calling `{self.python_type_name()}.{name}` in your code.",
             "Please report an issue to PyTorch.",
@@ -1060,5 +1079,52 @@ def typestr(*objs: object) -> str:
 
 
 instancecheck = type.__instancecheck__
+
+
+_CPYTHON_BASE_URL = "https://github.com/python/cpython/blob/v3.13.0/"
+
+
+def print_cpython_to_vt_mapping() -> None:
+    """Print the mapping from CPython types to Dynamo VariableTracker classes.
+
+    Reads _cpython_type from each VT subclass (own attribute only, not inherited).
+    """
+    # Ensure all VT modules are imported so all_subclasses is complete
+    from . import (  # noqa: F401
+        builtin,
+        constant,
+        ctx_manager,
+        dicts,
+        distributed,
+        functions,
+        higher_order_ops,
+        iter,
+        lazy,
+        lists,
+        misc,
+        nn_module,
+        streams,
+        tensor,
+        torch,
+        torch_function,
+        user_defined,
+    )
+
+    mapping: dict[type, list[type]] = {}
+    for vt_cls in VariableTrackerMeta.all_subclasses:
+        cpython_type = vt_cls.__dict__.get("_cpython_type")
+        if cpython_type is None:
+            continue
+        types = cpython_type if isinstance(cpython_type, tuple) else (cpython_type,)
+        for t in types:
+            mapping.setdefault(t, []).append(vt_cls)
+
+    for py_type, vt_classes in sorted(mapping.items(), key=lambda x: x[0].__qualname__):
+        for vt_cls in vt_classes:
+            print(
+                f"{py_type.__module__}.{py_type.__qualname__:30s} -> {vt_cls.__name__}"
+            )
+
+
 from . import builder
 from .lazy import LazyVariableTracker

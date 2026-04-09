@@ -712,7 +712,7 @@ class AsyncCompile:
         if sources:
             from torch._inductor.runtime.runtime_utils import compile_mps_shader
 
-            all_headers = sorted({h for _, _, hs in sources for h in hs})
+            all_headers = sorted(OrderedSet([h for _, _, hs in sources for h in hs]))
             header_src = "\n".join(f"#include <c10/metal/{h}.h>" for h in all_headers)
             body_src = "\n".join(src for _, src, _ in sources)
             lib = compile_mps_shader(header_src + "\n" + body_src)
