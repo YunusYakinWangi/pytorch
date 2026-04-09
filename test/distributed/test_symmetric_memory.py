@@ -18,7 +18,10 @@ from torch._inductor.utils import (
     fresh_inductor_cache,
     run_and_get_triton_code,
 )
-from torch.distributed._functional_collectives import all_gather_tensor
+from torch.distributed._functional_collectives import (
+    all_gather_tensor,
+    reduce_scatter_tensor,
+)
 from torch.distributed._symmetric_memory import (
     _fused_all_gather_matmul_fallback,
     _fused_all_gather_scaled_matmul_fallback,
@@ -1228,6 +1231,33 @@ class SymmMemCollectiveTest(MultiProcContinuousTest):
         out = torch.empty(2, 48 // self.world_size, dtype=dtype, device=self.device)
         with self.assertRaisesRegex(RuntimeError, "divisible"):
             torch.ops.symm_mem.reduce_scatter_out(res, group_name, True, out)
+
+    @skipIf(
+        not PLATFORM_SUPPORTS_SYMM_MEM, "SymmMem is not supported on this ROCm arch"
+    )
+    @skip_if_lt_x_gpu(4)
+    @parametrize("scatter_dim", [0, 1])
+    @parametrize("reduce_op", ["sum", "avg"])
+    def test_reduce_scatter_tensor_out(
+        self, scatter_dim: int, reduce_op: str
+    ) -> None:
+        self._init_process()
+        group_name = dist.group.WORLD.group_name
+        inp = symm_mem.empty((32, 128), dtype=torch.bfloat16, device=self.device)
+        inp.normal_()
+        symm_mem.rendezvous(inp, group=group_name)
+
+        out_shape = list(inp.shape)
+        out_shape[scatter_dim] //= self.world_size
+        out = torch.empty(out_shape, dtype=inp.dtype, device=self.device)
+
+        torch.ops.symm_mem.reduce_scatter_tensor_out(
+            inp, reduce_op, scatter_dim, group_name, out
+        )
+
+        expected = reduce_scatter_tensor(inp.clone(), reduce_op, scatter_dim, group_name)
+        expected = funcol.wait_tensor(expected)
+        torch.testing.assert_close(out, expected, rtol=1e-2, atol=1e-2)
 
     def _verify_reduce_scatter_result(self, inp, res):
         gathered_res = all_gather_tensor(res, 0, "0").view(self.world_size, *res.shape)
