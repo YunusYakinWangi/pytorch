@@ -2639,10 +2639,10 @@ class CollectiveFunctionRewriteVariable(UserFunctionVariable):
                     "`P2POp` used incorrectly"
                 )
 
-            ops = list()
-            peers = list()
-            tags = list()
-            tensors = list()
+            ops: list[VariableTracker] = list()
+            peers: list[VariableTracker] = list()
+            tags: list[VariableTracker] = list()
+            tensors: list[VariableTracker] = list()
             group_var: VariableTracker | None = None
 
             for item in p2p_ops.items:
