@@ -50,6 +50,7 @@ from torch._inductor.utils import (
     output_node,
     set_tracing_context_output_strides,
 )
+from torch._library.opaque_object import is_opaque_value
 from torch.fx._graph_pickler import _node_metadata_key_filter_safe, _ops_filter_safe
 from torch.utils._ordered_set import OrderedSet
 from torch.utils._python_dispatch import is_in_torch_dispatch_mode
@@ -615,6 +616,7 @@ class CompiledFxGraph(OutputCode):
                     (
                         all(
                             isinstance(t, (torch.Tensor, torch.SymInt, torch.Generator))
+                            or is_opaque_value(t)
                             for t in example_inputs
                         ),
                         "non-Tensor inputs",
