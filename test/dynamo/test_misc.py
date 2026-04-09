@@ -7850,33 +7850,39 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
             dynamo_result = graph(x)
             self.assertTrue(same(real, dynamo_result))
 
-    def test_error_on_nested_fx_trace(self):
+    def test_fx_trace_through_compiled_function(self):
+        # torch.compile-wrapped functions should be transparent to FX
+        # symbolic tracing — the tracer sees the original function.
         input = torch.rand(2, 3)
 
         def f(x):
-            x + x
+            return x + x
 
         real = f(input)
 
         optimized = torch.compile(f, backend="eager")
         self.assertTrue(same(optimized(input), real))
 
-        with self.assertRaisesRegex(RuntimeError, "Detected that you are using FX"):
-            gm = torch.fx.symbolic_trace(optimized)
+        # FX tracing should succeed and produce correct results
+        gm = torch.fx.symbolic_trace(optimized)
+        self.assertTrue(same(gm(input), real))
 
-    @patch.object(torch._dynamo.config, "error_on_nested_fx_trace", False)
-    def test_no_error_on_nested_fx_trace(self):
+    def test_fx_trace_through_compiled_module(self):
+        # torch.compile-wrapped nn.Modules should be unwrapped during
+        # FX symbolic tracing so the tracer sees the original module.
         input = torch.rand(2, 3)
 
-        def f(x):
-            x + x
+        class M(torch.nn.Module):
+            def forward(self, x):
+                return x + x
 
-        real = f(input)
+        mod = M()
+        real = mod(input)
 
-        optimized = torch.compile(f, backend="eager")
+        optimized = torch.compile(mod, backend="eager")
         self.assertTrue(same(optimized(input), real))
 
-        # should not error
+        # FX tracing should see through the OptimizedModule
         gm = torch.fx.symbolic_trace(optimized)
         self.assertTrue(same(gm(input), real))
 
