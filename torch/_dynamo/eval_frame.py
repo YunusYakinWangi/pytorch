@@ -1004,6 +1004,11 @@ class _TorchDynamoContext:
                     is_fx_symbolic_tracing()
                     and not config.force_compile_during_fx_trace
                 ):
+                    if config.error_on_nested_fx_trace:
+                        raise RuntimeError(
+                            "Detected that you are using FX to symbolically trace "
+                            "a dynamo-optimized function. This is not supported at the moment."
+                        )
                     return fn(*args, **kwargs)
 
                 if is_jit_tracing():

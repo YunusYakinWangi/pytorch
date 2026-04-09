@@ -780,11 +780,6 @@ class Tracer(TracerBase):
         old_is_fx_tracing_flag = _is_fx_tracing_flag
         _is_fx_tracing_flag = True
         try:
-            # Unwrap OptimizedModule (torch.compile wrapper) so we trace
-            # the original module.
-            if hasattr(root, "_orig_mod"):
-                root = root._orig_mod
-
             if isinstance(root, torch.nn.Module):
                 # do real recompilation for _LazyGraphModule before retracing since the trace
                 # method can not trace the _lazy_forward method. Got error:
@@ -858,11 +853,6 @@ class Tracer(TracerBase):
 
             @functools.wraps(_orig_module_call)
             def module_call_wrapper(mod, *args, **kwargs):
-                # Unwrap OptimizedModule (torch.compile wrapper) so the
-                # tracer sees the original module instead of the compiled one.
-                if hasattr(mod, "_orig_mod"):
-                    mod = mod._orig_mod
-
                 def forward(*args, **kwargs):
                     return _orig_module_call(mod, *args, **kwargs)
 

@@ -500,8 +500,11 @@ raise_on_unsafe_aot_autograd = False
 # This flag is ignored and maintained for backwards compatibility.
 error_on_nested_jit_trace = True
 
-# This flag is ignored. torch.compile-wrapped functions are now
-# automatically transparent to FX symbolic tracing.
+# If true (default), error if we symbolically trace over a dynamo-optimized
+# function. If false, dynamo is skipped and the original function runs eagerly,
+# allowing FX tracing to see through torch.compile wrappers.
+# Use config.patch(error_on_nested_fx_trace=False) as a context manager to
+# scope this to a specific FX trace call.
 error_on_nested_fx_trace = True
 
 # If true, force dynamo compilation even when inside FX symbolic tracing.
