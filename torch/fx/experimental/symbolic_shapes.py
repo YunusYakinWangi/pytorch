@@ -4225,6 +4225,8 @@ class ShapeEnv:
             # Cached state for optimization_hint unbacked canonicalization
             "_equality_graph",
             "_unbacked_replacements",
+            # Derived cache for slice size deduplication
+            "_slice_size_cache",
         )
 
         # Mapping of the value of each to-be-compared field into the values that
