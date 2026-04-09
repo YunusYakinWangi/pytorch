@@ -4386,6 +4386,7 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         o = torch.compile(foo, fullgraph=True, backend="eager")(x, y)
         self.assertEqual(o, x * y)
 
+    @torch._dynamo.config.patch(nested_graph_breaks=False)
     def test_module_deepcopy(self):
         m1 = torch.nn.Sequential(
             torch.nn.Linear(10, 10),
@@ -7631,7 +7632,10 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
 
         @torch.compile(backend="eager")
         def f1(a, b):
-            f2(a, b)
+            try:
+                f2(a, b)
+            finally:
+                pass
 
         def f2(a, b):
             c = a + b
@@ -7640,7 +7644,10 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
 
         @torch.compile(backend="eager")
         def g1(a, b):
-            g2(a, b)
+            try:
+                g2(a, b)
+            finally:
+                pass
 
         def g2(a, b):
             c = a + b
@@ -9010,6 +9017,7 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
 
         self.assertTrue(same(ref, res))
 
+    @torch._dynamo.config.patch(nested_graph_breaks=False)
     def test_cast_no_recompile_after_graph_break(self):
         # In FSDP, cast(nn.Module, self) can be called after a
         # graph break. Without the polyfill + skip_code fix, PEP 523 compiles
