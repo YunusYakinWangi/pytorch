@@ -61,16 +61,16 @@ jobs:
       curr_branch: ${{ github.head_ref || github.ref_name }}
       curr_ref_type: ${{ github.ref_type }}
 
-  libtorch-linux-jammy-cuda12_8-py3_10-gcc11-debug-build:
-    if: ${{ needs.job-filter.outputs.jobs == '' || contains(needs.job-filter.outputs.jobs, ' libtorch-linux-jammy-cuda12.8-py3.10-gcc11-debug ') }}
-    name: libtorch-linux-jammy-cuda12.8-py3.10-gcc11-debug
+  libtorch-linux-jammy-cuda13_0-py3_10-gcc11-debug-build:
+    if: ${{ needs.job-filter.outputs.jobs == '' || contains(needs.job-filter.outputs.jobs, ' libtorch-linux-jammy-cuda13.0-py3.10-gcc11-debug ') }}
+    name: libtorch-linux-jammy-cuda13.0-py3.10-gcc11-debug
     uses: ./.github/workflows/_linux-build.yml
     needs:
       - get-label-type
       - job-filter
     with:
-      build-environment: libtorch-linux-jammy-cuda12.8-py3.10-gcc11
-      docker-image-name: ci-image:pytorch-linux-jammy-cuda12.8-cudnn9-py3-gcc11
+      build-environment: libtorch-linux-jammy-cuda13.0-py3.10-gcc11
+      docker-image-name: ci-image:pytorch-linux-jammy-cuda13.0-cudnn9-py3-gcc11
       build-generates-artifacts: false
       runner_prefix: "${{ needs.get-label-type.outputs.label-type }}"
       runner: "linux.r7i.4xlarge"
@@ -154,7 +154,6 @@ jobs:
     secrets: inherit
 
   # no-ops builds test USE_PER_OPERATOR_HEADERS=0 where ATen/ops is not generated
-  # CUDA 12.8 no-ops build moved to periodic (only 13.0 remains per-commit)
   linux-jammy-cuda13_0-py3_10-gcc11-no-ops-build:
     if: ${{ needs.job-filter.outputs.jobs == '' || contains(needs.job-filter.outputs.jobs, ' linux-jammy-cuda13.0-py3.10-gcc11-no-ops ') }}
     name: linux-jammy-cuda13.0-py3.10-gcc11-no-ops
