@@ -259,9 +259,7 @@ class graph:
         torch._C._host_emptyCache()
 
         if self._enable_annotations:
-            from torch.cuda._graph_annotations import (
-                enable_annotations as _enable_ann,
-            )
+            from torch.cuda._graph_annotations import enable_annotations as _enable_ann
 
             _enable_ann()
 
