@@ -711,8 +711,11 @@ struct TraceableFunction : public Node {
 // Enable PyObject support for intrusive_ptr<Node> so that the refcount
 // machinery calls incref_pyobject/decref_pyobject on transitions.
 namespace c10::detail {
-template <>
-struct TargetTraits<torch::autograd::Node> {
+template <class T>
+struct TargetTraits<
+    T,
+    std::enable_if_t<
+        std::is_base_of_v<torch::autograd::Node, std::remove_cv_t<T>>>> {
   static constexpr bool can_have_pyobject = true;
 };
 } // namespace c10::detail
