@@ -199,9 +199,7 @@ class SuperVariable(VariableTracker):
             # when bound (classmethod, staticmethod, function, etc.), but
             # type(value) itself may not be callable (e.g. classmethod).
             py_type = (
-                UnknownCallableType
-                if hasattr(type(value), "__get__")
-                else type(value)
+                UnknownCallableType if hasattr(type(value), "__get__") else type(value)
             )
             return GetAttrVariable(self, name, py_type=py_type)
         if source:
