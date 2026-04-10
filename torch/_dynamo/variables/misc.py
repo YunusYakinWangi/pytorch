@@ -194,7 +194,16 @@ class SuperVariable(VariableTracker):
         # not just AttrSource).
         value, source = self._resolved_getattr_and_source(tx, name)
         if not variables.ConstantVariable.is_literal(value):
-            return GetAttrVariable(self, name)
+            # value is a raw descriptor from __dict__ (not bound via __get__).
+            # If it has __get__, it's a descriptor that produces a callable
+            # when bound (classmethod, staticmethod, function, etc.), but
+            # type(value) itself may not be callable (e.g. classmethod).
+            py_type = (
+                UnknownCallableType
+                if hasattr(type(value), "__get__")
+                else type(value)
+            )
+            return GetAttrVariable(self, name, py_type=py_type)
         if source:
             install_guard(source.make_guard(GuardBuilder.CONSTANT_MATCH))
         return variables.ConstantVariable.create(value, source=source)
@@ -1286,6 +1295,13 @@ class LambdaVariable(VariableTracker):
         return self.fn(*args, **kwargs)
 
 
+class UnknownCallableType:
+    """Sentinel for GetAttrVariable.py_type: exact type is unknown but it's callable."""
+
+    def __call__(self) -> None:
+        raise AssertionError("sentinel — should never be instantiated or called")
+
+
 class GetAttrVariable(VariableTracker):
     _nonvar_fields = {
         "name",
@@ -1308,7 +1324,7 @@ class GetAttrVariable(VariableTracker):
         self.py_type = py_type  # In some cases we know the type (ex. tensor methods)
 
     def python_type(self) -> type:
-        if self.py_type is not None:
+        if self.py_type is not None and self.py_type is not UnknownCallableType:
             return self.py_type
         else:
             return super().python_type()
@@ -2221,7 +2237,7 @@ class ConstantLikeVariable(VariableTracker):
             return NumpyVariable(result)
         if variables.ConstantVariable.is_literal(result):
             return VariableTracker.build(tx, result)
-        return GetAttrVariable(self, name)
+        return GetAttrVariable(self, name, py_type=type(result))
 
 
 class TorchVersionVariable(ConstantLikeVariable):
