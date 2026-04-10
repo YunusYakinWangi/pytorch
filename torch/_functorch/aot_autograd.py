@@ -918,7 +918,7 @@ def autograd_cache_key(
     )
 
     fake_mode, shape_env = construct_fake_mode(full_args, aot_config)
-    fake_flat_args = process_inputs(
+    fake_flat_args, _act_input_indices = process_inputs(
         full_args, aot_config, fake_mode, shape_env, ignore_shape_env
     )
 
