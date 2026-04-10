@@ -7940,9 +7940,7 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         self.assertTrue(same(gm(input), mod(input)))
 
         # The graph has inlined ops from Inner.forward, no call_module
-        call_module_nodes = [
-            n for n in gm.graph.nodes if n.op == "call_module"
-        ]
+        call_module_nodes = [n for n in gm.graph.nodes if n.op == "call_module"]
         self.assertEqual(len(call_module_nodes), 0)
 
     # ===== skip_compiled_module_during_fx_trace=True =====
@@ -7986,9 +7984,7 @@ not ___dict_contains('cccccccc', G['sys'].modules)""",
         gm = torch.fx.symbolic_trace(mod)
 
         # The graph should have a call_module node for inner
-        call_module_nodes = [
-            n for n in gm.graph.nodes if n.op == "call_module"
-        ]
+        call_module_nodes = [n for n in gm.graph.nodes if n.op == "call_module"]
         self.assertEqual(len(call_module_nodes), 1)
         self.assertEqual(call_module_nodes[0].target, "inner")
 
