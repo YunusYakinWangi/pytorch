@@ -1206,30 +1206,18 @@ TORCH_IMPL_FUNC(avg_pool2d_out_mps)
  bool count_include_pad,
  std::optional<int64_t> divisor_override,
  const Tensor& output) {
-  if (ceil_mode) {
-    mps::avg_pool_out_mps_template(output,
-                                   input,
-                                   {kH, kW},
-                                   {dH, dW},
-                                   {padH, padW},
-                                   ceil_mode,
-                                   count_include_pad,
-                                   divisor_override,
-                                   /*pooling_dims=*/2,
-                                   "avg_pool3d");
-  } else {
-    mps::avg_pool2d_template(input,
-                             output,
-                             std::nullopt,
-                             {kH, kW},
-                             {dH, dW},
-                             {padH, padW},
-                             {1, 1},
-                             ceil_mode,
-                             count_include_pad,
-                             divisor_override,
-                             "avg_pool2d");
-  }
+  // Use Metal kernel for all cases to avoid precision issues in MPSGraph's
+  // avgPooling2D (see https://github.com/pytorch/pytorch/issues/179608)
+  mps::avg_pool_out_mps_template(output,
+                                 input,
+                                 {kH, kW},
+                                 {dH, dW},
+                                 {padH, padW},
+                                 ceil_mode,
+                                 count_include_pad,
+                                 divisor_override,
+                                 /*pooling_dims=*/2,
+                                 "avg_pool2d");
 }
 
 TORCH_IMPL_FUNC(avg_pool2d_backward_out_mps)
