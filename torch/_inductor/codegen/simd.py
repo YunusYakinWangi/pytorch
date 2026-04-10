@@ -2051,6 +2051,15 @@ class SIMDScheduling(BaseScheduling):
 
             kernel.finalize_indexing(all_indexing.keys())
 
+            # Enable loop peeling map if eligible — the codegen pass will
+            # populate masked→unmasked line mappings as a side effect.
+            loop_trees = [t for t in kernel.range_trees if t.is_loop]
+            if (
+                hasattr(kernel, '_should_peel_reduction_loop')
+                and kernel._should_peel_reduction_loop(loop_trees)
+            ):
+                kernel._unmasked_line_map = {}
+
             # Second pass to do codegen
             for node in node_schedule:
                 if node is DisableReduction:

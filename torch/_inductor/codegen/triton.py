@@ -68,6 +68,7 @@ from ..scheduler import (
 from ..shape_propagation import get_broadcasted_shape
 from ..utils import (
     cache_on_self,
+    DeferredLineBase,
     DelayReplaceLine,
     get_bounds_index_expr,
     get_fused_kernel_name,
@@ -2833,6 +2834,10 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
         # We track the store name since a store can be canceled later
         self.stores_with_contiguous_rdim: list[str] = []
 
+        # Map of masked_line -> unmasked_line for loop peeling.
+        # None when peeling is inactive; set to {} before codegen when eligible.
+        self._unmasked_line_map: dict[str, str] | None = None
+
     @staticmethod
     def _has_stride1_on_rdim(index) -> bool:
         # These analysis is only needed in deterministic mode so far
@@ -3832,6 +3837,8 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
 
         append_broadcast = None
         shape: BlockShapeType = None
+        unmasked_load = None
+        peeled_mask = None
 
         if should_unwrap_unspec_arg(name):
             line = var
@@ -3868,6 +3875,18 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
             else:
                 line = f"tl.load({var} + ({indexing.index_str}), {indexing.mask_str}{ep}{other}{cachemod})"
 
+                # Build unmasked load line for loop peeling (if active)
+                unmasked_load = None
+                if (
+                    self._unmasked_line_map is not None
+                    and indexing.has_rmask()
+                ):
+                    peeled_mask = self._get_peeled_mask(indexing.mask_vars)
+                    # When mask becomes None, drop `other` too — Triton
+                    # rejects `tl.load(ptr, None, other=...)`.
+                    unmasked_other = other if peeled_mask != "None" else ""
+                    unmasked_load = f"tl.load({var} + ({indexing.index_str}), {peeled_mask}{ep}{unmasked_other}{cachemod})"
+
                 # The block shape of tl.load depends on the indexing expression.
                 # Inferring shape solely from the mask may miss cases where the mask is constant.
                 # Inferring from indexing.expand_shape alone may also fail when dense indexing is absent.
@@ -3882,12 +3901,16 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
                 and config.triton.codegen_upcast_to_fp32
             ):
                 line += ".to(tl.float32)"
+                if unmasked_load is not None:
+                    unmasked_load += ".to(tl.float32)"
                 dtype = torch.float32
             if dtype == torch.bool and torch.version.hip is None:
                 # Workaround for https://github.com/triton-lang/triton/issues/2151
                 # tl.load returns int8 when loading from pointer to int1
                 # NOTE: Currently causes hangs on bool UTs for ROCm
                 line += ".to(tl.int1)"
+                if unmasked_load is not None:
+                    unmasked_load += ".to(tl.int1)"
                 dtype = torch.bool
 
         load_buffer = self.get_load_buffer(indexing)
@@ -3900,6 +3923,13 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
             load_counts[name] -= 1  # don't double count cache hit
         assert isinstance(result_var, TritonCSEVariable)
         result_var.mask_vars = indexing.mask_vars  # type: ignore[assignment]
+
+        # Register unmasked load for loop peeling
+        if unmasked_load is not None:
+            assert self._unmasked_line_map is not None
+            self._unmasked_line_map[f"{result_var} = {line}"] = (
+                f"{result_var} = {unmasked_load}"
+            )
 
         if append_broadcast:
             line = f"tl.broadcast_to({result_var}, {append_broadcast})"
@@ -4014,6 +4044,18 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
 
         self._handle_pdl_before_access(self.stores, name, consider_reads=True)
         self.stores.writeline(DeferredLine(name, line))
+
+        # Register unmasked store variant for loop peeling
+        if (
+            self._unmasked_line_map is not None
+            and isinstance(indexing, IndexingOptions)
+            and indexing.has_rmask()
+            and mode is None
+        ):
+            peeled_mask = self._get_peeled_mask(indexing.mask_vars)
+            self._unmasked_line_map[line] = (
+                f"tl.store({var} + ({indexing_str}), {value}, {peeled_mask})"
+            )
 
         if not self.inside_reduction:
             self.outside_loop_vars.add(value)
@@ -4299,6 +4341,16 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
         )
         cond = " & ".join(masks)
 
+        # Build unmasked condition for loop peeling (reduction masks removed)
+        unmasked_cond: str | None = None
+        if self._unmasked_line_map is not None:
+            peeled_masks = [
+                m for m in masks if not prefix_is_reduction(str(m)[0])
+            ]
+            unmasked_cond_str = " & ".join(peeled_masks)
+            if unmasked_cond_str != cond:
+                unmasked_cond = unmasked_cond_str
+
         def where_cond(tval, fval):
             if not cond:
                 return tval
@@ -4451,12 +4503,26 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
                 {accumulator_index} = {where_cond(f"{accumulator_index}_next", accumulator_index)}
                 """
                 )
+                # Register unmasked argmin/argmax accumulators for loop peeling
+                if unmasked_cond is not None:
+                    assert self._unmasked_line_map is not None
+                    for lhs, tval, fval in [
+                        (accumulator, f"{accumulator}_next", accumulator),
+                        (accumulator_index, f"{accumulator_index}_next", accumulator_index),
+                    ]:
+                        masked_line = f"{lhs} = {where_cond(tval, fval)}"
+                        if unmasked_cond:
+                            unmasked_line = f"{lhs} = {TritonKernelOverrides.where(unmasked_cond, tval, fval)}"
+                        else:
+                            unmasked_line = f"{lhs} = {tval}"
+                        self._unmasked_line_map[masked_line] = unmasked_line
                 final_argreduce(
                     self.post_loop_combine, result_var, accumulator, accumulator_index
                 )
             elif is_welford_reduction(reduction_type):
                 result_var = self.welford_reduce(
-                    result_var, reduction_type, value, where_cond, acc_type, dtype
+                    result_var, reduction_type, value, where_cond, acc_type, dtype,
+                    unmasked_cond=unmasked_cond,
                 )
             elif reduction_type == "online_softmax_reduce":
                 accumulator_max = f"_{result_var}_max"
@@ -4488,6 +4554,19 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
                     {accumulator_sum} = {where_cond(f"{accumulator_sum}_next", accumulator_sum)}
                     """
                 )
+                # Register unmasked online_softmax accumulators for loop peeling
+                if unmasked_cond is not None:
+                    assert self._unmasked_line_map is not None
+                    for lhs, tval, fval in [
+                        (accumulator_max, f"{accumulator_max}_next", accumulator_max),
+                        (accumulator_sum, f"{accumulator_sum}_next", accumulator_sum),
+                    ]:
+                        masked_line = f"{lhs} = {where_cond(tval, fval)}"
+                        if unmasked_cond:
+                            unmasked_line = f"{lhs} = {TritonKernelOverrides.where(unmasked_cond, tval, fval)}"
+                        else:
+                            unmasked_line = f"{lhs} = {tval}"
+                        self._unmasked_line_map[masked_line] = unmasked_line
 
                 # reduce. Similar to the final reduction for coopereative
                 # reduction
@@ -4509,9 +4588,17 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
                 if reduction_type == "dot":
                     self.compute.writeline(f"{accumulator} = {updated}")
                 else:
-                    self.compute.writeline(
-                        f"{accumulator} = {where_cond(updated, accumulator)}"
-                    )
+                    masked_line = f"{accumulator} = {where_cond(updated, accumulator)}"
+                    self.compute.writeline(masked_line)
+
+                    # Register unmasked accumulator update for loop peeling
+                    if unmasked_cond is not None:
+                        assert self._unmasked_line_map is not None
+                        if unmasked_cond:
+                            unmasked_line = f"{accumulator} = {TritonKernelOverrides.where(unmasked_cond, updated, accumulator)}"
+                        else:
+                            unmasked_line = f"{accumulator} = {updated}"
+                        self._unmasked_line_map[masked_line] = unmasked_line
 
                 if src_dtype == torch.bool:
                     # This is only really used for aten.any. It changes the
@@ -4664,7 +4751,8 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
         )
 
     def welford_reduce(
-        self, result_var, reduction_type, value, where_cond, acc_type, dtype
+        self, result_var, reduction_type, value, where_cond, acc_type, dtype,
+        unmasked_cond=None,
     ):
         """Helper to codegen a welford reduction"""
         dim = self.triton_tensor_ndim() - self.num_reduction_dims
@@ -4722,6 +4810,20 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
             {accumulator_weight} = {where_cond(f"{accumulator_weight}_next", accumulator_weight)}
             """
         )
+        # Register unmasked welford accumulators for loop peeling
+        if unmasked_cond is not None:
+            assert self._unmasked_line_map is not None
+            for lhs, tval, fval in [
+                (accumulator, f"{accumulator}_next", accumulator),
+                (accumulator_m2, f"{accumulator_m2}_next", accumulator_m2),
+                (accumulator_weight, f"{accumulator_weight}_next", accumulator_weight),
+            ]:
+                masked_line = f"{lhs} = {where_cond(tval, fval)}"
+                if unmasked_cond:
+                    unmasked_line = f"{lhs} = {TritonKernelOverrides.where(unmasked_cond, tval, fval)}"
+                else:
+                    unmasked_line = f"{lhs} = {tval}"
+                self._unmasked_line_map[masked_line] = unmasked_line
         result_mean = result_var
         return self.welford_reduce_final_reduction(
             self.post_loop_combine,
@@ -5242,68 +5344,13 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
                 )
 
         elif self.inside_reduction and len(loop_trees) > 0:
-            # Write the loop headers.
-            for level, tree in enumerate(loop_trees):
-                with self.body.indent(offset=level):
-                    prefix = tree.prefix
-                    loop_start = "rsplit_start" if self.cooperative_reduction else "0"
-                    loop_end = (
-                        "rsplit_end" if self.cooperative_reduction else f"{prefix}numel"
-                    )
-                    # Conditionalize pipelining on HIP for Triton due to
-                    # reports of numerical inaccuracies on older Triton
-                    if torch.version.hip and get_triton_version() > (3, 2):
-                        num_stages = ", num_stages = 2"
-                    else:
-                        num_stages = ""
-                    self.body.writeline(
-                        f"for {prefix}offset in tl.range({loop_start}, {loop_end}, {prefix.upper()}BLOCK{num_stages}):"
-                    )
-                with self.body.indent(offset=level + 1):
-                    self.iteration_ranges_codegen_header(tree, self.body)
-
-            # The innermost loop performs the reduction.
-            with self.body.indent(offset=len(loop_trees)):
-                self.codegen_reduction_indices(self.body)
-                self.body.splice(self.indexing_code)
-                self.body.splice(self.loads)
-                self.body.splice(self.compute)
-                self.body.splice(self.stores)
-
-            # Write loop suffixes.
-            for level, tree in reversed([*enumerate(loop_trees)]):
-                with self.body.indent(offset=level + 1):
-                    # Advance pointers at the end of each loop.
-                    for block_ptr, advancement in self.pointer_advancements[
-                        tree.symt
-                    ].items():
-                        # Subtract any advancements made in the previous loop level.
-                        if level < len(loop_trees) - 1:
-                            prev_tree = loop_trees[level + 1]
-                            prev_advancements = self.pointer_advancements[
-                                prev_tree.symt
-                            ]
-                            # block_ptr may not exist in the inner loop's advancements
-                            # if its advancement was identity (zero) and was skipped
-                            if block_ptr in prev_advancements:
-                                prev_advancement = prev_advancements[block_ptr]
-                                prev_block = TritonSymbols.get_block_size(prev_tree)
-                                prev_num_iter = CeilDiv(prev_tree.numel, prev_block)
-                                advancement = [
-                                    cur - prev * prev_num_iter
-                                    for cur, prev in zip(advancement, prev_advancement)
-                                ]
-
-                        self.body.writeline(
-                            DeferredLine(
-                                self.block_ptr_to_buffer[block_ptr],
-                                f"{block_ptr} = tl.advance({block_ptr}, {V.kernel.index_to_str(advancement)})",
-                            )
-                        )
-
-                # Invalidate any cache entries that came from inside the loop.
-                self.cse.invalidate(self.outside_loop_vars)
-                tree.cache_clear()
+            peeling = (
+                self._unmasked_line_map is not None
+                and not self.pointer_advancements.get(loop_trees[0].symt)
+            )
+            if peeling:
+                self._emit_unmasked_reduction_loop(loop_trees)
+            self._emit_reduction_loops(loop_trees, peeling=peeling)
         else:
             self.body.splice(self.indexing_code)
             self.body.splice(self.loads)
@@ -6128,6 +6175,167 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
         if self.fixed_config:
             return self.fixed_config[f"{prefix.upper()}BLOCK"]
         return TRITON_MAX_BLOCK[prefix.upper()]
+
+    def _should_peel_reduction_loop(self, loop_trees):
+        """Check whether loop peeling should be applied to this reduction."""
+        return (
+            config.triton.loop_peeling
+            # Multi-dim reductions have nested loops with interacting masks
+            and len(loop_trees) == 1
+            # Cooperative reduction uses rsplit_start/rsplit_end bounds
+            and not self.cooperative_reduction
+            # If mask is already constant (numel % BLOCK == 0), peeling is unnecessary
+            and not self._has_constant_mask(loop_trees[0])
+            # Block-ptr reductions use tl.advance() + boundary_check, not r0_mask
+            and not self.pointer_advancements.get(loop_trees[0].symt)
+        )
+
+    def _get_peeled_mask(self, mask_vars: OrderedSet[str]) -> str:
+        """Build mask_str with reduction masks removed, for loop peeling.
+
+        Returns the joined non-reduction masks, or "None" if all masks
+        were reduction masks.
+        """
+        non_r = OrderedSet(
+            m for m in mask_vars if not prefix_is_reduction(str(m)[0])
+        )
+        return " & ".join(sorted(map(str, non_r))) if non_r else "None"
+
+    def _emit_reduction_loops(
+        self,
+        loop_trees,
+        peeling: bool = False,
+    ) -> None:
+        """Emit the standard masked reduction loop(s).
+
+        When peeling=True, the loop range starts from the aligned numel
+        (emitted by _emit_unmasked_reduction_loop) instead of 0.
+        """
+        # Write the loop headers.
+        for level, tree in enumerate(loop_trees):
+            with self.body.indent(offset=level):
+                prefix = tree.prefix
+                if peeling:
+                    aligned_var = f"{prefix}numel_aligned"
+                    loop_start = aligned_var
+                    loop_end = f"{prefix}numel"
+                elif self.cooperative_reduction:
+                    loop_start = "rsplit_start"
+                    loop_end = "rsplit_end"
+                else:
+                    loop_start = "0"
+                    loop_end = f"{prefix}numel"
+                # Conditionalize pipelining on HIP for Triton due to
+                # reports of numerical inaccuracies on older Triton
+                if torch.version.hip and get_triton_version() > (3, 2):
+                    num_stages = ", num_stages = 2"
+                else:
+                    num_stages = ""
+                self.body.writeline(
+                    f"for {prefix}offset in tl.range({loop_start}, {loop_end}, {prefix.upper()}BLOCK{num_stages}):"
+                )
+            with self.body.indent(offset=level + 1):
+                self.iteration_ranges_codegen_header(tree, self.body)
+
+        # The innermost loop performs the reduction.
+        with self.body.indent(offset=len(loop_trees)):
+            self.codegen_reduction_indices(self.body)
+            self.body.splice(self.indexing_code)
+            self.body.splice(self.loads)
+            self.body.splice(self.compute)
+            self.body.splice(self.stores)
+
+        # Write loop suffixes.
+        for level, tree in reversed([*enumerate(loop_trees)]):
+            with self.body.indent(offset=level + 1):
+                # Advance pointers at the end of each loop.
+                for block_ptr, advancement in self.pointer_advancements[
+                    tree.symt
+                ].items():
+                    # Subtract any advancements made in the previous loop level.
+                    if level < len(loop_trees) - 1:
+                        prev_tree = loop_trees[level + 1]
+                        prev_advancements = self.pointer_advancements[
+                            prev_tree.symt
+                        ]
+                        # block_ptr may not exist in the inner loop's advancements
+                        # if its advancement was identity (zero) and was skipped
+                        if block_ptr in prev_advancements:
+                            prev_advancement = prev_advancements[block_ptr]
+                            prev_block = TritonSymbols.get_block_size(prev_tree)
+                            prev_num_iter = CeilDiv(prev_tree.numel, prev_block)
+                            advancement = [
+                                cur - prev * prev_num_iter
+                                for cur, prev in zip(advancement, prev_advancement)
+                            ]
+
+                    self.body.writeline(
+                        DeferredLine(
+                            self.block_ptr_to_buffer[block_ptr],
+                            f"{block_ptr} = tl.advance({block_ptr}, {V.kernel.index_to_str(advancement)})",
+                        )
+                    )
+
+                # Invalidate any cache entries that came from inside the loop.
+                self.cse.invalidate(self.outside_loop_vars)
+                tree.cache_clear()
+
+    def _emit_unmasked_reduction_loop(self, loop_trees):
+        """Emit the unmasked main loop for loop peeling.
+
+        Emits a loop over [0, aligned) with reduction masks stripped.
+        The masked tail loop [aligned, numel) is emitted by
+        _emit_reduction_loops(peeling=True) which follows this call.
+        """
+        tree = loop_trees[0]
+        prefix = tree.prefix
+
+        block_var = f"{prefix.upper()}BLOCK"
+        aligned_var = f"{prefix}numel_aligned"
+
+        if torch.version.hip and get_triton_version() > (3, 2):
+            num_stages = ", num_stages = 2"
+        else:
+            num_stages = ""
+
+        # Emit aligned numel computation
+        self.body.writeline(
+            f"{aligned_var} = ({prefix}numel // {block_var}) * {block_var}"
+        )
+
+        # --- Main loop (unmasked) ---
+        self.body.writeline(
+            f"for {prefix}offset in tl.range(0, {aligned_var}, {block_var}{num_stages}):"
+        )
+        with self.body.indent():
+            # Header: r0_index only, NO r0_mask
+            self.body.writeline(f"{tree.name} = {prefix}offset + {prefix}base")
+            self.codegen_reduction_indices(self.body)
+            self._splice_unmasked(self.indexing_code)
+            self._splice_unmasked(self.loads)
+            self._splice_unmasked(self.compute)
+            self._splice_unmasked(self.stores)
+
+        self.cse.invalidate(self.outside_loop_vars)
+        tree.cache_clear()
+
+    def _splice_unmasked(self, buf: IndentedBuffer) -> None:
+        """Splice buffer into self.body, replacing mapped lines with unmasked variants."""
+        assert self._unmasked_line_map is not None
+        peel_map = self._unmasked_line_map
+
+        def _replace(line):
+            raw = line.line if isinstance(line, DeferredLineBase) else line
+            if isinstance(raw, str):
+                stripped = raw.lstrip()
+                if stripped in peel_map:
+                    new_raw = raw[: len(raw) - len(stripped)] + peel_map[stripped]
+                    if isinstance(line, DeferredLineBase):
+                        return line._new_line(new_raw)
+                    return new_raw
+            return line
+
+        self.body.splice(buf.map(_replace))
 
     def _has_constant_mask(self, tree: IterationRangesRoot) -> bool:
         if self.is_native_matmul:
