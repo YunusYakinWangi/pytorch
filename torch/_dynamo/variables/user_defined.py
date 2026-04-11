@@ -3012,6 +3012,14 @@ class OrderedDictVariable(UserDefinedDictVariable):
             )
         super().__init__(value, dict_vt=dict_vt, **kwargs)
 
+    def is_python_constant(self) -> bool:
+        assert self._base_vt is not None
+        return self._base_vt.is_python_constant()
+
+    def as_python_constant(self) -> Any:
+        assert self._base_vt is not None
+        return self._base_vt.as_python_constant()
+
     def call_method(
         self,
         tx: "InstructionTranslator",
