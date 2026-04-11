@@ -1103,9 +1103,7 @@ class UnspecializedNNModuleVariable(UserDefinedObjectVariable):
 
                 def _has_hooks(vt: VariableTracker) -> bool:
                     vt = vt.realize() if hasattr(vt, "realize") else vt
-                    return (
-                        vt.call_method(tx, "__len__", [], {}).as_python_constant() != 0
-                    )
+                    return vt.len()  # type: ignore[union-attr]
 
                 if not (
                     _has_hooks(self.var_getattr(tx, "_backward_hooks"))

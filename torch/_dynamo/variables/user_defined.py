@@ -697,7 +697,7 @@ class UserDefinedClassVariable(UserDefinedVariable):
             # unreconstructable args (e.g. generators).  Other tp_new functions
             # (tuple.__new__, BaseException.__new__) use the extra args.
             new_fn = self.value.__new__
-            if new_fn in (dict.__new__, set.__new__, frozenset.__new__):
+            if new_fn in (dict.__new__, set.__new__):
                 init_args: list[VariableTracker] = []
             else:
                 init_args = list(args[1:])
@@ -2944,6 +2944,10 @@ class UserDefinedDictVariable(UserDefinedObjectVariable):
             self._base_vt = dict_vt
         self._base_methods = dict_methods
         assert self._base_vt is not None
+
+    def len(self) -> int:
+        assert self._base_vt is not None
+        return self._base_vt.len()
 
     def sq_length(self, tx: "InstructionTranslator") -> VariableTracker:
         # Dict implements __len__ via mp_length (mapping protocol), not
