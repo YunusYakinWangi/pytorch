@@ -1028,7 +1028,7 @@ static std::pair<Tensor, Tensor> _not_zero_mask_to_col_row_indices(
   TORCH_INTERNAL_ASSERT_DEBUG_ONLY(
       not_zero_mask.dtype() == at::kBool, "Expected mask to be of dtype bool.");
   auto nz = not_zero_mask.nonzero();
-  return {nz.select(1, 1).contiguous(), nz.select(1, 0).contiguous()};
+  return {nz.select(1, 1), nz.select(1, 0)};
 }
 
 // Sparse layout conversions Start
