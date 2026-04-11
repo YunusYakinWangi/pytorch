@@ -1668,7 +1668,9 @@ class VariableBuilder:
             # use DictSubclassGetItemSource for safety.
             is_exact_ordered_dict = type(value) is collections.OrderedDict
             ValueSourceType = (
-                DictGetItemSource if is_exact_ordered_dict else DictSubclassGetItemSource
+                DictGetItemSource
+                if is_exact_ordered_dict
+                else DictSubclassGetItemSource
             )
 
             # We need all the keys to be hashable. We do this within the

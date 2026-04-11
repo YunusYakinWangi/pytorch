@@ -691,13 +691,20 @@ class UserDefinedClassVariable(UserDefinedVariable):
         elif name == "__new__" and UserDefinedClassVariable.is_supported_new_method(
             self.value.__new__
         ):
-            # C-level tp_new functions (dict.__new__, tuple.__new__, etc.)
-            # ignore extra args — only the type arg matters.  Pass
-            # init_args=[] so reconstruction emits base_cls.__new__(cls).
+            # Some C-level tp_new functions (dict.__new__, set.__new__) ignore
+            # extra args — only the type arg matters.  Pass init_args=[] for
+            # those so reconstruction emits base_cls.__new__(cls) without
+            # unreconstructable args (e.g. generators).  Other tp_new functions
+            # (tuple.__new__, BaseException.__new__) use the extra args.
+            new_fn = self.value.__new__
+            if new_fn in (dict.__new__, set.__new__, frozenset.__new__):
+                init_args: list[VariableTracker] = []
+            else:
+                init_args = list(args[1:])
             return tx.output.side_effects.track_new_user_defined_object(
                 self,
                 args[0],
-                [],
+                init_args,
             )
         elif name == "__setattr__" and self.ban_mutation:
             unimplemented(
