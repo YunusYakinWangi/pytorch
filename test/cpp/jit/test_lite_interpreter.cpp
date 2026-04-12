@@ -2037,8 +2037,7 @@ TEST(LiteInterpreterUpgraderTest, DivScalarInplaceFloatV2) {
 
 TEST(LiteInterpreterUpgraderTest, DivScalarInplaceIntV2) {
   auto test_model_file = resolveTestDataFile(
-      __FILE__,
-      "upgrader_models/test_versioned_div_scalar_inplace_int_v2.ptl");
+      __FILE__, "upgrader_models/test_versioned_div_scalar_inplace_int_v2.ptl");
   /*
   (('__torch__.MyModuleInt.forward',
     (('instructions',

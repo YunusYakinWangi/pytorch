@@ -19,8 +19,7 @@ inline std::string resolveTestDataFile(
   auto candidate = dir + relativePath;
   if (std::filesystem::exists(candidate))
     return candidate;
-  auto exeDir =
-      std::filesystem::read_symlink("/proc/self/exe").parent_path();
+  auto exeDir = std::filesystem::read_symlink("/proc/self/exe").parent_path();
   return (exeDir / relativePath).string();
 }
 
