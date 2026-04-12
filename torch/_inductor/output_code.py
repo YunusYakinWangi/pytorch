@@ -351,7 +351,7 @@ def cudagraph_partition_post_compile(
         compiled_graph, example_inputs, boxed_forward_device_index
     )
 
-    policy = config.cudagraph_policy
+    from .compile_fx import cudagraphify
 
     # cudagraphify each partition function, assuming every graph partition function
     # is cudagraphable. Non-cudagraphable ops (e.g., cpu ops) are inlined into
@@ -363,7 +363,8 @@ def cudagraph_partition_post_compile(
             graph_metadata,
         )
 
-        partition_kwargs = dict(
+        cudagraphify_fn = partial(
+            cudagraphify,
             static_input_idxs=tuple(partition_metadata.static_input_idxs),
             device_index=device_index,
             stack_traces=partition_metadata.stack_traces,
@@ -373,20 +374,6 @@ def cudagraph_partition_post_compile(
             placeholders=partition_metadata.placeholders,
             mutated_input_idxs=tuple(partition_metadata.mutated_input_idxs),
         )
-
-        if isinstance(policy, CUDAGraphPolicy):
-            cudagraphify_fn = partial(
-                policy.cudagraphify,
-                inputs=example_inputs,
-                **partition_kwargs,
-            )
-        else:
-            from .compile_fx import cudagraphify
-
-            cudagraphify_fn = partial(
-                cudagraphify,
-                **partition_kwargs,
-            )
         cudagraphify_fns.append(cudagraphify_fn)
 
     compiled_graph.recursively_apply_fns(cudagraphify_fns)
@@ -807,11 +794,11 @@ class CompiledFxGraph(OutputCode):
                 if config.graph_partition and not isinstance(
                     policy, CUDAGraphPolicy
                 ):
-                    # with graph_partition=True, we skip some cudagraph checks if it's supported
-                    # with partition. So we have to use cudagraph_partition_post_compile.
-                    # However, when a CUDAGraphPolicy is active, we route
-                    # through cudagraph_post_compile which delegates
-                    # wrapping to the policy via policy.cudagraphify().
+                    # With graph_partition=True, we skip some cudagraph checks
+                    # if it's supported with partition, so we use
+                    # cudagraph_partition_post_compile.  When a CUDAGraphPolicy
+                    # is active, we use cudagraph_post_compile instead so the
+                    # policy controls wrapping via policy.cudagraphify().
                     cudagraph_partition_post_compile(
                         example_inputs,
                         self,

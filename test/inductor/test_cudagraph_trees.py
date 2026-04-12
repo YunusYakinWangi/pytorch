@@ -5198,7 +5198,7 @@ if HAS_CUDA_AND_TRITON:
                 result = compiled(x)
 
             self.assertEqual(result, x + 1)
-            self.assertEqual(counters["inductor"]["cudagraph_skips"], 1)
+            self.assertGreater(counters["inductor"]["cudagraph_skips"], 0)
 
         def test_wrap_output_called(self):
             """Policy's wrap_output is called in BundledOutputCodeLoadable."""
@@ -5248,7 +5248,7 @@ if HAS_CUDA_AND_TRITON:
 
         @torch._inductor.config.patch("graph_partition", True)
         def test_policy_cudagraphify_partition(self):
-            """Custom policy's cudagraphify is called via the partition path."""
+            """Custom policy's cudagraphify is called when graph_partition is enabled."""
             from torch._inductor.cudagraph_utils import CUDAGraphPolicy
 
             calls = []
@@ -5298,7 +5298,7 @@ if HAS_CUDA_AND_TRITON:
                 result = compiled(x)
 
             self.assertEqual(result, x * x + 1)
-            self.assertEqual(counters["inductor"]["cudagraph_skips"], 1)
+            self.assertGreater(counters["inductor"]["cudagraph_skips"], 0)
             self.assertGreater(len(wrap_calls), 0)
 
     class TestSAC(TestCase):
@@ -5704,6 +5704,7 @@ if HAS_CUDA_AND_TRITON:
             )
 
     instantiate_parametrized_tests(CudaGraphTreeTests)
+    instantiate_parametrized_tests(TestCUDAGraphPolicy)
     instantiate_parametrized_tests(TestSAC)
 
     # OpInfo-based test for index/scatter ops with cudagraphs

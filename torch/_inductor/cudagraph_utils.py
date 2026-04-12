@@ -47,8 +47,8 @@ class CUDAGraphPolicy:
     Example usage::
 
         class MyCUDAGraphPolicy(CUDAGraphPolicy):
-            def cudagraphify(self, model, inputs, static_input_idxs, **kwargs):
-                return my_custom_wrapper(model, inputs, static_input_idxs)
+            def cudagraphify(self, model, example_inputs, static_input_idxs, **kwargs):
+                return my_custom_wrapper(model, example_inputs, static_input_idxs)
 
 
         with torch._inductor.config.patch("cudagraph_policy", MyCUDAGraphPolicy()):
@@ -58,7 +58,7 @@ class CUDAGraphPolicy:
     def cudagraphify(
         self,
         model: Callable[..., Any],
-        inputs: Sequence[InputType],
+        example_inputs: Sequence[InputType],
         static_input_idxs: Sequence[int],
         *,
         device_index: int,
@@ -68,12 +68,11 @@ class CUDAGraphPolicy:
     ) -> Callable[..., Any]:
         """Wrap a single compiled callable with CUDA graph capture/replay.
 
-        Called by ``cudagraph_post_compile`` (and the partition variant)
-        for each ``CompiledFxGraph``.  The default delegates to
-        ``compile_fx.cudagraphify`` (cudagraph_trees).
+        Called by ``cudagraph_post_compile`` for each ``CompiledFxGraph``.
+        The default delegates to ``compile_fx.cudagraphify`` (cudagraph_trees).
 
-        ``inputs`` are the example inputs at post_compile time.  The
-        default implementation does not forward them because
+        ``example_inputs`` are the example inputs at post_compile time.
+        The default implementation does not forward them because
         ``compile_fx.cudagraphify`` defers graph recording to the first
         real call via an inner closure.  Subclasses that need the
         example inputs for warmup or static-input detection may use them.
