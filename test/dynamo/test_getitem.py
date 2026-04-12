@@ -396,16 +396,14 @@ class GetItemTests(torch._dynamo.test_case.TestCase):
 
     def test_typing_subscript(self):
         # list[int] is CPython branch 3 (__class_getitem__), not yet handled
-        # by mp_subscript_impl.  Expect TypeError from the base class.
+        # by mp_subscript_impl — graph-breaks to let CPython handle it.
         def fn(x):
-            try:
-                operator.getitem(list, int)
-            except TypeError:
-                pass
+            t = list[int]  # noqa: F841
             return x + 1
 
         x = torch.randn(4)
-        self.assertEqual(fn(x), self._compile(fn, x))
+        # Graph-breaks (branch 3 not implemented), so no fullgraph.
+        self.assertEqual(fn(x), torch.compile(fn, backend="eager")(x))
 
     # --- MappingProxyVariable ---
 
@@ -858,7 +856,7 @@ class GetItemTests(torch._dynamo.test_case.TestCase):
         self.assertEqual(fn(x), self._compile(fn, x))
 
     def test_non_subscriptable_type_error(self):
-        """Base class mp_subscript_impl raises TypeError for non-subscriptable types."""
+        """Non-subscriptable types graph-break; eager and compiled match."""
 
         def fn(x):
             try:
@@ -867,8 +865,9 @@ class GetItemTests(torch._dynamo.test_case.TestCase):
                 return str(e)
             return ""
 
+        # Graph-breaks (base class has no mp_subscript_impl), so no fullgraph.
         eager = fn(torch.randn(4))
-        compiled = self._compile(fn, torch.randn(4))
+        compiled = torch.compile(fn, backend="eager")(torch.randn(4))
         self.assertEqual(eager, compiled)
         self.assertIn("not subscriptable", eager)
 

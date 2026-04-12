@@ -594,10 +594,11 @@ class VariableTracker(metaclass=VariableTrackerMeta):
         key: VariableTracker,
     ) -> VariableTracker:
         # PyObject_GetItem: https://github.com/python/cpython/blob/62a6e898e01/Objects/abstract.c#L155-L206
-        raise_observed_exception(
-            TypeError,
-            tx,
-            args=[f"'{self.python_type_name()}' object is not subscriptable"],
+        unimplemented(
+            gb_type="missing_mp_subscript_impl",
+            context=f"mp_subscript_impl not defined for {type(self).__name__}",
+            explanation=f"'{self.python_type_name()}' subscript is not yet supported by Dynamo.",
+            hints=[*graph_break_hints.SUPPORTABLE],
         )
 
     def call_method(

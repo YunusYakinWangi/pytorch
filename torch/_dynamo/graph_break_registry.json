@@ -4266,6 +4266,16 @@
       ]
     }
   ],
+  "GB8435": [
+    {
+      "Gb_type": "missing_mp_subscript_impl",
+      "Context": "mp_subscript_impl not defined for {type(self).__name__}",
+      "Explanation": "'{self.python_type_name()}' subscript is not yet supported by Dynamo.",
+      "Hints": [
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
+      ]
+    }
+  ],
   "GB0327": [
     {
       "Gb_type": "executorch_call_delegate: kwargs not supported",
