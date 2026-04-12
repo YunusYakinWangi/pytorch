@@ -128,6 +128,17 @@ class BundledOutputCodeLoadable(InductorOutput[TOutputCode], Generic[TOutputCode
 
         # Run normal post compile
         result.post_compile(self.example_inputs, constants, fx_config)
+
+        # Let the CUDAGraph policy do outer-level wrapping (e.g. wrapping
+        # an entire RegionalOutputCode as a single CUDA graph instead of
+        # per-inner-region).
+        import torch._inductor.config as _inductor_config
+        from torch._inductor.cudagraph_utils import CUDAGraphPolicy
+
+        policy = _inductor_config.cudagraph_policy
+        if isinstance(policy, CUDAGraphPolicy):
+            result = policy.wrap_output(result)
+
         return result
 
 

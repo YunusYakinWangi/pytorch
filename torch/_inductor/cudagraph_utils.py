@@ -29,6 +29,91 @@ OutputType = list[int | torch.Tensor | None]
 ModelType = Callable[[list[InputType]], OutputType]
 
 
+class CUDAGraphPolicy:
+    """Pluggable policy controlling CUDA graph wrapping in Inductor's post_compile.
+
+    Override methods to customize:
+      - HOW compiled functions are cudagraph-wrapped (cudagraphify)
+      - WHETHER inner CompiledFxGraphs should be wrapped (should_wrap)
+      - OUTER wrapping of compound outputs like RegionalOutputCode (wrap_output)
+      - TEARDOWN of cudagraph resources (teardown)
+
+    Set via ``torch._inductor.config.cudagraph_policy``.  When ``None``
+    (the default), the existing built-in behaviour is used unchanged.
+
+    Example usage::
+
+        class MyCUDAGraphPolicy(CUDAGraphPolicy):
+            def cudagraphify(self, model, inputs, static_input_idxs, **kwargs):
+                return my_custom_wrapper(model, inputs, static_input_idxs)
+
+        with torch._inductor.config.patch("cudagraph_policy", MyCUDAGraphPolicy()):
+            compiled_fn = deserialize_artifacts(...)
+    """
+
+    def cudagraphify(
+        self,
+        model: Callable[..., Any],
+        inputs: Sequence[InputType],
+        static_input_idxs: Sequence[int],
+        *,
+        device_index: int,
+        is_backward: bool,
+        is_inference: bool,
+        **kwargs: Any,
+    ) -> Callable[..., Any]:
+        """Wrap a single compiled callable with CUDA graph capture/replay.
+
+        Called by ``cudagraph_post_compile`` for each ``CompiledFxGraph``.
+        The default delegates to ``compile_fx.cudagraphify`` (cudagraph_trees).
+
+        ``inputs`` are the example inputs at post_compile time.  The
+        default implementation does not forward them because
+        ``compile_fx.cudagraphify`` defers graph recording to the first
+        real call via an inner closure.  Subclasses that need the
+        example inputs for warmup or static-input detection may use them.
+        """
+        from torch._inductor.compile_fx import cudagraphify
+
+        return cudagraphify(
+            model,
+            static_input_idxs,
+            device_index=device_index,
+            is_backward=is_backward,
+            is_inference=is_inference,
+            **kwargs,
+        )
+
+    def should_wrap(self, compiled_graph: Any) -> bool:
+        """Whether to apply cudagraph wrapping to this CompiledFxGraph.
+
+        Called for each inner ``CompiledFxGraph`` during ``post_compile``.
+        Return ``False`` to skip wrapping (e.g. when wrapping at the outer
+        level via ``wrap_output`` instead).
+
+        Default: ``True`` (wrap everything, same as current behaviour).
+        """
+        return True
+
+    def wrap_output(self, output_code: Any) -> Any:
+        """Optional outer-level wrapping after inner post_compile completes.
+
+        Called by ``BundledOutputCodeLoadable.post_compile`` on the final
+        output (e.g. ``RegionalOutputCode``).  Use this to wrap the entire
+        compound output as a single CUDA graph instead of per-inner-region.
+
+        Default: identity (no outer wrapping).
+        """
+        return output_code
+
+    def teardown(self) -> None:
+        """Release CUDA graph resources (pools, streams, NCCL refs).
+
+        Called at training end.  Default: no-op (cudagraph_trees uses GC).
+        """
+        pass
+
+
 @dataclasses.dataclass(frozen=True, slots=True)
 class FunctionID:
     "Unique counter of a function wrapped in cudagraphify_impl"
