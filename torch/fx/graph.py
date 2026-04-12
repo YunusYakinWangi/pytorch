@@ -34,6 +34,33 @@ from .node import _get_qualified_name, _type_repr, Argument, Node, Target
 
 log = logging.getLogger(__name__)
 
+def _resolve_symints_in_args(graph: "Graph", x: object) -> object:
+    """Recursively convert SymInt/SymFloat/SymBool values to FX nodes in args/kwargs."""
+    if isinstance(x, torch.SymInt):
+        return graph.symint_to_node(x)
+    elif isinstance(x, (torch.SymFloat, torch.SymBool)):
+        return x  # TODO: handle SymFloat/SymBool when needed
+    elif isinstance(x, torch.Size):
+        return [_resolve_symints_in_args(graph, item) for item in x]
+    elif isinstance(x, tuple):
+        return tuple(_resolve_symints_in_args(graph, item) for item in x)
+    elif isinstance(x, list):
+        return [_resolve_symints_in_args(graph, item) for item in x]
+    elif isinstance(x, dict):
+        return {k: _resolve_symints_in_args(graph, v) for k, v in x.items()}
+    return x
+
+
+def _has_symbolic_literal(x: object) -> bool:
+    """Check if args/kwargs contain any non-concrete SymInt/SymFloat/SymBool."""
+    if isinstance(x, (torch.SymInt, torch.SymFloat, torch.SymBool)):
+        return hasattr(x, "node") and hasattr(x.node, "expr") and not x.node.expr.is_number
+    elif isinstance(x, (tuple, list)):
+        return any(_has_symbolic_literal(item) for item in x)
+    elif isinstance(x, dict):
+        return any(_has_symbolic_literal(v) for v in x.values())
+    return False
+
 __all__ = ["PythonCode", "CodeGen", "Graph"]
 
 if TYPE_CHECKING:
@@ -1326,6 +1353,8 @@ class Graph:
         self._codegen = CodeGen()
         self._co_fields: dict[str, Any] = {}
         self._find_nodes_lookup_table = _FindNodesLookupTable()
+        self._symint_tracer: Any | None = None
+        self._expr_to_proxy: dict[Any, Any] | None = None
 
     @property
     def owning_module(self):
@@ -1485,6 +1514,12 @@ class Graph:
         else:
             if not isinstance(kwargs, dict):
                 raise AssertionError(f"kwargs must be a dict, got {type(kwargs)}")
+
+        # Auto-resolve any SymInt literals in args/kwargs to FX nodes
+        if op in ("call_function", "call_method"):
+            if _has_symbolic_literal(args) or _has_symbolic_literal(kwargs):
+                args = _resolve_symints_in_args(self, args)
+                kwargs = _resolve_symints_in_args(self, kwargs)
 
         candidate = name if name is not None else self._target_to_str(target)
         name = self._graph_namespace.create_name(candidate, None)
@@ -1837,6 +1872,115 @@ class Graph:
         return self.create_node(
             "call_function", the_function, args, kwargs, name=name, type_expr=type_expr
         )
+
+    def _ensure_symint_resolver(self) -> None:
+        """Lazily initialize the SymInt resolver tracer.
+
+        Creates a ``GraphAppendingTracer`` for use by :meth:`symint_to_node`.
+        The ``expr_to_proxy`` mapping is populated on-demand as symbols
+        are requested, not upfront.
+        """
+        if self._symint_tracer is not None:
+            return
+
+        from torch.fx.proxy import GraphAppendingTracer
+
+        self._symint_tracer = GraphAppendingTracer(self)
+        self._expr_to_proxy = {}
+
+    def _resolve_symbols(self, needed: set) -> None:
+        """Scan the graph once to find nodes for all symbols in ``needed``.
+
+        For each symbol, registers the first node whose meta['val'] tensor
+        contains that symbol in its size, stride, or storage_offset.
+        """
+        from torch.fx.proxy import Proxy
+
+        for node in self.nodes:
+            if not needed:
+                return
+            if node.op == "output":
+                continue
+            val = node.meta.get("val")
+            if not isinstance(val, torch.Tensor):
+                continue
+            for i, s in enumerate(val.size()):
+                if isinstance(s, torch.SymInt) and s.node.expr in needed:
+                    sym = s.node.expr
+                    size_node = self.call_function(
+                        torch.ops.aten.sym_size.int, (node, i)
+                    )
+                    size_node.meta["val"] = s
+                    self._expr_to_proxy[sym] = Proxy(size_node, tracer=self._symint_tracer)
+                    needed.discard(sym)
+            for i, s in enumerate(val.stride()):
+                if isinstance(s, torch.SymInt) and s.node.expr in needed:
+                    sym = s.node.expr
+                    stride_node = self.call_function(
+                        torch.ops.aten.sym_stride.int, (node, i)
+                    )
+                    stride_node.meta["val"] = s
+                    self._expr_to_proxy[sym] = Proxy(stride_node, tracer=self._symint_tracer)
+                    needed.discard(sym)
+            so = val.storage_offset()
+            if isinstance(so, torch.SymInt) and so.node.expr in needed:
+                sym = so.node.expr
+                offset_node = self.call_function(
+                    torch.ops.aten.sym_storage_offset.default, (node,)
+                )
+                offset_node.meta["val"] = so
+                self._expr_to_proxy[sym] = Proxy(offset_node, tracer=self._symint_tracer)
+                needed.discard(sym)
+
+    @compatibility(is_backward_compatible=False)
+    def symint_to_node(self, val: "torch.SymInt | int") -> "Node | int":
+        """Convert a SymInt value to an FX Node (or plain int).
+
+        Use this in FX graph passes when you have a ``torch.SymInt`` from
+        tensor metadata (e.g., ``node.meta["val"].numel()``) and need to
+        pass it as an argument to ``graph.call_function(...)``.
+
+        - Plain ``int`` → returned as-is
+        - Concrete ``SymInt`` (e.g., ``SymInt(1024)``) → returned as ``int``
+        - Symbolic ``SymInt`` → decomposed into FX nodes via ``sympy_interp``
+
+        Example::
+
+            numel = node.meta["val"].numel()          # SymInt
+            size_node = graph.symint_to_node(numel)    # FX Node
+            graph.call_function(aten.empty, ([size_node],), ...)
+
+        Args:
+            val: A ``torch.SymInt`` or plain ``int``.
+
+        Returns:
+            An FX ``Node`` representing the symbolic expression, or a plain
+            ``int`` if the value is concrete.
+        """
+        if isinstance(val, int):
+            return val
+
+        if not isinstance(val, torch.SymInt):
+            raise TypeError(f"Expected int or torch.SymInt, got {type(val)}")
+
+        expr = val.node.expr
+        if expr.is_number:
+            return int(expr)
+
+        from torch.utils._sympy.interp import sympy_interp
+        from torch.utils._sympy.reference import PythonReferenceAnalysis
+
+        self._ensure_symint_resolver()
+        assert self._expr_to_proxy is not None
+
+        # Resolve any free symbols not yet in the proxy map (single graph scan)
+        missing = {sym for sym in expr.free_symbols if sym not in self._expr_to_proxy}
+        if missing:
+            self._resolve_symbols(missing)
+
+        proxy = sympy_interp(PythonReferenceAnalysis, self._expr_to_proxy, expr)
+        proxy.node.meta["val"] = val
+        return proxy.node
 
     @compatibility(is_backward_compatible=True)
     def node_copy(
