@@ -62,6 +62,7 @@ from fx.test_opaque_infrastructure import TestOpaqueInfrastructure  # noqa: F401
 from fx.test_pass_infra import TestPassManager  # noqa: F401
 from fx.test_source_matcher_utils import TestSourceMatcher  # noqa: F401
 from fx.test_subgraph_rewriter import TestSubgraphRewriter  # noqa: F401
+from fx.test_symint_resolution import TestSymIntResolution  # noqa: F401
 from torch.fx._compatibility import _BACK_COMPAT_OBJECTS, _MARKED_WITH_COMPATIBILITY
 from torch.fx._symbolic_trace import PHBase, PHWithMeta
 
