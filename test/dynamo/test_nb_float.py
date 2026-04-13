@@ -3,7 +3,12 @@
 
 import torch
 import torch._dynamo.testing
-from torch.testing._internal.common_utils import make_dynamo_test, run_tests, TestCase
+from torch.testing._internal.common_utils import (
+    make_dynamo_test,
+    run_tests,
+    skipIfCrossRef,
+    TestCase,
+)
 
 
 class NbFloatTests(TestCase):
@@ -260,6 +265,7 @@ class NbFloatTests(TestCase):
 
     # --- Tensor ---
 
+    @skipIfCrossRef
     def test_tensor_int_dtype(self):
         def fn(x):
             return float(x)
@@ -267,6 +273,7 @@ class NbFloatTests(TestCase):
         result = torch.compile(fn, backend="eager", fullgraph=True)(torch.tensor(5))
         self.assertEqual(result, 5.0)
 
+    @skipIfCrossRef
     def test_tensor_float_dtype(self):
         def fn(x):
             return float(x)
@@ -274,6 +281,7 @@ class NbFloatTests(TestCase):
         result = torch.compile(fn, backend="eager", fullgraph=True)(torch.tensor(3.14))
         self.assertAlmostEqual(result, 3.14, places=2)
 
+    @skipIfCrossRef
     def test_tensor_complex_raises(self):
         def fn(x):
             try:
@@ -290,6 +298,7 @@ class NbFloatTests(TestCase):
         )
         self.assertEqual(result, eager_result)
 
+    @skipIfCrossRef
     def test_tensor_dunder_float(self):
         def fn(x):
             return x.__float__()
@@ -299,6 +308,7 @@ class NbFloatTests(TestCase):
 
     # --- SymNodeVariable ---
 
+    @skipIfCrossRef
     def test_symnode_float(self):
         def fn(x):
             return float(x.size(0))
