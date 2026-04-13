@@ -18,6 +18,7 @@ function install_timm() {
 function install_torchbench() {
   local commit
   commit=$(get_pinned_commit torchbench)
+  mkdir torchbench && chown jenkins torchbench
   as_jenkins git clone https://github.com/pytorch/benchmark torchbench
   pushd torchbench
   as_jenkins git checkout "$commit"
