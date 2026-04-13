@@ -13189,19 +13189,21 @@ class TestConsistency(TestCaseMPS):
 
     def test_autograd_sum_expand_stride_zero(self):
         # Regression test for https://github.com/pytorch/pytorch/issues/180201
-        # MPS strided API does not handle stride 0 (from expand in sum backward),
-        # causing corrupted gradients when using autograd.grad(y.sum(), x).
-        torch.manual_seed(123)
-        w = torch.randn(16, 3, device="mps")
-        b = torch.randn(16, device="mps")
+        # Matmul backward with stride-0 gradient (from sum of a size-1 output)
+        # produces corrupted (mostly zero) gradients on some macOS versions.
+        torch.manual_seed(42)
+        w1, b1 = torch.randn(16, 3), torch.randn(16)
+        w2, b2 = torch.randn(1, 16), torch.randn(1)
 
-        torch.manual_seed(0)
-        x = torch.randn(64, 3, device="mps", requires_grad=True)
-        y = torch.sin(x @ w.T + b).sum(-1)
+        x_mps = torch.randn(64, 3, device="mps", requires_grad=True)
+        x_cpu = x_mps.detach().cpu().requires_grad_(True)
 
-        grad_sum = torch.autograd.grad(y.sum(), x)[0]
-        grad_explicit = torch.autograd.grad(y, x, grad_outputs=torch.ones_like(y))[0]
-        self.assertEqual(grad_sum, grad_explicit)
+        y_mps = (x_mps @ w1.T.to("mps") + b1.to("mps")) @ w2.T.to("mps") + b2.to("mps")
+        y_cpu = (x_cpu @ w1.T + b1) @ w2.T + b2
+
+        y_mps.sum().backward()
+        y_cpu.sum().backward()
+        self.assertEqual(x_mps.grad, x_cpu.grad)
 
 
 class TestErrorInputs(TestCase):
