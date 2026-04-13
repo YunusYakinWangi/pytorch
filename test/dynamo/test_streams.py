@@ -164,7 +164,7 @@ class <lambda>(torch.nn.Module):
         def fn_cuda_stream(x):
             return torch.cuda.current_stream().cuda_stream
 
-        x = torch.zeros(1, device="cuda")
+        x = torch.zeros(1, device=GPU_TYPE)
         compiled = torch.compile(fn_cuda_stream, backend="eager", fullgraph=True)
         self.assertEqual(compiled(x), fn_cuda_stream(x))
 
@@ -177,8 +177,8 @@ class <lambda>(torch.nn.Module):
             with s:
                 return torch.cuda.current_stream().cuda_stream
 
-        s = torch.cuda.Stream()
-        x = torch.zeros(1, device="cuda")
+        s = torch.cuda.Stream(device=GPU_TYPE)
+        x = torch.zeros(1, device=GPU_TYPE)
         compiled = torch.compile(fn, backend="eager", fullgraph=True)
         self.assertEqual(compiled(x, s), fn(x, s))
 
