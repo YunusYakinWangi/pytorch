@@ -229,25 +229,43 @@ def estimate_nccl_collective_runtime_nccl_estimator(snode) -> float | None:  # t
     return est_time_ms
 
 
-def _nccl_bandwidth_and_latency(
-    group_size: int, coll: NCCL_COLL
-) -> tuple[float, float]:
+def estimate_nccl_collective_runtime_impl(
+    tensor_storage_size_bytes: int, group_size: int, coll: NCCL_COLL
+) -> float:
     """
-    Compute algorithm bandwidth (GB/s) and latency (us) for an NCCL collective.
+    Returns estimated NCCL collective runtime in milliseconds (ms).
 
-    Uses the NCCL analytical model (ring algorithm, LL protocol).
-    Returns (bandwidth_GB_per_s, latency_us).
+    The following heuristics are copied from https://github.com/NVIDIA/nccl/blob/master/src/graph/tuning.cc.
+    We aim to estimate the runtime as accurately as possible.
+
+    Assumptions:
+    - only ring algorithm (NCCL_ALGO_RING) is used
+    - only Low-Latency protocol (NCCL_PROTO_LL) is used, i.e. Simple or LL128 is not used
+    - 8 gpus per node  # TODO: Need to find a way to get accurate "gpus per node" and "# nodes" info.
+    - collective is one of: allreduce, reducescatter, allgather
     """
+    # Convert bytes to GB
+    tensor_storage_size_GB = tensor_storage_size_bytes / 1024 / 1024 / 1024
+
     # Currently assumes each node has 8 gpus. And when >1 node is used, assumes each node uses all 8 gpus.
     # TODO: Need to find a way to get accurate "gpus per node" and "# nodes" info.
     num_gpus_per_node = 8
     nNodes = math.ceil(group_size / num_gpus_per_node)
-    nRanks = group_size
+    nRanks = group_size  # this is total # of gpus globally that participate in this collective op
 
+    if nRanks <= 1:
+        return 0
+
+    if coll == NCCL_COLL.UNSUPPORTED:
+        return 0
+
+    # Assumes ring algorithm
     nccl_algo = NCCL_ALGO.RING
     nccl_proto = NCCL_PROTO.LL
 
     # =============== bandwidth computation ===============
+    # First compute bandwidth in GB/s; then at the end, convert it to GB/ns
+
     bwIntra = torch._inductor.config.intra_node_bw
     bwInter = torch._inductor.config.inter_node_bw
 
@@ -280,11 +298,14 @@ def _nccl_bandwidth_and_latency(
     elif coll in (NCCL_COLL.REDUCE_SCATTER, NCCL_COLL.ALL_GATHER):
         nsteps = nRanks - 1
     elif coll == NCCL_COLL.P2P:
+        # assume 1 hop per pair
         nsteps = 1
 
     # Convert bus BW to algorithm BW (tensor bytes / algoBW = actual execution time)
     ratio = (1.0 * nRanks) / nsteps  # type: ignore[possibly-undefined]
-    bandwidth_GB_per_s = busBw * ratio
+    bandwidth = busBw * ratio
+    # Convert GB/s to GB/ns
+    bandwidth_GB_per_ns = bandwidth / 1e9
 
     # =============== latency computation ===============
     intraHw = NCCL_HW.NVLINK
@@ -297,9 +318,11 @@ def _nccl_bandwidth_and_latency(
     elif coll in (NCCL_COLL.REDUCE_SCATTER, NCCL_COLL.ALL_GATHER, NCCL_COLL.ALL_TO_ALL):
         nInterSteps = nNodes - 1
     elif coll == NCCL_COLL.P2P:
+        # p2p may cross node bdry
         nInterSteps = 1 if nNodes > 1 else 0
 
-    latency_us = baseLat[nccl_algo][nccl_proto]
+    # First compute latency in us; then at the end, convert it to ns
+    latency = baseLat[nccl_algo][nccl_proto]
     intraLat = hwLat[intraHw][nccl_algo][nccl_proto]
     interLat = hwLat[NCCL_HW.NET][nccl_algo][nccl_proto]
 
@@ -308,40 +331,15 @@ def _nccl_bandwidth_and_latency(
     if nNodes > 1:
         netOverhead = 1.0  # getNetOverhead(comm);
     intraLat = max(intraLat, netOverhead)
-    latency_us += (nsteps - nInterSteps) * intraLat + nInterSteps * interLat  # type: ignore[possibly-undefined]
+    latency += (nsteps - nInterSteps) * intraLat + nInterSteps * interLat  # type: ignore[possibly-undefined]
+    # Convert us to ns
+    latency_ns = latency * 1e3
 
-    return bandwidth_GB_per_s, latency_us
-
-
-def estimate_nccl_collective_runtime_impl(
-    tensor_storage_size_bytes: int, group_size: int, coll: NCCL_COLL
-) -> float:
-    """
-    Returns estimated NCCL collective runtime in milliseconds (ms).
-
-    The following heuristics are copied from https://github.com/NVIDIA/nccl/blob/master/src/graph/tuning.cc.
-    We aim to estimate the runtime as accurately as possible.
-
-    Assumptions:
-    - only ring algorithm (NCCL_ALGO_RING) is used
-    - only Low-Latency protocol (NCCL_PROTO_LL) is used, i.e. Simple or LL128 is not used
-    - 8 gpus per node  # TODO: Need to find a way to get accurate "gpus per node" and "# nodes" info.
-    - collective is one of: allreduce, reducescatter, allgather
-    """
-    if group_size <= 1:
-        return 0
-
-    if coll == NCCL_COLL.UNSUPPORTED:
-        return 0
-
-    bandwidth_GB_per_s, latency_us = _nccl_bandwidth_and_latency(group_size, coll)
-
-    tensor_storage_size_GB = tensor_storage_size_bytes / 1024 / 1024 / 1024
-    bandwidth_GB_per_ns = bandwidth_GB_per_s / 1e9
+    # =============== final result ===============
     transport_ns = tensor_storage_size_GB / bandwidth_GB_per_ns
-    latency_ns = latency_us * 1e3
     ns = transport_ns + latency_ns
-    return ns / 1e6
+    ms = ns / 1e6
+    return ms
 
 
 def compute_min_saturation_bytes(
@@ -362,7 +360,50 @@ def compute_min_saturation_bytes(
     if group_size <= 1:
         return 0
 
-    bandwidth_GB_per_s, latency_us = _nccl_bandwidth_and_latency(group_size, coll)
+    # Same NCCL model as estimate_nccl_collective_runtime_impl: compute
+    # algorithm bandwidth (GB/s) and latency (us) for this collective.
+    num_gpus_per_node = 8
+    nNodes = math.ceil(group_size / num_gpus_per_node)
+    nRanks = group_size
+
+    nccl_algo = NCCL_ALGO.RING
+    nccl_proto = NCCL_PROTO.LL
+
+    bwIntra = torch._inductor.config.intra_node_bw
+    bwInter = torch._inductor.config.inter_node_bw
+    compCapIndex = get_gpu_type()
+    index2 = nNodes - 1 if nNodes <= 2 else 2
+    index1 = compCapIndex if nNodes == 1 else 0
+    llMaxBw = llMaxBws[index1][index2]
+    bw = bwIntra if nNodes == 1 else bwInter
+    busBw = min(
+        llMaxBw,
+        2
+        * bw
+        * (1.0 / 4.0 if (nNodes > 1 or coll == NCCL_COLL.ALL_REDUCE) else 1.0 / 3.0),
+    )
+
+    if coll == NCCL_COLL.ALL_REDUCE:
+        nsteps = 2 * (nRanks - 1)
+    elif coll in (NCCL_COLL.REDUCE_SCATTER, NCCL_COLL.ALL_GATHER):
+        nsteps = nRanks - 1
+    else:
+        nsteps = nRanks - 1
+
+    bandwidth_GB_per_s = busBw * (1.0 * nRanks) / nsteps
+
+    intraHw = NCCL_HW.NVLINK
+    if coll == NCCL_COLL.ALL_REDUCE:
+        nInterSteps = 2 * nNodes if nNodes > 1 else 0
+    else:
+        nInterSteps = nNodes - 1
+
+    latency_us = baseLat[nccl_algo][nccl_proto]
+    intraLat = hwLat[intraHw][nccl_algo][nccl_proto]
+    interLat = hwLat[NCCL_HW.NET][nccl_algo][nccl_proto]
+    netOverhead = 1.0 if nNodes > 1 else 0.0
+    intraLat = max(intraLat, netOverhead)
+    latency_us += (nsteps - nInterSteps) * intraLat + nInterSteps * interLat
 
     latency_s = latency_us * 1e-6
     bandwidth_bytes_per_s = bandwidth_GB_per_s * 1e9

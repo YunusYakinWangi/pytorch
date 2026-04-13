@@ -1181,7 +1181,7 @@ class aten_distributed_optimizations:
     pre_bucketing_fsdp_collectives_safety_multiplier: float = 3.0
 
     # Floor for auto-computed bucket cap in MB.
-    pre_bucketing_fsdp_collectives_min_bucket_cap_mb: float = 25.0
+    pre_bucketing_fsdp_collectives_min_bucket_cap_mb: float = 50.0
 
     # Ceiling for auto-computed bucket cap in MB.
     pre_bucketing_fsdp_collectives_max_bucket_cap_mb: float = 2000.0

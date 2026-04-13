@@ -1591,6 +1591,12 @@ class TestPreBucketingFsdpCollectives(InductorTestCase):
             fsdp_rw1 = torch.ops._c10d_functional.wait_tensor(fsdp_rs1)
             fsdp_rw2 = torch.ops._c10d_functional.wait_tensor(fsdp_rs2)
 
+            # FSDP all_reduces: on the same FSDP group (e.g. HSDP gradient AR)
+            fsdp_ar1 = torch.ops._c10d_functional.all_reduce(fsdp_w1, "sum", fsdp_group)
+            fsdp_arw1 = torch.ops._c10d_functional.wait_tensor(fsdp_ar1)
+            fsdp_ar2 = torch.ops._c10d_functional.all_reduce(fsdp_w2, "sum", fsdp_group)
+            fsdp_arw2 = torch.ops._c10d_functional.wait_tensor(fsdp_ar2)
+
             # TP all_gather: depends on multi-input computation (not single placeholder)
             tp_combined = tp_act1 + tp_act2  # multi-input → not FSDP
             tp_ag = torch.ops._c10d_functional.all_gather_into_tensor(
@@ -1603,9 +1609,14 @@ class TestPreBucketingFsdpCollectives(InductorTestCase):
                 tp_w, "sum", 8, tp_group
             )
             tp_rw = torch.ops._c10d_functional.wait_tensor(tp_rs)
-            tp_result = tp_rw + fsdp_rw1  # TP RS feeds into compute
 
-            return fsdp_rw1, fsdp_rw2, tp_result
+            # TP all_reduce (use tp_rw so shapes match for the add below)
+            tp_ar = torch.ops._c10d_functional.all_reduce(tp_rw, "sum", tp_group)
+            tp_arw = torch.ops._c10d_functional.wait_tensor(tp_ar)
+
+            tp_result = tp_rw + fsdp_rw1 + tp_arw
+
+            return fsdp_rw1, fsdp_rw2, fsdp_arw1 + fsdp_arw2, tp_result
 
         with FakeTensorMode():
             fsdp_p1 = torch.ones(4, 4, device=self.device)
@@ -1630,6 +1641,7 @@ class TestPreBucketingFsdpCollectives(InductorTestCase):
         """Verify pre_bucket_fsdp_collectives merges only FSDP collectives."""
         from torch._inductor.fx_passes.bucketing import (
             is_all_gather_into_tensor,
+            is_all_reduce_tensor,
             is_reduce_scatter_tensor,
         )
         from torch._inductor.fx_passes.fsdp import (
@@ -1639,64 +1651,47 @@ class TestPreBucketingFsdpCollectives(InductorTestCase):
 
         traced, fsdp_group, tp_group = self._make_fsdp_and_tp_graph()
 
+        def count_colls(is_coll_fn, group):
+            return sum(
+                1
+                for n in traced.graph.nodes
+                if is_coll_fn(n) and _get_group_name(n) == group
+            )
+
         # Count collectives before
-        fsdp_ag_before = sum(
-            1
-            for n in traced.graph.nodes
-            if is_all_gather_into_tensor(n) and _get_group_name(n) == fsdp_group
-        )
-        tp_ag_before = sum(
-            1
-            for n in traced.graph.nodes
-            if is_all_gather_into_tensor(n) and _get_group_name(n) == tp_group
-        )
-        fsdp_rs_before = sum(
-            1
-            for n in traced.graph.nodes
-            if is_reduce_scatter_tensor(n) and _get_group_name(n) == fsdp_group
-        )
-        tp_rs_before = sum(
-            1
-            for n in traced.graph.nodes
-            if is_reduce_scatter_tensor(n) and _get_group_name(n) == tp_group
-        )
+        fsdp_ag_before = count_colls(is_all_gather_into_tensor, fsdp_group)
+        tp_ag_before = count_colls(is_all_gather_into_tensor, tp_group)
+        fsdp_rs_before = count_colls(is_reduce_scatter_tensor, fsdp_group)
+        tp_rs_before = count_colls(is_reduce_scatter_tensor, tp_group)
+        fsdp_ar_before = count_colls(is_all_reduce_tensor, fsdp_group)
+        tp_ar_before = count_colls(is_all_reduce_tensor, tp_group)
 
         self.assertEqual(fsdp_ag_before, 2)
         self.assertEqual(tp_ag_before, 1)
         self.assertEqual(fsdp_rs_before, 2)
         self.assertEqual(tp_rs_before, 1)
+        self.assertEqual(fsdp_ar_before, 2)
+        self.assertEqual(tp_ar_before, 1)
 
         # Run pre-bucketing with a large cap to ensure everything gets merged
         pre_bucket_fsdp_collectives(traced, mode="default", bucket_cap_mb=2000.0)
 
-        # Count after: FSDP collectives should be merged (2 → 1 each)
-        fsdp_ag_after = sum(
-            1
-            for n in traced.graph.nodes
-            if is_all_gather_into_tensor(n) and _get_group_name(n) == fsdp_group
-        )
-        tp_ag_after = sum(
-            1
-            for n in traced.graph.nodes
-            if is_all_gather_into_tensor(n) and _get_group_name(n) == tp_group
-        )
-        fsdp_rs_after = sum(
-            1
-            for n in traced.graph.nodes
-            if is_reduce_scatter_tensor(n) and _get_group_name(n) == fsdp_group
-        )
-        tp_rs_after = sum(
-            1
-            for n in traced.graph.nodes
-            if is_reduce_scatter_tensor(n) and _get_group_name(n) == tp_group
-        )
+        # Count after
+        fsdp_ag_after = count_colls(is_all_gather_into_tensor, fsdp_group)
+        tp_ag_after = count_colls(is_all_gather_into_tensor, tp_group)
+        fsdp_rs_after = count_colls(is_reduce_scatter_tensor, fsdp_group)
+        tp_rs_after = count_colls(is_reduce_scatter_tensor, tp_group)
+        fsdp_ar_after = count_colls(is_all_reduce_tensor, fsdp_group)
+        tp_ar_after = count_colls(is_all_reduce_tensor, tp_group)
 
         # FSDP should be bucketed (2 merged into 1)
         self.assertLess(fsdp_ag_after, fsdp_ag_before)
         self.assertLessEqual(fsdp_rs_after, fsdp_rs_before)
+        self.assertLess(fsdp_ar_after, fsdp_ar_before)
         # TP should be untouched
         self.assertEqual(tp_ag_after, tp_ag_before)
         self.assertEqual(tp_rs_after, tp_rs_before)
+        self.assertEqual(tp_ar_after, tp_ar_before)
 
     def test_pre_bucketing_config_disabled(self):
         """Verify pre_bucketing_fsdp_collectives=False skips the pass."""
@@ -1721,6 +1716,110 @@ class TestPreBucketingFsdpCollectives(InductorTestCase):
         ag_after = sum(1 for n in traced.graph.nodes if is_all_gather_into_tensor(n))
         # FSDP should be bucketed (2 → 1), TP unchanged (1)
         self.assertLess(ag_after, ag_before)
+
+    def test_is_fsdp_all_gather_multi_input_chain(self):
+        """AG with cat(param, zeros) should be identified as FSDP (1 placeholder)."""
+        from torch._inductor.fx_passes.fsdp import is_fsdp_all_gather
+
+        fsdp_group = dist.distributed_c10d._get_default_group().group_name
+
+        def func(param):
+            padded = torch.cat([param.view(-1), torch.zeros(4, device=param.device)])
+            ag = torch.ops._c10d_functional.all_gather_into_tensor(
+                padded, 64, fsdp_group
+            )
+            return torch.ops._c10d_functional.wait_tensor(ag)
+
+        with FakeTensorMode():
+            traced = make_fx(func)(torch.ones(4, 4, device=self.device))
+
+        ag_nodes = [
+            n
+            for n in traced.graph.nodes
+            if n.op == "call_function"
+            and n.target is torch.ops._c10d_functional.all_gather_into_tensor.default
+        ]
+        self.assertEqual(len(ag_nodes), 1)
+        self.assertTrue(is_fsdp_all_gather(ag_nodes[0]))
+
+    def test_is_fsdp_all_gather_two_placeholders(self):
+        """AG from a + b (two placeholders) should NOT be identified as FSDP."""
+        from torch._inductor.fx_passes.fsdp import is_fsdp_all_gather
+
+        tp_group = "tp_test_group"
+
+        def func(a, b):
+            combined = a + b
+            ag = torch.ops._c10d_functional.all_gather_into_tensor(
+                combined, 8, tp_group
+            )
+            return torch.ops._c10d_functional.wait_tensor(ag)
+
+        with FakeTensorMode():
+            traced = make_fx(func)(
+                torch.ones(4, 4, device=self.device),
+                torch.ones(4, 4, device=self.device),
+            )
+
+        ag_nodes = [
+            n
+            for n in traced.graph.nodes
+            if n.op == "call_function"
+            and n.target is torch.ops._c10d_functional.all_gather_into_tensor.default
+        ]
+        self.assertEqual(len(ag_nodes), 1)
+        self.assertFalse(is_fsdp_all_gather(ag_nodes[0]))
+
+    def test_is_fsdp_reduce_scatter_wait_multi_unary(self):
+        """RS wait -> view -> to(bf16) -> output should be identified as FSDP."""
+        from torch._inductor.fx_passes.fsdp import is_fsdp_reduce_scatter_wait
+
+        fsdp_group = dist.distributed_c10d._get_default_group().group_name
+
+        def func(x):
+            rs = torch.ops._c10d_functional.reduce_scatter_tensor(
+                x, "sum", 64, fsdp_group
+            )
+            w = torch.ops._c10d_functional.wait_tensor(rs)
+            return w.view(-1).to(torch.bfloat16)
+
+        with FakeTensorMode():
+            traced = make_fx(func)(torch.ones(64, 4, device=self.device))
+
+        wait_nodes = [
+            n
+            for n in traced.graph.nodes
+            if n.op == "call_function"
+            and n.target is torch.ops._c10d_functional.wait_tensor.default
+        ]
+        self.assertEqual(len(wait_nodes), 1)
+        self.assertTrue(is_fsdp_reduce_scatter_wait(wait_nodes[0]))
+
+    def test_is_fsdp_reduce_scatter_wait_feeds_compute(self):
+        """RS wait feeding into mm should NOT be identified as FSDP."""
+        from torch._inductor.fx_passes.fsdp import is_fsdp_reduce_scatter_wait
+
+        tp_group = "tp_test_group"
+
+        def func(x, y):
+            rs = torch.ops._c10d_functional.reduce_scatter_tensor(x, "sum", 8, tp_group)
+            w = torch.ops._c10d_functional.wait_tensor(rs)
+            return torch.mm(w, y)
+
+        with FakeTensorMode():
+            traced = make_fx(func)(
+                torch.ones(8, 4, device=self.device),
+                torch.ones(4, 4, device=self.device),
+            )
+
+        wait_nodes = [
+            n
+            for n in traced.graph.nodes
+            if n.op == "call_function"
+            and n.target is torch.ops._c10d_functional.wait_tensor.default
+        ]
+        self.assertEqual(len(wait_nodes), 1)
+        self.assertFalse(is_fsdp_reduce_scatter_wait(wait_nodes[0]))
 
     def test_compute_min_saturation_bytes(self):
         """Verify bandwidth saturation computation gives reasonable values."""
