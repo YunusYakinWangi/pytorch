@@ -237,7 +237,7 @@ class AsyncCompile:
     """
 
     _ready_future: Future[Any] | None = None
-    _metal_sources: list[tuple[str, str, list[str]]] = []
+    _metal_sources: list[tuple[str, str, list[str]]] | None = None
 
     def __init__(self) -> None:
         pass
@@ -705,20 +705,11 @@ class AsyncCompile:
 
     def metal(self, kernel_name: str, source: str, headers: list[str]) -> None:
         """Register a Metal kernel body; wait() compiles all registered kernels into one library."""
-        AsyncCompile._metal_sources.append((kernel_name, source, headers))
+        if self._metal_sources is None:
+            self._metal_sources = []
+        self._metal_sources.append((kernel_name, source, headers))
 
     def wait(self, scope: dict[str, Any]) -> None:
-        sources, AsyncCompile._metal_sources = AsyncCompile._metal_sources, []
-        if sources:
-            from torch._inductor.runtime.runtime_utils import compile_mps_shader
-
-            all_headers = sorted(OrderedSet([h for _, _, hs in sources for h in hs]))
-            header_src = "\n".join(f"#include <c10/metal/{h}.h>" for h in all_headers)
-            body_src = "\n".join(src for _, src, _ in sources)
-            lib = compile_mps_shader(header_src + "\n" + body_src)
-            for kernel_name, _, _ in sources:
-                scope[kernel_name] = getattr(lib, kernel_name)
-
         if get_compile_threads() > 1:
             with dynamo_timed(
                 "async_compile.wait",
@@ -728,6 +719,12 @@ class AsyncCompile:
                 waitcounter_name_override="compile_triton",
             ):
                 self._wait_futures(scope)
+
+        if self._metal_sources:
+            from torch._inductor.runtime.runtime_utils import compile_mps_shaders
+
+            scope.update(compile_mps_shaders(self._metal_sources))
+            self._metal_sources.clear()
 
         _compile_end()
 
