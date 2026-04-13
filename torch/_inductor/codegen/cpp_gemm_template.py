@@ -292,6 +292,7 @@ GEMM_TEMPLATE = r"""
             }
         }
 {%- if num_threads > 1 %}
+            }
 {%- if maybe_k_slicing %}
         if (num_Kt_blocks > 1) {
             #pragma omp for schedule(static, 1)
@@ -332,7 +333,6 @@ GEMM_TEMPLATE = r"""
             }
         }
 {%- endif %}
-    }
         {{ micro_gemm.codegen_finalize(kernel) }}
     }
 {%- else %}
