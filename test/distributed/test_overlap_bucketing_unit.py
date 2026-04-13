@@ -1888,7 +1888,6 @@ class TestPreBucketingFsdpCollectives(InductorTestCase):
 
     @torch._inductor.config.patch(
         {
-            "aten_distributed_optimizations.pre_bucketing_fsdp_collectives_target_efficiency": 0.9,
             "aten_distributed_optimizations.pre_bucketing_fsdp_collectives_safety_multiplier": 1.0,
             "aten_distributed_optimizations.pre_bucketing_fsdp_collectives_min_bucket_cap_mb": 10.0,
         }
@@ -1897,7 +1896,7 @@ class TestPreBucketingFsdpCollectives(InductorTestCase):
         """Verify sweep configs affect bucket cap computation."""
         from torch._inductor.fx_passes.fsdp import compute_pre_bucket_cap_mb
 
-        # With safety=1.0 and target=0.9, cap should be smaller than defaults
+        # With safety=1.0, cap should be smaller than defaults
         cap_low = compute_pre_bucket_cap_mb(8)
         self.assertGreaterEqual(cap_low, 10.0)
         self.assertLess(cap_low, 50.0)
