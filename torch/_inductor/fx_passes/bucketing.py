@@ -104,11 +104,11 @@ def _schedulable_wait_node(node: torch.fx.Node) -> bool:
     if not is_wait_tensor(node):
         return False
     assert isinstance(node.args[0], torch.fx.Node)
-    if not isinstance(node.args[0].target, Callable):
+    target = node.args[0].target
+    if not isinstance(target, torch._ops.OpOverload):
         return False
     is_callable: bool = node.args[0].op == "call_function"
-    # pyrefly: ignore [missing-attribute]
-    coll: NCCL_COLL = get_collective_type_from_kernel_name(node.args[0].target.name())
+    coll: NCCL_COLL = get_collective_type_from_kernel_name(target.name())
     is_collective: bool = coll != NCCL_COLL.UNSUPPORTED
     return is_callable and is_collective
 
