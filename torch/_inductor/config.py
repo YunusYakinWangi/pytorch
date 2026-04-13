@@ -731,10 +731,39 @@ coordinate_descent_search_radius = int(
 
 # AutoHeuristic is a framework that allows one to collect data from autotuning, use the data to learn a heuristic, and
 # generate the learned heuristic to code which is shipped with the compiler
-# Specify a list of comma separated optimizations to collect data for
-autoheuristic_collect = os.environ.get("TORCHINDUCTOR_AUTOHEURISTIC_COLLECT", "")
-# Specify a list of comma separated optimizations to use learned heuristics for
-autoheuristic_use = os.environ.get("TORCHINDUCTOR_AUTOHEURISTIC_USE", "mixed_mm")
+
+
+def _parse_autoheuristic_collect_env():
+    collect_env = os.environ.get("TORCHINDUCTOR_AUTOHEURISTIC_COLLECT", "")
+    return collect_env
+
+
+def _parse_autoheuristic_use_env():
+    use_env = os.environ.get("TORCHINDUCTOR_AUTOHEURISTIC_USE", "mixed_mm")
+    return use_env
+
+
+class autoheuristic_collect:
+    """
+    Config for which autoheuristic optimizations should collect training data.
+    """
+
+    pad_mm = "pad_mm" in _parse_autoheuristic_collect_env()
+    mixed_mm = "mixed_mm" in _parse_autoheuristic_collect_env()
+
+
+class autoheuristic_use:
+    """
+    Config for which autoheuristic optimizations should use learned heuristics.
+    """
+
+    pad_mm = "pad_mm" in _parse_autoheuristic_use_env()
+    mixed_mm = (
+        "mixed_mm" in _parse_autoheuristic_use_env()
+        if _parse_autoheuristic_use_env()
+        else True
+    )
+
 
 # If set to 1, will run a JIT post compile hook if one is set.
 run_jit_post_compile_hook = (
@@ -747,11 +776,25 @@ def run_autoheuristic(name: str) -> bool:
 
 
 def collect_autoheuristic(name: str) -> bool:
-    return name in torch._inductor.config.autoheuristic_collect.split(",")
+    if name == "pad_mm":
+        return autoheuristic_collect.pad_mm
+    elif name == "mixed_mm":
+        return autoheuristic_collect.mixed_mm
+    else:
+        # For test compatibility with non-standard ops (e.g. "test", "foo" used in tests)
+        collect_set = _parse_autoheuristic_collect_env()
+        return name in collect_set
 
 
 def use_autoheuristic(name: str) -> bool:
-    return name in torch._inductor.config.autoheuristic_use.split(",")
+    if name == "pad_mm":
+        return autoheuristic_use.pad_mm
+    elif name == "mixed_mm":
+        return autoheuristic_use.mixed_mm
+    else:
+        # For test compatibility with non-standard ops (e.g. "test", "foo" used in tests)
+        use_set = _parse_autoheuristic_use_env()
+        return name in use_set
 
 
 # If set to "DEFAULT", this will use the default log path specified in autoheuristic.py.
