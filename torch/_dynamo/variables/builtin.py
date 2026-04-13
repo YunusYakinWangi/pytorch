@@ -1610,11 +1610,15 @@ class BuiltinVariable(BaseBuiltinVariable):
     def call_int(
         self, tx: "InstructionTranslator", arg: VariableTracker
     ) -> VariableTracker | None:
-        # For constants, constant folding already implements the full
-        # PyNumber_Long semantics (str parsing, base argument, etc.).
+        from .object_protocol import generic_int, type_implements_nb_int
+
         if isinstance(arg, ConstantVariable):
+            # int/float/bool constants: dispatch through nb_int directly.
+            # str/bytes constants: fall through to constant folding which
+            # handles PyNumber_Long's string parsing path.
+            if type_implements_nb_int(type(arg.value)):
+                return generic_int(tx, arg)
             return None
-        from .object_protocol import generic_int
 
         return generic_int(tx, arg)
 
