@@ -1182,7 +1182,7 @@ class aten_distributed_optimizations:
     pre_bucketing_fsdp_collectives_verbose: bool = False
 
     # Calibration: multiplier on analytically computed min saturation size.
-    pre_bucketing_fsdp_collectives_safety_multiplier: float = 3.0
+    pre_bucketing_fsdp_collectives_saturation_calibration_multiplier: float = 3.0
 
 
 def parallel_compile_enabled_internally() -> bool:

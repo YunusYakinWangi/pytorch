@@ -228,7 +228,7 @@ def compute_pre_bucket_cap_mb(
 
     Returns a conservative bucket size in MB that guarantees saturation of
     the process group's network bandwidth. Uses the NCCL analytical model
-    with a safety multiplier to account for model inaccuracy.
+    with a calibration multiplier to account for model inaccuracy.
 
     If bucket_cap_mb_override is set, returns that directly.
     """
@@ -239,14 +239,14 @@ def compute_pre_bucket_cap_mb(
     from torch._inductor.comm_analysis import compute_min_saturation_bytes, NCCL_COLL
 
     dist_opts = inductor_config.aten_distributed_optimizations
-    safety_mult = dist_opts.pre_bucketing_fsdp_collectives_safety_multiplier
+    cal_mult = dist_opts.pre_bucketing_fsdp_collectives_saturation_calibration_multiplier
     floor_mb = dist_opts.pre_bucketing_fsdp_collectives_min_bucket_cap_mb
     ceil_mb = dist_opts.pre_bucketing_fsdp_collectives_max_bucket_cap_mb
 
     min_bytes = compute_min_saturation_bytes(
         group_size, NCCL_COLL.ALL_GATHER, target_efficiency=0.95
     )
-    cap_mb = safety_mult * min_bytes / (1024 * 1024)
+    cap_mb = cal_mult * min_bytes / (1024 * 1024)
     cap_mb = max(floor_mb, min(ceil_mb, cap_mb))
 
     return cap_mb

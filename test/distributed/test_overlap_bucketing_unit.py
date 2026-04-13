@@ -1888,7 +1888,7 @@ class TestPreBucketingFsdpCollectives(InductorTestCase):
 
     @torch._inductor.config.patch(
         {
-            "aten_distributed_optimizations.pre_bucketing_fsdp_collectives_safety_multiplier": 1.0,
+            "aten_distributed_optimizations.pre_bucketing_fsdp_collectives_saturation_calibration_multiplier": 1.0,
             "aten_distributed_optimizations.pre_bucketing_fsdp_collectives_min_bucket_cap_mb": 10.0,
         }
     )
