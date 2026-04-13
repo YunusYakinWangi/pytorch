@@ -2309,6 +2309,7 @@ class OptimizedModuleTest(torch._dynamo.test_case.TestCase):
     def test_celu_matches_eager(self):
         for alpha, inplace in itertools.product((0.5, 1.0, 2.0), (False, True)):
             with self.subTest(alpha=alpha, inplace=inplace):
+
                 def fn(x):
                     if inplace:
                         return torch.celu_(x, alpha=alpha)
@@ -2324,6 +2325,7 @@ class OptimizedModuleTest(torch._dynamo.test_case.TestCase):
     def test_celu_zero_alpha_raises(self):
         for inplace in (False, True):
             with self.subTest(inplace=inplace):
+
                 def fn(x):
                     if inplace:
                         return torch.celu_(x, alpha=0.0)
@@ -2337,9 +2339,7 @@ class OptimizedModuleTest(torch._dynamo.test_case.TestCase):
                 with self.assertRaisesRegex(
                     RuntimeError, "ZeroDivisionError: alpha cannot be 0 for CELU"
                 ):
-                    torch.compile(fn, backend="eager", fullgraph=True)(
-                        torch.randn(8)
-                    )
+                    torch.compile(fn, backend="eager", fullgraph=True)(torch.randn(8))
 
     @patch.object(torch._dynamo.config, "skip_nnmodule_hook_guards", False)
     def test_hooks_outer(self):
