@@ -284,7 +284,7 @@ struct CppNode : public Node {
 
   void release_variables() override;
 
-  void set_ctx_grad_fn(const c10::intrusive_ptr<Node>& node);
+  void set_ctx_grad_fn(c10::intrusive_ptr<Node> node);
   void save_variables_to_ctx();
 
   void compiled_args(CompiledNodeArgs& args) const override {
