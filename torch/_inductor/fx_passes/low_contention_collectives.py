@@ -57,9 +57,22 @@ def replace_collectives_with_low_contention(
     if not collectives:
         return
 
-    # Enable symmetric memory for all groups found in collectives
+    # Enable symmetric memory for all groups found in collectives.
+    # Some group names (e.g. DTensor mesh-derived "mesh_get_process_group")
+    # can't be resolved at compile time — skip those groups.
+    valid_groups: OrderedSet[str] = OrderedSet()
     for group_name in groups:
-        _enable_symm_mem(group_name)
+        if _enable_symm_mem(group_name):
+            valid_groups.add(group_name)
+
+    # Filter to collectives whose groups we can actually resolve
+    collectives = [
+        (node, is_ag, gn)
+        for node, is_ag, gn in collectives
+        if gn in valid_groups
+    ]
+    if not collectives:
+        return
 
     from torch._inductor import config
 
@@ -124,15 +137,22 @@ def replace_collectives_with_low_contention(
 
 
 def _enable_symm_mem(group_name):
+    """Try to enable symmetric memory for a group. Returns True on success."""
     from torch.distributed._symmetric_memory import (
         enable_symm_mem_for_group,
         is_symm_mem_enabled_for_group,
     )
 
-    if not is_symm_mem_enabled_for_group(group_name):
+    if is_symm_mem_enabled_for_group(group_name):
+        return True
+    try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", FutureWarning)
             enable_symm_mem_for_group(group_name)
+        return True
+    except (TypeError, RuntimeError) as e:
+        log.debug("LC: cannot enable symm_mem for group %s: %s", group_name, e)
+        return False
 
 
 def _replace_collective(node, graph, symm_mem, is_ag, group_name):
