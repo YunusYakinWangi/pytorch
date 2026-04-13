@@ -229,9 +229,7 @@ def estimate_nccl_collective_runtime_nccl_estimator(snode) -> float | None:  # t
     return est_time_ms
 
 
-def _nccl_bandwidth_latency(
-    group_size: int, coll: NCCL_COLL
-) -> tuple[float, float]:
+def _nccl_bandwidth_latency(group_size: int, coll: NCCL_COLL) -> tuple[float, float]:
     """Compute NCCL analytical model bandwidth (GB/s) and latency (us).
 
     Shared by estimate_nccl_collective_runtime_impl and

@@ -239,7 +239,9 @@ def compute_pre_bucket_cap_mb(
     from torch._inductor.comm_analysis import compute_min_saturation_bytes, NCCL_COLL
 
     dist_opts = inductor_config.aten_distributed_optimizations
-    cal_mult = dist_opts.pre_bucketing_fsdp_collectives_saturation_calibration_multiplier
+    cal_mult = (
+        dist_opts.pre_bucketing_fsdp_collectives_saturation_calibration_multiplier
+    )
     floor_mb = dist_opts.pre_bucketing_fsdp_collectives_min_bucket_cap_mb
     ceil_mb = dist_opts.pre_bucketing_fsdp_collectives_max_bucket_cap_mb
 
