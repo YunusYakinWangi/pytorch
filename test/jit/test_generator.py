@@ -189,6 +189,15 @@ class TestGenerator(JitTestCase):
             print(loaded_module.forward.code)
             raise
 
+    def test_weakref(self):
+        """torch.Generator must support weak references for the proxy
+        tensor tracker (WeakIdKeyDictionary) to work during tracing."""
+        import weakref
+
+        g = torch.Generator()
+        wr = weakref.ref(g)
+        self.assertIs(wr(), g)
+
 
 if __name__ == "__main__":
     raise_on_run_directly("test/test_jit.py")
