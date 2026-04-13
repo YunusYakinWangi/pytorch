@@ -203,15 +203,18 @@ struct TORCH_API Node : c10::intrusive_ptr_target {
       bool is_nested,
       std::optional<at::ScalarType> grad_dtype) noexcept {
     uint32_t input_nr = input_metadata_.size();
-    auto meta_shape = MetadataShape{std::in_place_type<SymIntSmallVec>, shape};
     input_metadata_.emplace_back(
-        options, meta_shape, is_tensor_subclass, is_nested, grad_dtype);
+        options,
+        MetadataShape{std::in_place_type<SymIntSmallVec>, shape},
+        is_tensor_subclass,
+        is_nested,
+        grad_dtype);
     return input_nr;
   }
 
-  uint32_t add_input_metadata(const at::Tensor& t) noexcept {
+  uint32_t add_input_metadata(at::Tensor t) noexcept {
     uint32_t input_nr = input_metadata_.size();
-    input_metadata_.emplace_back(t);
+    input_metadata_.emplace_back(std::move(t));
     return input_nr;
   }
 

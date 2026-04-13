@@ -573,8 +573,8 @@ void CppNode<T>::save_variables_to_ctx() {
 }
 
 template <class T>
-void CppNode<T>::set_ctx_grad_fn(const c10::intrusive_ptr<Node>& node) {
-  ctx_.grad_fn_ = node;
+void CppNode<T>::set_ctx_grad_fn(c10::intrusive_ptr<Node> node) {
+  ctx_.grad_fn_ = std::move(node);
 }
 
 } // namespace torch::autograd
