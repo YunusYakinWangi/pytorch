@@ -136,7 +136,6 @@ switcher_version = "main" if not RELEASE else version
 html_static_path = ["_static"]
 html_theme_options = {
     "analytics_id": "GTM-T8XT4PS",
-    "llm_generate_full": "false",
     "canonical_url": "https://docs.pytorch.org/docs/stable/",
     "switcher": {
         "json_url": "https://docs.pytorch.org/docs/pytorch-versions.json",
