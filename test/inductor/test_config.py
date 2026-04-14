@@ -1,5 +1,6 @@
 # Owner(s): ["module: inductor"]
 import math
+import threading
 import unittest
 
 import torch
@@ -389,6 +390,40 @@ class TestInductorConfig(TestCase):
         called = False
         z.grad_fn.apply(torch.tensor(0))
         self.assertFalse(called)
+
+    @requires_gpu
+    @torch._inductor.config.patch(fx_graph_cache=False)
+    def test_config_read_in_new_thread(self):
+        @torch.compile
+        def f(x, y):
+            z = x @ y
+            return z.sin().sum()
+
+        called = False
+
+        def my_pass(graph):
+            nonlocal called
+            called = True
+
+        x, y = (
+            torch.randn(3, 3, device=GPU_TYPE, requires_grad=True),
+            torch.randn(3, 3, device=GPU_TYPE),
+        )
+        z = f(x, y)
+        z.backward()
+        self.assertFalse(called)
+        torch._dynamo.reset()
+        z = f(x, y)
+
+        def call_backwards():
+            with torch._inductor.config.patch(post_grad_custom_pre_pass=my_pass):
+                z.backward()
+
+        t = threading.Thread(target=call_backwards)
+        t.start()
+        t.join()
+
+        self.assertTrue(called)
 
 
 if __name__ == "__main__":

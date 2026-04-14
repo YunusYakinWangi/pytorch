@@ -866,6 +866,9 @@ def _register_logging_hooks_on_whole_graph(
     return unregister_hooks
 
 
+_local = threading.local()
+
+
 def _engine_run_backward(
     t_outputs: Sequence[torch.Tensor | GradientEdge],
     *args: Any,
@@ -875,9 +878,13 @@ def _engine_run_backward(
     if attach_logging_hooks:
         unregister_hooks = _register_logging_hooks_on_whole_graph(t_outputs)
 
-    # Need to save the context so compiler config will be visible in device threads
-    torch._C._stash_obj_in_tls("context", contextvars.copy_context())
-
+    if not hasattr(_local, "context_holder"):
+        # This is used to hold the contextvars context, needed to make compiler config visible in device threads.  We
+        # use a (thread local) single-element list which gets updated for each backwards call to avoid stashing a new
+        # object in the tls every time
+        _local.context_holder = [None]
+        torch._C._stash_obj_in_tls("context", _local.context_holder)
+    _local.context_holder[0] = contextvars.copy_context()
     try:
         return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
             t_outputs, *args, **kwargs
@@ -885,4 +892,4 @@ def _engine_run_backward(
     finally:
         if attach_logging_hooks:
             unregister_hooks()  # type: ignore[possibly-undefined]
-        torch._C._stash_obj_in_tls("context", None)
+        _local.context_holder[0] = None
