@@ -49,7 +49,6 @@ from .hints import (
     ReductionHint,
     TileHint,
     TRITON_MAX_BLOCK,
-    TRITON_MAX_RSPLIT,
 )
 from .runtime_utils import (
     cache_dir,
@@ -3465,9 +3464,11 @@ def _reduction_configs(
 
         # Try to use all SMs with small x
         if triton_meta.get("launch_cooperative_grid", False):
-            # cooperative launches have x <= 16, and are optimized for x_block == 1.
-            x_block = 1
-            outer_r_block = min(rnumel, 512)
+            # Cooperative launches are 2-D and have x <= 16.  Benchmarking indicates
+            # that launching blocks which span the full x-grid is the most performant
+            # approach.
+            x_block = x
+            outer_r_block = max(1, min(rnumel, MAX_R0_BLOCK) // x_block)
         elif x <= 1024:
             x_block = max(min(x // 128, 8), 2)
             outer_r_block = min(rnumel, 64)
@@ -3520,8 +3521,8 @@ def _reduction_configs(
     )
 
     outer_config = make_config(64, 8, register_intensive=register_intensive)
-    # TODO (paulzhan): Test heuristic on AMD and internal testing
-    # for correctness
+
+    # TODO (paulzhan): Test heuristic on AMD and internal testing for correctness
     if not torch.version.hip:
         outer_config = outer_config_opt()
 
@@ -3853,7 +3854,6 @@ def cooperative_reduction(
     inductor_meta,
 ):
     inductor_meta = {} if inductor_meta is None else inductor_meta
-    inductor_meta["max_autotune"] = True  # Testing
     inductor_meta["reduction_hint"] = reduction_hint
     if inductor_meta.get("no_x_dim"):
         size_hints["x"] = 1
@@ -3888,7 +3888,6 @@ def cooperative_reduction(
         # Compensate for XBLOCK > 1.  For very small reductions, this will spawn more
         # threads than needed, but those reductions should complete quickly anyway.
         config.kwargs["RSPLIT"] = split * config.kwargs["XBLOCK"]
-    # TODO(jansel): add more configs in max_autotune
 
     configs = _maybe_filter_configs_for_tma_restrictions(inductor_meta, configs)
     configs = filter_reduction_configs_for_determinism(inductor_meta, configs)
