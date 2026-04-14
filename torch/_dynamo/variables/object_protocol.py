@@ -240,22 +240,24 @@ def vt_getitem(
 def generic_int(tx: "InstructionTranslator", obj: VariableTracker) -> VariableTracker:
     """Mirrors PyNumber_Long (int(x) dispatch).
 
-    https://github.com/python/cpython/blob/v3.13.0/Objects/abstract.c#L1520-L1565
+    https://github.com/python/cpython/blob/v3.13.0/Objects/abstract.c#L1520-L1632
 
-    For constants, constant folding in BuiltinVariable already implements the
-    full PyNumber_Long semantics (str parsing, base argument, etc.), so this
-    only handles the non-constant path.
-
-    Resolution: nb_int slot → nb_index fallback → TypeError.
+    Resolution: nb_int → nb_index → str/bytes/bytearray parsing → TypeError.
     """
+    from .constant import ConstantVariable
+
     obj_type = maybe_get_python_type(obj)
 
     if type_implements_nb_int(obj_type):
         return obj.nb_int_impl(tx)
 
-    # Step 3: fall back to nb_index.
     if type_implements_nb_index(obj_type):
         return obj.nb_index_impl(tx)
+
+    # String/bytes/bytearray parsing fallback.
+    # https://github.com/python/cpython/blob/v3.13.0/Objects/abstract.c#L1598-L1612
+    if obj.is_python_constant() and isinstance(obj.as_python_constant(), (str, bytes, bytearray)):
+        return ConstantVariable.create(int(obj.as_python_constant()))
 
     raise_type_error(
         tx,
@@ -267,23 +269,26 @@ def generic_int(tx: "InstructionTranslator", obj: VariableTracker) -> VariableTr
 def generic_float(tx: "InstructionTranslator", obj: VariableTracker) -> VariableTracker:
     """Mirrors PyNumber_Float (float(x) dispatch).
 
-    https://github.com/python/cpython/blob/v3.13.0/Objects/abstract.c#L1635-L1685
+    https://github.com/python/cpython/blob/v3.13.0/Objects/abstract.c#L1635-L1692
 
-    For constants, constant folding in BuiltinVariable already implements the
-    full PyNumber_Float semantics (str parsing, etc.), so this only handles
-    the non-constant path.
-
-    Resolution: nb_float slot → nb_index fallback → TypeError.
+    Resolution: nb_float → nb_index → str parsing → TypeError.
     """
+    from .constant import ConstantVariable
+
     obj_type = maybe_get_python_type(obj)
 
     if type_implements_nb_float(obj_type):
         return obj.nb_float_impl(tx)
 
-    # Step 3: fall back to nb_index.
     # https://github.com/python/cpython/blob/v3.13.0/Objects/abstract.c#L1674-L1685
     if type_implements_nb_index(obj_type):
         return obj.nb_index_impl(tx)
+
+    # PyFloat_FromString fallback — handles str (and raises TypeError for
+    # everything else).
+    # https://github.com/python/cpython/blob/v3.13.0/Objects/abstract.c#L1691
+    if obj.is_python_constant() and isinstance(obj.as_python_constant(), str):
+        return ConstantVariable.create(float(obj.as_python_constant()))
 
     raise_type_error(
         tx,

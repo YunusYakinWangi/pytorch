@@ -1609,30 +1609,14 @@ class BuiltinVariable(BaseBuiltinVariable):
     def call_int(
         self, tx: "InstructionTranslator", arg: VariableTracker
     ) -> VariableTracker | None:
-        from .object_protocol import generic_int, type_implements_nb_int
-
-        if isinstance(arg, ConstantVariable):
-            # int/float/bool constants: dispatch through nb_int directly.
-            # str/bytes constants: fall through to constant folding which
-            # handles PyNumber_Long's string parsing path.
-            if type_implements_nb_int(type(arg.value)):
-                return generic_int(tx, arg)
-            return None
+        from .object_protocol import generic_int
 
         return generic_int(tx, arg)
 
     def call_float(
         self, tx: "InstructionTranslator", arg: VariableTracker
     ) -> VariableTracker | None:
-        from .object_protocol import generic_float, type_implements_nb_float
-
-        if isinstance(arg, ConstantVariable):
-            # int/float/bool constants: dispatch through nb_float directly.
-            # str constants: fall through to constant folding which handles
-            # PyNumber_Float's string parsing path.
-            if type_implements_nb_float(type(arg.value)):
-                return generic_float(tx, arg)
-            return None
+        from .object_protocol import generic_float
 
         return generic_float(tx, arg)
 
