@@ -2875,7 +2875,8 @@ class _AOTDispatchAutogradFunctionFactory:
 
                 if (
                     torch._C._is_key_in_tls("context")
-                    and (config_ctx := torch._C._get_obj_in_tls("context")) is not None
+                    and (config_ctx := torch._C._get_obj_in_tls("context")[0])
+                    is not None
                 ):
                     impl_fn = functools.partial(config_ctx.run, impl_fn)
 
