@@ -605,10 +605,8 @@ class GlobalContext(Checkpointable[GlobalContextCheckpointState]):
         "grad_enabled",
         "autocast_enabled",
         "autocast_cpu_enabled",
-        "autocast_xpu_enabled",
         "autocast_gpu_dtype",
         "autocast_cpu_dtype",
-        "autocast_xpu_dtype",
         "autocast_cache_enabled",
     }
 
