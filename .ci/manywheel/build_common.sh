@@ -160,6 +160,20 @@ time CMAKE_ARGS=${CMAKE_ARGS[@]} \
     python -m build --wheel --no-isolation --outdir /tmp/$WHEELHOUSE_DIR
 echo "Finished setup.py bdist at $(date)"
 
+# Build rocm-composable-kernel (ck4inductor) wheel for ROCm builds
+if [[ "$DESIRED_CUDA" == *"rocm"* ]]; then
+    echo "Building rocm-composable-kernel (ck4inductor) wheel at $(date)"
+    CK_COMMIT=$(cat .ci/docker/ci_commit_pins/rocm-composable-kernel.txt)
+    git clone --depth 1 https://github.com/ROCm/composable_kernel.git /tmp/ck
+    pushd /tmp/ck
+    git fetch --depth 1 origin "$CK_COMMIT"
+    git checkout "$CK_COMMIT"
+    python -m build --wheel --no-isolation --outdir /tmp/$WHEELHOUSE_DIR
+    popd
+    rm -rf /tmp/ck
+    echo "Finished building rocm-composable-kernel (ck4inductor) wheel at $(date)"
+fi
+
 # Build libtorch packages
 if [[ -n "$BUILD_PYTHONLESS" ]]; then
     # Now build pythonless libtorch
@@ -439,6 +453,10 @@ if [[ -n "$PYTORCH_FINAL_PACKAGE_DIR" ]]; then
         cp /$LIBTORCH_HOUSE_DIR/libtorch*.zip "$PYTORCH_FINAL_PACKAGE_DIR"
     else
         cp /$WHEELHOUSE_DIR/torch*.whl "$PYTORCH_FINAL_PACKAGE_DIR"
+        # Also copy rocm-composable-kernel wheel for ROCm builds
+        if ls /$WHEELHOUSE_DIR/rocm_composable_kernel*.whl >/dev/null 2>&1; then
+            cp /$WHEELHOUSE_DIR/rocm_composable_kernel*.whl "$PYTORCH_FINAL_PACKAGE_DIR"
+        fi
     fi
 fi
 
