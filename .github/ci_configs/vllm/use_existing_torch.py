@@ -3,6 +3,7 @@
 
 import argparse
 import glob
+import os
 import sys
 
 
@@ -35,6 +36,8 @@ def main(argv):
         *glob.glob("requirements/**/*.in", recursive=True),
         "pyproject.toml",
     ):
+        if not os.path.exists(file):
+            continue
         with open(file) as f:
             lines = f.readlines()
         if "torch" in "".join(lines).lower():
