@@ -2098,9 +2098,7 @@ class MMTemplateConfigMixin(GemmMaxAutotuneTemplateConfigHeuristics):
                     grid,
                 )
                 tile_area = cfg.mt.m * cfg.mt.n
-                warp_size = torch.cuda.get_device_properties(
-                    device
-                ).warp_size
+                warp_size = torch.cuda.get_device_properties(device).warp_size
                 mfma_dim = 16
                 max_warps = 2 * selector._hardware.parallel_mi_cu
                 num_warps = min(
