@@ -365,7 +365,7 @@ def post_grad_passes(gm: torch.fx.GraphModule, is_inference: bool):
                 )
             )
 
-    if config.aten_distributed_optimizations.optimize_contention_with_low_contention_collectives:
+    if config.aten_distributed_optimizations.enable_low_contention_collectives:
         from torch._inductor.fx_passes.low_contention_collectives import (
             replace_collectives_with_low_contention,
         )

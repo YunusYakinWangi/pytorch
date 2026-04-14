@@ -72,7 +72,7 @@ def replace_collectives_with_low_contention(
 
         # Size filter: LC barrier overhead dominates for small messages
         if min_bytes > 0:
-            per_rank_bytes = _get_per_rank_bytes(node)
+            per_rank_bytes = _get_per_rank_bytes(node, is_ag)
             if per_rank_bytes is not None and per_rank_bytes < min_bytes:
                 skipped_small += 1
                 log.debug(
@@ -130,7 +130,7 @@ def _enable_symm_mem(group_name):
             warnings.simplefilter("ignore", FutureWarning)
             enable_symm_mem_for_group(group_name)
         return True
-    except (TypeError, RuntimeError) as e:
+    except (TypeError, RuntimeError, KeyError) as e:
         log.debug("LC: cannot enable symm_mem for group %s: %s", group_name, e)  # noqa: G200
         return False
 
@@ -152,12 +152,19 @@ def _replace_collective(node, graph, symm_mem, is_ag, group_name):
     graph.erase_node(node)
 
 
-def _get_per_rank_bytes(node):
+def _get_per_rank_bytes(node, is_ag):
     """Return per-rank message bytes for a collective, or None if unknown."""
     input_val = node.args[0].meta.get("val") if node.args else None
     if not isinstance(input_val, torch.Tensor):
         return None
-    return input_val.nelement() * input_val.element_size()
+    total_bytes = input_val.nelement() * input_val.element_size()
+    if is_ag:
+        return total_bytes
+    # For RS, input is the full tensor; per-rank = total / group_size
+    group_size = node.args[2] if len(node.args) > 2 else None
+    if not isinstance(group_size, int) or group_size <= 0:
+        return None
+    return total_bytes // group_size
 
 
 def _has_compute_bound_overlap(start_node, graph, node_positions):
@@ -230,16 +237,13 @@ def _find_wait_for_collective(start_node):
         if _is_wait_tensor(user):
             return user
 
-    # For _out variants, check users of the out-buffer argument.
+    # For _out variants, check users of the out-buffer keyword argument.
     c10d = torch.ops._c10d_functional
-    out_arg_idx = None
-    if start_node.target is c10d.all_gather_into_tensor_out.default:
-        out_arg_idx = 3
-    elif start_node.target is c10d.reduce_scatter_tensor_out.default:
-        out_arg_idx = 4
-
-    if out_arg_idx is not None and len(start_node.args) > out_arg_idx:
-        out_buf = start_node.args[out_arg_idx]
+    if start_node.target in (
+        c10d.all_gather_into_tensor_out.default,
+        c10d.reduce_scatter_tensor_out.default,
+    ):
+        out_buf = start_node.kwargs.get("out")
         if isinstance(out_buf, torch.fx.Node):
             for user in out_buf.users:
                 if _is_wait_tensor(user):

@@ -888,7 +888,9 @@ def register_symm_mem_lowerings():
         group_name: str,
     ):
         # Use _CollectiveKernel so that _WaitKernel.get_volatile_reads()
-        # can track the input's lifetime through wait_tensor.
+        # can track the input's lifetime through wait_tensor, preventing
+        # the memory planner from reusing the input buffer while the
+        # backend stream is still reading it.
         return _create_out_of_place(
             symm_mem._low_contention_reduce_scatter.default,
             inp,

@@ -1179,12 +1179,9 @@ class aten_distributed_optimizations:
     # fails with a cycle error, and file a bug so the root cause can be fixed.
     overlap_scheduling_autofix_cycles: bool = False
 
-    # Replace NCCL collectives (all_gather, reduce_scatter) with
-    # copy-engine-based symmetric memory low-contention collectives
-    # (symm_mem._low_contention_all_gather/_low_contention_reduce_scatter).
-    # Uses copy engine P2P instead of SM-based NCCL kernels, freeing SMs
-    # for overlapping compute.
-    optimize_contention_with_low_contention_collectives: bool = False
+    # Replace NCCL collectives with low-contention variants that use
+    # copy engine instead of SMs, freeing SMs for overlapping compute.
+    enable_low_contention_collectives: bool = False
 
     # Minimum per-rank bytes for LC replacement. Below this, LC barrier
     # overhead exceeds the benefit. Set to 0 to disable.
