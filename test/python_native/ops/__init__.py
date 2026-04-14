@@ -8,7 +8,6 @@ subdirectories containing DSL operation tests.
 import os
 import sys
 from pathlib import Path
-from typing import List
 
 from torch.testing._internal.opinfo.core import OpInfo
 
