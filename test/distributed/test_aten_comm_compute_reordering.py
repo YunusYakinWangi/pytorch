@@ -254,11 +254,10 @@ graph():
 
             inp = graph.placeholder("inp")
             group_size = graph.placeholder("group_size")
-            group_name = graph.placeholder("group_name")
 
             ag_0_out = graph.call_function(
                 torch.ops._c10d_functional.all_gather_into_tensor.default,
-                args=(inp, group_size, group_name),
+                args=(inp, group_size, "0"),
             )
             ag_0_wait = graph.call_function(
                 torch.ops._c10d_functional.wait_tensor.default,
@@ -266,7 +265,7 @@ graph():
             )
             ag_1_out = graph.call_function(
                 torch.ops._c10d_functional.all_gather_into_tensor.default,
-                args=(ag_0_wait, group_size, group_name),
+                args=(ag_0_wait, group_size, "0"),
             )
             ag_1_wait = graph.call_function(
                 torch.ops._c10d_functional.wait_tensor.default,
@@ -328,7 +327,7 @@ graph():
                 .run(aten_graph_str)
             )
             correct = func(inputs, **self.get_world_trs())
-            self.assertEqual(counters["inductor"]["overlap_scheduling_exposed"], 1)
+            self.assertEqual(counters["inductor"]["overlap_scheduling_exposed"], 2)
             self.assertTrue(same(out_c, correct))
 
     @unittest.skipIf(not HAS_GPU, "Inductor+gpu needs triton and recent GPU arch")
@@ -412,7 +411,7 @@ graph():
             FileCheck().check("all_reduce").check_same("arg0_1").check(
                 "all_reduce"
             ).check_same("arg1_1").check("all_reduce").check_same("arg2_1").run(code)
-            self.assertEqual(counters["inductor"]["overlap_scheduling_exposed"], 3)
+            self.assertEqual(counters["inductor"]["overlap_scheduling_exposed"], 6)
             # these have no overlap opportunities
             self.assertEqual(counters["inductor"]["overlap_scheduling_bad_exposed"], 0)
 
