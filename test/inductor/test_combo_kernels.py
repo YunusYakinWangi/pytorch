@@ -1339,6 +1339,7 @@ class ComboKernelTestsMaxAutotune(TestCase):
         self.assertEqual(found_hints["reduction_hint_0"], "INNER")
         self.assertEqual(found_hints["reduction_hint_1"], "OUTER")
 
+    @requires_gpu_and_triton
     @torch._inductor.config.patch("combo_kernel_autotune_grouping", True)
     def test_combo_autotune_grouping(self):
         def fn(a, b, c, d):
