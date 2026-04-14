@@ -1,5 +1,6 @@
 # mypy: allow-untyped-defs
 
+import contextlib
 import functools
 import logging
 
@@ -21,6 +22,17 @@ def _dummy_wrapper(fn):
         return fn(*args, **kwargs)
 
     return inner
+
+
+@contextlib.contextmanager
+def _disable_remat_for_regional_subcompile():
+    # In torch.compile, regional_inductor subcompiles run after the enclosing
+    # non-strict full graph has already been partitioned, so any graph-SAC
+    # remat pass has already run before we reach this nested compile.
+    # Rerunning remat here can see stage-2-reordered backward nodes that
+    # violate remat's contiguous-backward-region assumption.
+    with torch._functorch.config.patch(remat_using_tags_for_fwd_loss_bwd_graph=False):
+        yield
 
 
 def _compile_submod(gm, prefix):
@@ -73,7 +85,10 @@ def _compile_submod(gm, prefix):
                         f"Available config keys can be found in torch._inductor.config"
                     )
 
-            with inductor_config.patch(inductor_options):
+            with (
+                inductor_config.patch(inductor_options),
+                _disable_remat_for_regional_subcompile(),
+            ):
                 compiled_fn = torch._inductor.standalone_compile(
                     submod,
                     fake_inputs,
