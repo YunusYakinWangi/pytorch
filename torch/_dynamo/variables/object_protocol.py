@@ -22,6 +22,7 @@ from .. import graph_break_hints
 from ..exc import (
     handle_observed_exception,
     ObservedTypeError,
+    raise_observed_exception,
     raise_type_error,
     unimplemented,
 )
@@ -246,6 +247,12 @@ def generic_int(tx: "InstructionTranslator", obj: VariableTracker) -> VariableTr
     """
     from .constant import ConstantVariable
 
+    # Fast path for int (sub)class instances — mirrors PyLong_Check at the
+    # top of PyNumber_Long (abstract.c:1531). Avoids infinite recursion for
+    # int subclasses like IntEnum whose __int__ calls int() again.
+    if obj.is_python_constant() and isinstance(obj.as_python_constant(), int):
+        return ConstantVariable.create(int(obj.as_python_constant()))
+
     obj_type = maybe_get_python_type(obj)
 
     if type_implements_nb_int(obj_type):
@@ -259,7 +266,10 @@ def generic_int(tx: "InstructionTranslator", obj: VariableTracker) -> VariableTr
     if obj.is_python_constant() and isinstance(
         obj.as_python_constant(), (str, bytes, bytearray)
     ):
-        return ConstantVariable.create(int(obj.as_python_constant()))
+        try:
+            return ConstantVariable.create(int(obj.as_python_constant()))
+        except ValueError as e:
+            raise_observed_exception(ValueError, tx, args=[str(e)])
 
     raise_type_error(
         tx,
@@ -277,6 +287,12 @@ def generic_float(tx: "InstructionTranslator", obj: VariableTracker) -> Variable
     """
     from .constant import ConstantVariable
 
+    # Fast path: if the value is already a float constant, return it directly.
+    # Mirrors PyFloat_CheckExact fast path at the top of PyNumber_Float
+    # (abstract.c:1641-1643).
+    if obj.is_python_constant() and isinstance(obj.as_python_constant(), float):
+        return ConstantVariable.create(float(obj.as_python_constant()))
+
     obj_type = maybe_get_python_type(obj)
 
     if type_implements_nb_float(obj_type):
@@ -290,7 +306,10 @@ def generic_float(tx: "InstructionTranslator", obj: VariableTracker) -> Variable
     # everything else).
     # https://github.com/python/cpython/blob/v3.13.0/Objects/abstract.c#L1691
     if obj.is_python_constant() and isinstance(obj.as_python_constant(), str):
-        return ConstantVariable.create(float(obj.as_python_constant()))
+        try:
+            return ConstantVariable.create(float(obj.as_python_constant()))
+        except ValueError as e:
+            raise_observed_exception(ValueError, tx, args=[str(e)])
 
     raise_type_error(
         tx,
