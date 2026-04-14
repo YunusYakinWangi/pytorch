@@ -843,7 +843,7 @@ cpp_fake_make_fx_failures = {
     xfail('equal'),
     # empty
     skip('new_empty'),
-    skip('new_empty_strided'),
+    # skip('new_empty_strided'),
     skip('empty_like'),
     skip('empty'),
     skip('empty_permuted'),
@@ -946,16 +946,6 @@ def _make_fx_check_cpp_fake(func, args, kwargs, assert_close,
     assert_close(result, expected, msg=msg)
 
 
-# provide decomp tables for now
-_cpp_fake_decomps = {
-    k: v for k, v in decomposition_table.items()
-    if k in {
-        aten._to_copy.default,
-        aten._softmax.default,
-        aten._log_softmax.default,
-    }
-}
-
 # HOPs whose user-facing wrappers (torch.cond, etc.) call torch.compile internally,
 # creating a Python FakeTensorMode that conflicts with C++ fake mode.
 # These are tested directly via internal ops in TestCppFakeProxyTensor.
@@ -974,15 +964,15 @@ class TestCppFakeProxyTensorOpInfo(TestCase):
     @skipOps('TestCppFakeProxyTensorOpInfo', 'test_make_fx_exhaustive',
              cpp_fake_make_fx_failures | cpp_fake_only_real_failures)
     def test_make_fx_exhaustive(self, device, dtype, op):
-        _test_make_fx_helper_cpp_fake(self, device, dtype, op,
-                                      decomp_table=_cpp_fake_decomps)
+        print(f"\n[cpp_fake exhaustive] {op.name}.{op.variant_test_name or 'default'}")
+        _test_make_fx_helper_cpp_fake(self, device, dtype, op)
 
     @ops(op_db + filtered_hop_db + custom_op_db, allowed_dtypes=(torch.float,))
     @skipOps('TestCppFakeProxyTensorOpInfo', 'test_make_fx_fake_exhaustive',
              cpp_fake_make_fx_failures | cpp_fake_only_fake_failures)
     def test_make_fx_fake_exhaustive(self, device, dtype, op):
-        _test_make_fx_helper_cpp_fake(self, device, dtype, op,
-                                      decomp_table=_cpp_fake_decomps)
+        print(f"\n[cpp_fake fake_exhaustive] {op.name}.{op.variant_test_name or 'default'}")
+        _test_make_fx_helper_cpp_fake(self, device, dtype, op)
 
 
 only_for = ("cpu",)
