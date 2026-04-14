@@ -81,6 +81,7 @@ def run_and_get_aten_graph(fn, *inputs):
 def get_patches():
     return {
         "aten_distributed_optimizations.custom_runtime_estimation": estimate_aten_runtime,
+        "aten_distributed_optimizations.enable_overlap_scheduling": True,
         "reorder_for_locality": False,
         "triton.native_matmul": False,
         "reorder_for_compute_comm_overlap_passes": [],
