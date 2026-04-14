@@ -358,9 +358,7 @@ def _reduction_single_dim_strategy(
                 out_d = d
             else:
                 out_d = d - sum(1 for rd in reduce_dims if rd < d)
-            strategies.append(
-                [_ShardingPlaceholder(out_d), _ShardingPlaceholder(d)]
-            )
+            strategies.append([_ShardingPlaceholder(out_d), _ShardingPlaceholder(d)])
 
     # Partial propagation: Partial(reduction_op) input -> Partial(reduction_op) output.
     # Skip for NormReduction: the old common_reduction_strategy doesn't propagate
@@ -549,7 +547,8 @@ def _shard_non_reduction_dim(
             continue
         out_d = d if keep_dim or d < dim else d - 1
         strategies.append(
-            [_ShardingPlaceholder(out_d)] * n_outputs + [_ShardingPlaceholder(d)]  # pyrefly: ignore[bad-argument-type]
+            [_ShardingPlaceholder(out_d)] * n_outputs
+            + [_ShardingPlaceholder(d)]  # pyrefly: ignore[bad-argument-type]
         )
     return strategies
 
