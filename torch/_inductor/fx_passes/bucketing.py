@@ -27,7 +27,9 @@ logger.setLevel(logging.INFO)
 
 overlap_log = torch._logging.getArtifactLogger(__name__, "overlap")
 
-BucketMode: TypeAlias = Literal["default", "custom_ops", "custom_ops_multidtype"]
+BucketMode: TypeAlias = Literal[
+    "default", "custom_ops", "custom_ops_multidtype", "coalesced"
+]
 
 
 def _default_bucket_mode() -> BucketMode:
@@ -101,37 +103,46 @@ def _compute_foreach_groups(
     return result
 
 
-def _schedulable_wait_node(node: torch.fx.Node) -> bool:
-    """
-    Add additional check on if the wait node is schedulable
-    We should not schedule a fx node that is:
-        1. wait on a collective whose target is not an OpOverload
-        2. wait on a non-NCCL communication node
-        3. wait on a collective with a symbolic (non-string) group_name
+def _get_collective_node_from_wait(node: torch.fx.Node) -> torch.fx.Node | None:
+    """Given a wait node, return the collective it waits on.
+
+    Handles both standard (wait -> collective) and coalesced
+    (wait -> getitem -> coalesced_collective) patterns.
+    Returns None if the node is not a wait on a recognized NCCL collective,
+    or if the collective has a symbolic (non-string) group_name.
     """
     if not is_wait_tensor(node):
-        return False
-    assert isinstance(node.args[0], torch.fx.Node)
-    coll_node = node.args[0]
-    target = coll_node.target
-    if not isinstance(target, torch._ops.OpOverload):
-        return False
-    if coll_node.op != "call_function":
-        return False
-    coll: NCCL_COLL = get_collective_type_from_kernel_name(target.name())
+        return None
+    arg = node.args[0]
+    assert isinstance(arg, torch.fx.Node)
+    if arg.op != "call_function":
+        return None
+    if arg.target is operator.getitem:
+        assert isinstance(arg.args[0], torch.fx.Node)
+        arg = arg.args[0]
+        if arg.op != "call_function":
+            return None
+    if not isinstance(arg.target, torch._ops.OpOverload):
+        return None
+    coll: NCCL_COLL = get_collective_type_from_kernel_name(arg.target.name())
     if coll == NCCL_COLL.UNSUPPORTED:
-        return False
+        return None
     # Skip collectives with symbolic group_name (e.g. flattened submeshes)
     # — runtime estimation needs to resolve the group to get its size.
     opt = normalize_function(
-        target,
-        args=coll_node.args,
-        kwargs=coll_node.kwargs,
+        arg.target,
+        args=arg.args,
+        kwargs=arg.kwargs,
         normalize_to_only_use_kwargs=True,
     )
     if opt is None or not isinstance(opt[1].get("group_name"), str):
-        return False
-    return True
+        return None
+    return arg
+
+
+def _schedulable_wait_node(node: torch.fx.Node) -> bool:
+    """Check if this wait node is schedulable (waits on a recognized NCCL collective)."""
+    return _get_collective_node_from_wait(node) is not None
 
 
 def _populate_node_meta(
@@ -298,7 +309,7 @@ def get_collective_type(node: torch.fx.Node) -> str:
 
 
 def get_full_bucket_key(
-    node: torch.fx.Node, bucket_mode: BucketMode
+    node: torch.fx.Node, bucket_mode: BucketMode | None
 ) -> tuple[str, Any]:
     """Get the full bucket key including collective type and bucket key."""
     return (get_collective_type(node), bucket_key(node, mode=bucket_mode))
@@ -647,6 +658,29 @@ def reduce_scatter_merge_fn_to_trace(
     new_out_flat = new_rs_out.split(new_out_numels, 0)
     new_outs = [x.view(s) for x, s in zip(new_out_flat, new_out_sizes)]
     return new_outs
+
+
+def reduce_scatter_merge_fn_coalesced(
+    rs_ins: list[torch.Tensor],
+    group_size: int,
+    group_name: str,
+    reduce_op: str,
+    reduce_dtype: torch.dtype,
+    device: torch.device,
+) -> list[torch.Tensor]:
+    """Bucketed RS via NCCL's coalesced API (ncclGroupStart/End).
+
+    Avoids cat-ing inputs into one buffer; instead passes the tensor list
+    directly to reduce_scatter_tensor_coalesced for zero-copy batching.
+    """
+    rs_ins_flat = [x.view(-1) for x in rs_ins]
+    new_out_sizes = [(x.shape[0] // group_size,) + x.shape[1:] for x in rs_ins]
+
+    rs_outs = torch.ops._c10d_functional.reduce_scatter_tensor_coalesced(
+        rs_ins_flat, reduce_op, group_size, group_name
+    )
+    rs_outs = [torch.ops.c10d_functional.wait_tensor(o) for o in rs_outs]
+    return [o.view(s) for o, s in zip(rs_outs, new_out_sizes)]
 
 
 def all_reduce_merge_fn_to_trace(
@@ -1117,7 +1151,9 @@ def merge_reduce_scatter_bucket(
 
     # Choose merge function based on mode
     rs_merge_fn = reduce_scatter_merge_fn_to_trace
-    if mode and "custom_ops" in mode:
+    if mode == "coalesced":
+        rs_merge_fn = reduce_scatter_merge_fn_coalesced
+    elif mode and "custom_ops" in mode:
         rs_merge_fn = reduce_scatter_merge_fn_to_trace_custom_ops
 
     # Process bucket with lazy input collection
@@ -1207,7 +1243,9 @@ def merge_all_gather_bucket(
 
     # Choose merge function based on mode
     ag_merge_fn = all_gather_merge_fn_to_trace
-    if mode and "custom_ops" in mode:
+    if mode == "coalesced":
+        logger.info("coalesced bucket_mode not supported for all_gather, using default")
+    elif mode and "custom_ops" in mode:
         ag_merge_fn = all_gather_merge_fn_to_trace_custom_ops  # type: ignore[assignment]
 
     # Process bucket with lazy input collection

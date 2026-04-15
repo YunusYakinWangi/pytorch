@@ -1807,7 +1807,10 @@ class TestManualOverlapBucketing(TestComputeCommReorderingMultiProc):
 
     @unittest.skipIf(not HAS_GPU, "Inductor+gpu needs triton and recent GPU arch")
     @torch._inductor.config.patch(
-        {"aten_distributed_optimizations.bucket_mode": "custom_ops_multidtype"}
+        {
+            "aten_distributed_optimizations.bucket_mode": "custom_ops_multidtype",
+            "aten_distributed_optimizations.enable_overlap_scheduling": False,
+        }
     )
     def test_manual_bucketing_reordering_pass_reduce_scatter_separate_buckets(self):
         self._run_manual_bucketing_test(
