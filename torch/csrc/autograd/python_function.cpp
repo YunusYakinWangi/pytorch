@@ -1,5 +1,7 @@
 #include <torch/csrc/autograd/python_function.h>
 
+#include <atomic>
+
 #include <ATen/ATen.h>
 #include <ATen/SequenceNumber.h>
 #include <c10/util/irange.h>
@@ -22,7 +24,6 @@
 #include <torch/csrc/autograd/python_anomaly_mode.h>
 #include <torch/csrc/autograd/python_cpp_function.h>
 #include <torch/csrc/autograd/python_hook.h>
-#include <torch/csrc/autograd/python_variable.h>
 #include <torch/csrc/autograd/saved_variable.h>
 #include <torch/csrc/autograd/utils/wrap_outputs.h>
 #include <torch/csrc/dynamo/compiled_autograd.h>
@@ -161,11 +162,42 @@ auto PyNode::apply(variable_list&& inputs) -> variable_list {
 
   // Massage a C++ variable_list into a Python arguments tuple
   THPObjectPtr pyInputs(to_py_args(inputs, &_device_guard));
+  inputs.clear();
 
-  THPObjectPtr apply_fn(PyObject_GetAttrString(obj, "apply"));
-  if (!apply_fn)
-    throw_python_error();
-  THPObjectPtr r(PyObject_CallObject(apply_fn, pyInputs.get()));
+  THPObjectPtr r;
+  if (py_fn->boxed_grads_call) {
+    // Move grad tensors from the immutable args tuple into a plain list
+    // and call apply_boxed instead of apply. This lets backward pop/clear
+    // individual grads to free memory mid-execution, because the mutable
+    // list (not the C++ tuple) is the only container holding grad refs.
+    auto num_inputs = PyTuple_GET_SIZE(pyInputs.get());
+    THPObjectPtr gradsList(PyList_New(num_inputs));
+    if (!gradsList)
+      throw_python_error();
+    for (Py_ssize_t i = 0; i < num_inputs; i++) {
+      PyObject* item = PyTuple_GET_ITEM(pyInputs.get(), i);
+      Py_INCREF(item);
+      PyList_SET_ITEM(gradsList.get(), i, item);
+    }
+    // Release the tuple so its refs to individual grads are dropped
+    pyInputs = nullptr;
+
+    THPObjectPtr boxedArgs(PyTuple_New(1));
+    if (!boxedArgs)
+      throw_python_error();
+    PyTuple_SET_ITEM(boxedArgs.get(), 0, gradsList.release());
+
+    THPObjectPtr apply_fn(PyObject_GetAttrString(obj, "apply_boxed"));
+    if (!apply_fn)
+      throw_python_error();
+    r = THPObjectPtr(PyObject_CallObject(apply_fn, boxedArgs.get()));
+  } else {
+    THPObjectPtr apply_fn(PyObject_GetAttrString(obj, "apply"));
+    if (!apply_fn)
+      throw_python_error();
+    r = THPObjectPtr(PyObject_CallObject(apply_fn, pyInputs.get()));
+  }
+  pyInputs = nullptr;
   if (!r)
     throw_python_error();
   ensure_tuple(r);
@@ -772,54 +804,14 @@ static void _wrap_outputs(
     } else {
       if (is_executable) {
         // If one of the grad outputs is undefined, a correctly-shaped zeros
-        // should be used instead. To construct these for NJT or DTensor,
-        // zeros_like() must be used to preserve the tensor type. Failing to
-        // do this may result in undefined errors depending on the tensor
-        // subclass's behavior. DTensor will error out due to mixing DTensor
-        // and torch.Tensor in the following computation.
-        // Note: We specifically check for DTensor rather than all tensor
-        // subclasses to avoid affecting other subclasses that may not need
-        // this behavior.
+        // should be used instead. To construct these for NJT, zeros_like() must
+        // be used until we have factory function support.
         bool is_differentiable =
             (non_differentiable.count(wrapped_output->unsafeGetTensorImpl()) ==
                  0 &&
              isDifferentiableType(wrapped_output->scalar_type()));
-        bool output_is_dtensor = is_dtensor(obj);
-        bool use_zeros_like = is_differentiable && num_outputs > 1 &&
-            (wrapped_output->is_nested() || output_is_dtensor);
-        // Only warn if materialize_grads is true. If the user has already
-        // called ctx.set_materialize_grads(False), gradients won't be
-        // materialized anyway, so no need to warn.
-        if (use_zeros_like && output_is_dtensor && self->materialize_grads) {
-          // Strip "Backward" suffix from name for clearer user messaging.
-          // The autograd function's backward class is named "<Name>Backward",
-          // but users define "<Name>" in their code.
-          std::string node_name = cdata->name();
-          const std::string suffix = "Backward";
-          if (node_name.size() >= suffix.size() &&
-              node_name.compare(
-                  node_name.size() - suffix.size(), suffix.size(), suffix) ==
-                  0) {
-            node_name = node_name.substr(0, node_name.size() - suffix.size());
-          }
-          TORCH_WARN_ONCE(
-              "Autograd is calling zeros_like() on a DTensor to materialize "
-              "the gradient for an unused output in autograd.Function '",
-              node_name,
-              "'. This preserves the DTensor type but may have performance "
-              "implications. To avoid this:\n"
-              "(1) In eager mode (i.e., the function name is not "
-              "'CompiledFunction'): One of the "
-              "autograd.Function's outputs is unused. Call "
-              "ctx.set_materialize_grads(False) in forward() and handle None "
-              "gradients in backward(). Note that if the function name "
-              "is ApplyTemplate, turn off torch.compile and rerun to see "
-              "the actual name.\n"
-              "(2) In compile mode: One of the compiled region's outputs is "
-              "unused. Call detach() on unused outputs that are returned from "
-              "the compiled region, whether explicitly or implicitly (e.g., "
-              "saved as a global).");
-        }
+        bool use_zeros_like =
+            is_differentiable && num_outputs > 1 && wrapped_output->is_nested();
         self->output_info.emplace_back(wrapped_output.value(), use_zeros_like);
       }
       PyTuple_SetItem(outputs, i, THPVariable_Wrap(wrapped_output.value()));
@@ -1138,6 +1130,7 @@ void _trace_post_record(
   }
 
   std::vector<torch::jit::Value*> trace_outputs;
+  trace_outputs.reserve(static_cast<size_t>(std::max(0, num_outputs)));
   for (const auto i : c10::irange(num_outputs)) {
     PyObject* obj = PyTuple_GET_ITEM(output_objects, i);
     if (THPVariable_Check(obj)) {
@@ -1166,9 +1159,10 @@ void _trace_post_record(
   // to the original tuple type.
   if (!unpack_output) {
     std::vector<at::TypePtr> new_tuple_values;
+    new_tuple_values.reserve(num_outputs);
     for (const auto i : c10::irange(num_outputs)) {
       auto ptr = node->outputs()[i]->type();
-      new_tuple_values.push_back(ptr);
+      new_tuple_values.push_back(std::move(ptr));
     }
     auto tuple_type = at::TupleType::create(std::move(new_tuple_values));
     // The i-th tuple element receives a new tensor type with element type and
@@ -1343,11 +1337,14 @@ THPObjectPtr make_ctx_input_output_tuple(
   return result;
 }
 
-static PyObject* THPFunction_setup_context = nullptr;
-
 static PyObject* get_base_setup_context() {
-  if (THPFunction_setup_context != nullptr) {
-    return THPFunction_setup_context;
+  // NOTE: THPFunction_setup_context is intentionally leaked and never freed.
+  static std::atomic<PyObject*> THPFunction_setup_context = nullptr;
+
+  PyObject* setup_context =
+      THPFunction_setup_context.load(std::memory_order_acquire);
+  if (setup_context != nullptr) {
+    return setup_context;
   }
 
   auto module = THPObjectPtr(PyImport_ImportModule("torch.autograd.function"));
@@ -1361,11 +1358,17 @@ static PyObject* get_base_setup_context() {
 
   // setup_context gets "leaked" - we return a new reference and hold onto it
   // forever.
-  auto setup_context = PyObject_GetAttrString(function, "setup_context");
+  setup_context = PyObject_GetAttrString(function, "setup_context");
   if (!setup_context)
     return nullptr;
-  THPFunction_setup_context = setup_context;
-  return THPFunction_setup_context;
+
+  PyObject* expected = nullptr;
+  if (!THPFunction_setup_context.compare_exchange_strong(
+          expected, setup_context, std::memory_order_acq_rel)) {
+    Py_DECREF(setup_context);
+    return expected;
+  }
+  return setup_context;
 }
 
 PyObject* THPFunction_apply(PyObject* cls, PyObject* inputs) {
@@ -1427,6 +1430,16 @@ PyObject* THPFunction_apply(PyObject* cls, PyObject* inputs) {
       "clear_saved_tensors_on_access must be a bool, got ",
       Py_TYPE(clear_attr.get())->tp_name);
   ctx->clear_saved_tensors_on_access = clear_attr.get() == Py_True;
+
+  // Get boxed_grads_call from the Function class
+  THPObjectPtr boxed_attr(PyObject_GetAttrString(cls, "boxed_grads_call"));
+  TORCH_CHECK(
+      boxed_attr, "autograd.Function is missing boxed_grads_call attribute");
+  TORCH_CHECK(
+      PyBool_Check(boxed_attr.get()),
+      "boxed_grads_call must be a bool, got ",
+      Py_TYPE(boxed_attr.get())->tp_name);
+  ctx->boxed_grads_call = boxed_attr.get() == Py_True;
 
   // autograd.Function may optionally override a setup_context staticmethod.
   // In this case, autograd.Function.forward does NOT accept a ctx object.
