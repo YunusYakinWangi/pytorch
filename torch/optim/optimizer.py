@@ -135,12 +135,12 @@ def _disable_dynamo_if_unsupported(
                 and has_state_steps
                 and (arg := args[state_steps_ind])
                 and isinstance(arg, Sequence)
-                and arg[0].is_cuda
+                and arg[0].device.type in {"cuda", "xpu"}
                 or (
                     "state_steps" in kwargs
                     and (kwarg := kwargs["state_steps"])
                     and isinstance(kwarg, Sequence)
-                    and kwarg[0].is_cuda
+                    and kwarg[0].device.type in {"cuda", "xpu"}
                 )
             ):
                 return disabled_func(*args, **kwargs)
@@ -462,7 +462,7 @@ class Optimizer:
         # Determine available accelerator device
         accelerator = torch.accelerator.current_accelerator()
 
-        if accelerator and torch.accelerator.is_graph_available():
+        if accelerator and accelerator.index in {"cuda", "xpu"}:
             capturing = torch.accelerator.current_stream().is_capturing()
 
             if capturing and not all(
