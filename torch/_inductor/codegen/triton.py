@@ -5344,10 +5344,7 @@ class TritonKernel(SIMDKernel[TritonCSEVariable]):
                 )
 
         elif self.inside_reduction and len(loop_trees) > 0:
-            peeling = (
-                self._unmasked_line_map is not None
-                and not self.pointer_advancements.get(loop_trees[0].symt)
-            )
+            peeling = self._unmasked_line_map is not None
             if peeling:
                 self._emit_unmasked_reduction_loop(loop_trees)
             self._emit_reduction_loops(loop_trees, peeling=peeling)

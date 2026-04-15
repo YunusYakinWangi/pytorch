@@ -268,11 +268,7 @@ class TestLoopPeeling(InductorTestCase):
         result, codes = run_and_get_code(compiled, *inputs)
         self.assertIn("r0_numel_aligned", "\n".join(codes))
         expected = fn(*inputs)
-        if isinstance(expected, tuple):
-            for r, e in zip(result, expected):
-                torch.testing.assert_close(r, e)
-        else:
-            torch.testing.assert_close(result, expected)
+        torch.testing.assert_close(result, expected)
 
     def test_inner_reduction(self):
         def fn(x):
