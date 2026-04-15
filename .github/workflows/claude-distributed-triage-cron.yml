@@ -27,11 +27,18 @@ jobs:
       actions: write
       contents: read
       issues: write
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      - name: Configure AWS credentials via OIDC
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: arn:aws:iam::308535385114:role/gha_workflow_claude_code
+          aws-region: us-east-1
 
       - name: "Phase 1: Mark already-triaged issues (no LLM)"
         env:
@@ -98,6 +105,22 @@ jobs:
               else
                 echo "Adding 'ptd-bot-triaged' to #${ISSUE_NUM} (already has module label in: ${LABELS})"
                 gh issue edit "$ISSUE_NUM" --repo pytorch/pytorch --add-label "ptd-bot-triaged"
+
+                # Fetch title and append to daily manifest
+                TITLE=$(gh issue view "$ISSUE_NUM" --repo pytorch/pytorch --json title --jq '.title')
+                TODAY=$(date -u +%Y-%m-%d)
+                MANIFEST_KEY="distributed-triage-logs/manifest-${TODAY}.jsonl"
+                ENTRY=$(jq -n \
+                  --arg issue "$ISSUE_NUM" \
+                  --arg title "$TITLE" \
+                  --arg labels "$LABELS" \
+                  --arg source "phase1-auto" \
+                  --arg timestamp "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                  '{issue: ($issue | tonumber), title: $title, labels: ($labels | split(",")), source: $source, timestamp: $timestamp}')
+                MANIFEST_FILE=$(mktemp)
+                aws s3 cp "s3://ossci-raw-job-status/${MANIFEST_KEY}" "$MANIFEST_FILE" 2>/dev/null || true
+                echo "$ENTRY" >> "$MANIFEST_FILE"
+                aws s3 cp "$MANIFEST_FILE" "s3://ossci-raw-job-status/${MANIFEST_KEY}"
               fi
             fi
           done <<< "$ISSUES"
