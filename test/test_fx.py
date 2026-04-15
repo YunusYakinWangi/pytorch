@@ -28,8 +28,10 @@ from torch.testing import FileCheck
 from torch.testing._internal.common_methods_invocations import op_db
 from torch.testing._internal.common_device_type import ops, onlyCPU, instantiate_device_type_tests
 import torch.utils._pytree as pytree
+import torch.fx as fx
 import torch.fx._pytree as fx_pytree
 from torch.fx import symbolic_trace, Proxy, Node, GraphModule, Interpreter, Tracer, Transformer, Graph, wrap, PH, CodeGen
+from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.node import Target, Argument, ArgumentT, _format_arg
 from torch.fx.passes import shape_prop
 from torch.fx.immutable_collections import immutable_dict, immutable_list
@@ -74,6 +76,7 @@ from torch.testing._internal.common_utils import (
     IS_WINDOWS,
     run_tests,
     skipIfTorchDynamo,
+    TestCase,
 )
 from torch.testing._internal.jit_utils import JitTestCase
 
@@ -5480,18 +5483,6 @@ class TestVisionTracing(JitTestCase):
 if HAS_TORCHVISION:
     TestVisionTracing.generate_tests()
 
-if __name__ == "__main__":
-    run_tests()
-# Owner(s): ["module: fx"]
-
-import unittest
-
-import torch
-import torch.fx as fx
-from torch.fx.experimental.proxy_tensor import make_fx
-from torch.testing._internal.common_utils import run_tests, TestCase
-
-
 class TestSymIntResolution(TestCase):
     """Tests for automatic SymInt-to-Node resolution in FX Graph."""
 
@@ -5629,12 +5620,5 @@ class TestSymIntResolution(TestCase):
         self.assertEqual(ph.op, "placeholder")
 
 
-def raise_on_run_directly(filename: str):
-    raise RuntimeError(
-        f"This test file should not be run directly. "
-        f"Run it through {filename}."
-    )
-
-
 if __name__ == "__main__":
-    raise_on_run_directly("test/test_fx.py")
+    run_tests()
