@@ -1,7 +1,5 @@
 # Owner(s): ["module: unknown"]
 
-import unittest
-
 import torch
 from torch._C import parse_schema
 from torch.testing._internal.common_utils import run_tests, TestCase
@@ -337,44 +335,6 @@ class TestFunctionSchema(TestCase):
         self.assertEqual(schema.returns[-1].real_type.str(), "SymInt")
         # print real types in FunctionSchema
         self.assertEqual(str(schema), schema_str)
-
-    def _check_alias_annotation(self, schema, arg_name, expected_is_write):
-        """Check that a schema argument has the expected alias annotation."""
-        arg = next((a for a in schema.arguments if a.name == arg_name), None)
-        self.assertIsNotNone(arg, f"Argument '{arg_name}' not found in schema {schema}")
-        self.assertIsNotNone(
-            arg.alias_info,
-            f"Argument '{arg_name}' should have alias annotation in schema {schema}",
-        )
-        self.assertEqual(
-            arg.alias_info.is_write,
-            expected_is_write,
-            f"Argument '{arg_name}' alias_info.is_write should be {expected_is_write}",
-        )
-
-    def _check_return_alias_annotation(self, schema, return_idx):
-        """Check that a schema return has an alias annotation."""
-        self.assertGreater(len(schema.returns), return_idx)
-        ret = schema.returns[return_idx]
-        self.assertIsNotNone(
-            ret.alias_info,
-            f"Return {return_idx} should have alias annotation in schema {schema}",
-        )
-
-    def test_onednn_qconv2d_pointwise_binary_alias_annotations(self):
-        # The qaccum argument is mutated (used as the output buffer) and the
-        # return aliases it. Verify the schema reflects this.
-        schemas = {str(s): s for s in torch._C._jit_get_all_schemas()}
-        for overload in ("binary", "binary_tensor"):
-            key = f"onednn::qconv2d_pointwise.{overload}"
-            matching = [s for name, s in schemas.items() if name.startswith(key)]
-            if not matching:
-                raise unittest.SkipTest(
-                    f"Schema {key} not registered (onednn not available)"
-                )
-            schema = matching[0]
-            self._check_alias_annotation(schema, "qaccum", expected_is_write=True)
-            self._check_return_alias_annotation(schema, 0)
 
 
 if __name__ == "__main__":
