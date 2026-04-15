@@ -462,7 +462,7 @@ class Optimizer:
         # Determine available accelerator device
         accelerator = torch.accelerator.current_accelerator()
 
-        if accelerator and accelerator.index in {"cuda", "xpu"}:
+        if accelerator and accelerator.type in {"cuda", "xpu"}:
             capturing = torch.accelerator.current_stream().is_capturing()
 
             if capturing and not all(
