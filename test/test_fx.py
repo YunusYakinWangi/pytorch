@@ -28,8 +28,10 @@ from torch.testing import FileCheck
 from torch.testing._internal.common_methods_invocations import op_db
 from torch.testing._internal.common_device_type import ops, onlyCPU, instantiate_device_type_tests
 import torch.utils._pytree as pytree
+import torch.fx as fx
 import torch.fx._pytree as fx_pytree
 from torch.fx import symbolic_trace, Proxy, Node, GraphModule, Interpreter, Tracer, Transformer, Graph, wrap, PH, CodeGen
+from torch.fx.experimental.proxy_tensor import make_fx
 from torch.fx.node import Target, Argument, ArgumentT, _format_arg
 from torch.fx.passes import shape_prop
 from torch.fx.immutable_collections import immutable_dict, immutable_list
@@ -74,6 +76,7 @@ from torch.testing._internal.common_utils import (
     IS_WINDOWS,
     run_tests,
     skipIfTorchDynamo,
+    TestCase,
 )
 from torch.testing._internal.jit_utils import JitTestCase
 
@@ -5479,6 +5482,176 @@ class TestVisionTracing(JitTestCase):
 
 if HAS_TORCHVISION:
     TestVisionTracing.generate_tests()
+
+class TestSymIntResolution(TestCase):
+    """Tests for SymInt-to-Node resolution in FX Graph."""
+
+    def _make_symbolic_graph(self):
+        """Create a fresh Graph with a placeholder carrying symbolic metadata.
+
+        Uses make_fx to get real SymInts, then creates a clean graph with
+        just one placeholder whose meta has symbolic sizes.
+        """
+        x = torch.randn(100, 50)
+        gm = make_fx(lambda x: x * 2, tracing_mode="symbolic")(x)
+        src_ph = next(n for n in gm.graph.nodes if n.op == "placeholder")
+        graph = fx.Graph()
+        ph = graph.placeholder("x")
+        ph.meta = src_ph.meta.copy()
+        return graph, ph
+
+    def test_auto_resolve_symint_in_call_function(self):
+        """Passing raw SymInt to call_function auto-converts it to a Node."""
+        graph, ph = self._make_symbolic_graph()
+        s0 = ph.meta["val"].size(0)
+
+        node = graph.call_function(torch.ops.aten.empty.memory_format, ([s0],))
+        self.assertIsInstance(node, fx.Node)
+        # The s0 should have been converted to a sym_size_int node
+        size_list = node.args[0]
+        self.assertIsInstance(size_list[0], fx.Node)
+        self.assertEqual(size_list[0].target, torch.ops.aten.sym_size.int)
+
+    def test_symint_to_node_simple(self):
+        """graph.symint_to_node() converts a simple SymInt to a Node."""
+        graph, ph = self._make_symbolic_graph()
+        s0 = ph.meta["val"].size(0)
+
+        result = graph.symint_to_node(s0)
+        graph.output(result)
+
+        self.assertIsInstance(result, fx.Node)
+        self.assertExpectedInline(str(graph), """\
+graph():
+    %x : [num_users=1] = placeholder[target=x]
+    %sym_size_int : [num_users=1] = call_function[target=torch.ops.aten.sym_size.int](args = (%x, 0), kwargs = {})
+    return sym_size_int""")
+
+    def test_symint_to_node_compound(self):
+        """graph.symint_to_node() decomposes compound SymInt expressions."""
+        graph, ph = self._make_symbolic_graph()
+        numel = ph.meta["val"].numel()
+
+        result = graph.symint_to_node(numel)
+        graph.output(result)
+
+        self.assertIsInstance(result, fx.Node)
+        self.assertExpectedInline(str(graph), """\
+graph():
+    %x : [num_users=2] = placeholder[target=x]
+    %sym_size_int : [num_users=1] = call_function[target=torch.ops.aten.sym_size.int](args = (%x, 0), kwargs = {})
+    %sym_size_int_1 : [num_users=1] = call_function[target=torch.ops.aten.sym_size.int](args = (%x, 1), kwargs = {})
+    %mul : [num_users=1] = call_function[target=operator.mul](args = (%sym_size_int, %sym_size_int_1), kwargs = {})
+    return mul""")
+
+    def test_symint_to_node_nested_floordiv(self):
+        """Nested floor-div + arithmetic expression is fully decomposed."""
+        graph, ph = self._make_symbolic_graph()
+        s0 = ph.meta["val"].size(0)
+        s1 = ph.meta["val"].size(1)
+
+        # (s0 + 10) // ((s1 // 5) + 3) * s0 + 42
+        expr = (s0 + 10) // ((s1 // 5) + 3) * s0 + 42
+
+        result = graph.symint_to_node(expr)
+        node = graph.call_function(torch.ops.aten.empty.memory_format, ([result],))
+        graph.output(node)
+
+        self.assertExpectedInline(str(graph), """\
+graph():
+    %x : [num_users=2] = placeholder[target=x]
+    %sym_size_int : [num_users=2] = call_function[target=torch.ops.aten.sym_size.int](args = (%x, 0), kwargs = {})
+    %sym_size_int_1 : [num_users=1] = call_function[target=torch.ops.aten.sym_size.int](args = (%x, 1), kwargs = {})
+    %add : [num_users=1] = call_function[target=operator.add](args = (10, %sym_size_int), kwargs = {})
+    %floordiv : [num_users=1] = call_function[target=operator.floordiv](args = (%sym_size_int_1, 5), kwargs = {})
+    %add_1 : [num_users=1] = call_function[target=operator.add](args = (3, %floordiv), kwargs = {})
+    %floordiv_1 : [num_users=1] = call_function[target=operator.floordiv](args = (%add, %add_1), kwargs = {})
+    %mul : [num_users=1] = call_function[target=operator.mul](args = (%sym_size_int, %floordiv_1), kwargs = {})
+    %add_2 : [num_users=1] = call_function[target=operator.add](args = (42, %mul), kwargs = {})
+    %empty_memory_format : [num_users=1] = call_function[target=torch.ops.aten.empty.memory_format](args = ([%add_2],), kwargs = {})
+    return empty_memory_format""")
+
+    def test_symint_to_node_int_passthrough(self):
+        """graph.symint_to_node() returns plain int as-is."""
+        graph = fx.Graph()
+        self.assertEqual(graph.symint_to_node(42), 42)
+
+    def test_symint_to_node_type_error(self):
+        """graph.symint_to_node() raises TypeError for non-int/SymInt."""
+        graph = fx.Graph()
+        with self.assertRaises(TypeError):
+            graph.symint_to_node("not_a_symint")
+
+    def test_plain_int_unchanged(self):
+        """Plain int args pass through without any resolution."""
+        graph = fx.Graph()
+        node = graph.call_function(torch.ops.aten.empty.memory_format, ([42],))
+        graph.output(node)
+
+        self.assertExpectedInline(str(graph), """\
+graph():
+    %empty_memory_format : [num_users=1] = call_function[target=torch.ops.aten.empty.memory_format](args = ([42],), kwargs = {})
+    return empty_memory_format""")
+
+    def test_node_args_unchanged(self):
+        """Regular Node and int args are not modified."""
+        graph = fx.Graph()
+        ph = graph.placeholder("x")
+        node = graph.call_function(torch.ops.aten.reshape.default, (ph, [-1]))
+        graph.output(node)
+
+        self.assertExpectedInline(str(graph), """\
+graph():
+    %x : [num_users=1] = placeholder[target=x]
+    %reshape_default : [num_users=1] = call_function[target=torch.ops.aten.reshape.default](args = (%x, [-1]), kwargs = {})
+    return reshape_default""")
+
+    def test_erase_node_invalidates_symint_cache(self):
+        """Erasing a sym_size node invalidates the cache; re-resolve creates fresh nodes."""
+        graph, ph = self._make_symbolic_graph()
+        s0 = ph.meta["val"].size(0)
+
+        # First resolve
+        s0_node = graph.symint_to_node(s0)
+        node1 = graph.call_function(torch.ops.aten.empty.memory_format, ([s0_node],))
+        graph.output(node1)
+
+        # Erase output, empty, and sym_size (in dependency order)
+        output_node = next(n for n in graph.nodes if n.op == "output")
+        graph.erase_node(output_node)
+        graph.erase_node(node1)
+        graph.erase_node(s0_node)
+
+        # Re-resolve same symbol — should create fresh nodes
+        s0_node2 = graph.symint_to_node(s0)
+        node2 = graph.call_function(torch.ops.aten.empty.memory_format, ([s0_node2],))
+        graph.output(node2)
+
+        self.assertExpectedInline(str(graph), """\
+graph():
+    %x : [num_users=1] = placeholder[target=x]
+    %sym_size_int_1 : [num_users=1] = call_function[target=torch.ops.aten.sym_size.int](args = (%x, 0), kwargs = {})
+    %empty_memory_format_1 : [num_users=1] = call_function[target=torch.ops.aten.empty.memory_format](args = ([%sym_size_int_1],), kwargs = {})
+    return empty_memory_format_1""")
+
+    def test_same_symint_reuses_cached_node(self):
+        """Using the same SymInt twice reuses the cached sym_size node."""
+        graph, ph = self._make_symbolic_graph()
+        s0 = ph.meta["val"].size(0)
+
+        s0_node = graph.symint_to_node(s0)
+        node1 = graph.call_function(torch.ops.aten.empty.memory_format, ([s0_node],))
+        node2 = graph.call_function(torch.ops.aten.empty.memory_format, ([s0_node],))
+        graph.output((node1, node2))
+
+        self.assertExpectedInline(str(graph), """\
+graph():
+    %x : [num_users=1] = placeholder[target=x]
+    %sym_size_int : [num_users=2] = call_function[target=torch.ops.aten.sym_size.int](args = (%x, 0), kwargs = {})
+    %empty_memory_format : [num_users=1] = call_function[target=torch.ops.aten.empty.memory_format](args = ([%sym_size_int],), kwargs = {})
+    %empty_memory_format_1 : [num_users=1] = call_function[target=torch.ops.aten.empty.memory_format](args = ([%sym_size_int],), kwargs = {})
+    return (empty_memory_format, empty_memory_format_1)""")
+
 
 if __name__ == "__main__":
     run_tests()

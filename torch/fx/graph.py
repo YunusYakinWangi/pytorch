@@ -18,7 +18,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, Literal, NamedTuple, Optional, TYPE_CHECKING
+from typing import Any, cast, Literal, NamedTuple, Optional, TYPE_CHECKING
 
 import torch
 import torch.utils._pytree as pytree
@@ -33,6 +33,24 @@ from .node import _get_qualified_name, _type_repr, Argument, Node, Target
 
 
 log = logging.getLogger(__name__)
+
+
+def _resolve_symints_in_args(graph: "Graph", x: object) -> object:
+    """Recursively convert SymInt values to FX nodes in args/kwargs."""
+    from torch.utils._pytree import tree_map
+
+    def _resolve(val: object) -> object:
+        if isinstance(val, torch.SymInt):
+            return graph.symint_to_node(val)
+        elif isinstance(val, (torch.SymFloat, torch.SymBool)):
+            raise TypeError(
+                f"Automatic resolution of {type(val).__name__} to FX nodes is not yet supported. "
+                f"Only torch.SymInt is supported."
+            )
+        return val
+
+    return tree_map(_resolve, x)
+
 
 __all__ = ["PythonCode", "CodeGen", "Graph"]
 
@@ -1326,6 +1344,8 @@ class Graph:
         self._codegen = CodeGen()
         self._co_fields: dict[str, Any] = {}
         self._find_nodes_lookup_table = _FindNodesLookupTable()
+        self._symint_tracer: Any | None = None
+        self._expr_to_proxy: dict[Any, Any] | None = None
 
     @property
     def owning_module(self):
@@ -1486,6 +1506,11 @@ class Graph:
             if not isinstance(kwargs, dict):
                 raise AssertionError(f"kwargs must be a dict, got {type(kwargs)}")
 
+        # Auto-resolve raw SymInt/SymFloat/SymBool in args/kwargs to FX nodes
+        if op in ("call_function", "call_method"):
+            args = cast(tuple, _resolve_symints_in_args(self, args))
+            kwargs = cast(dict, _resolve_symints_in_args(self, kwargs))
+
         candidate = name if name is not None else self._target_to_str(target)
         name = self._graph_namespace.create_name(candidate, None)
         n = Node(self, name, op, target, args, kwargs, type_expr)
@@ -1548,6 +1573,12 @@ class Graph:
         to_erase._remove_from_list()
         to_erase._erased = True  # iterators may retain handles to erased nodes
         self._len -= 1
+
+        # Invalidate cached symint-to-proxy entries pointing to the erased node
+        if self._expr_to_proxy is not None:
+            self._expr_to_proxy = {
+                k: v for k, v in self._expr_to_proxy.items() if v.node is not to_erase
+            }
 
         # Null out this Node's argument nodes so that the Nodes referred to
         # can update their ``users`` accordingly
@@ -1837,6 +1868,135 @@ class Graph:
         return self.create_node(
             "call_function", the_function, args, kwargs, name=name, type_expr=type_expr
         )
+
+    def _ensure_symint_resolver(self) -> None:
+        """Lazily initialize the SymInt resolver tracer.
+
+        Creates a ``GraphAppendingTracer`` for use by :meth:`symint_to_node`.
+        The ``expr_to_proxy`` mapping is populated on-demand as symbols
+        are requested, not upfront.
+        """
+        if self._symint_tracer is not None:
+            return
+
+        from torch.fx.proxy import GraphAppendingTracer
+
+        self._symint_tracer = GraphAppendingTracer(self)
+        self._expr_to_proxy = {}
+
+    def _resolve_symbols(self, needed: set) -> None:
+        """Scan the graph once to find nodes for all symbols in ``needed``.
+
+        For each symbol, registers the first node whose meta['val'] tensor
+        contains that symbol in its size, stride, or storage_offset.
+
+        Raises RuntimeError if any symbols remain unresolved after the scan.
+        """
+        from torch.fx.proxy import Proxy
+
+        for node in self.nodes:
+            if not needed:
+                break
+            if node.op == "output":
+                continue
+            val = node.meta.get("val")
+            if not isinstance(val, torch.Tensor):
+                continue
+            for i, s in enumerate(val.size()):
+                if isinstance(s, torch.SymInt) and s.node.expr in needed:
+                    sym = s.node.expr
+                    size_node = self.call_function(
+                        torch.ops.aten.sym_size.int, (node, i)
+                    )
+                    size_node.meta["val"] = s
+                    assert self._expr_to_proxy is not None  # noqa: S101
+                    self._expr_to_proxy[sym] = Proxy(
+                        size_node, tracer=self._symint_tracer
+                    )
+                    needed.discard(sym)
+            for i, s in enumerate(val.stride()):
+                if isinstance(s, torch.SymInt) and s.node.expr in needed:
+                    sym = s.node.expr
+                    stride_node = self.call_function(
+                        torch.ops.aten.sym_stride.int, (node, i)
+                    )
+                    stride_node.meta["val"] = s
+                    assert self._expr_to_proxy is not None  # noqa: S101
+                    self._expr_to_proxy[sym] = Proxy(
+                        stride_node, tracer=self._symint_tracer
+                    )
+                    needed.discard(sym)
+            so = val.storage_offset()
+            if isinstance(so, torch.SymInt) and so.node.expr in needed:
+                sym = so.node.expr
+                offset_node = self.call_function(
+                    torch.ops.aten.sym_storage_offset.default, (node,)
+                )
+                offset_node.meta["val"] = so
+                assert self._expr_to_proxy is not None  # noqa: S101
+                self._expr_to_proxy[sym] = Proxy(
+                    offset_node, tracer=self._symint_tracer
+                )
+                needed.discard(sym)
+
+        if needed:
+            raise RuntimeError(
+                f"Cannot resolve symbolic expression to FX nodes: "
+                f"no graph node found with meta['val'] tensor containing "
+                f"symbol(s) {needed} in its size, stride, or storage_offset."
+            )
+
+    @compatibility(is_backward_compatible=False)
+    def symint_to_node(self, val: "torch.SymInt | int") -> "Node | int":
+        """Convert a SymInt value to an FX Node (or plain int).
+
+        Note: ``graph.call_function()`` and ``graph.call_method()``
+        automatically resolve SymInt arguments, so you typically do not
+        need to call this manually. Use it when you need an explicit
+        Node *outside* of those methods (e.g., to store in a data
+        structure or pass to ``graph.create_node()`` directly).
+
+        - Plain ``int`` → returned as-is
+        - Concrete ``SymInt`` (e.g., ``SymInt(1024)``) → returned as ``int``
+        - Symbolic ``SymInt`` → decomposed into FX nodes via ``sympy_interp``
+
+        Example::
+
+            numel = node.meta["val"].numel()  # SymInt
+            size_node = graph.symint_to_node(numel)  # FX Node
+            graph.output(size_node)
+
+        Args:
+            val: A ``torch.SymInt`` or plain ``int``.
+
+        Returns:
+            An FX ``Node`` representing the symbolic expression, or a plain
+            ``int`` if the value is concrete.
+        """
+        if isinstance(val, int):
+            return val
+
+        if not isinstance(val, torch.SymInt):
+            raise TypeError(f"Expected int or torch.SymInt, got {type(val)}")
+
+        expr = val.node.expr
+        if expr.is_number:
+            return int(expr)
+
+        from torch.utils._sympy.interp import sympy_interp
+        from torch.utils._sympy.reference import PythonReferenceAnalysis
+
+        self._ensure_symint_resolver()
+        assert self._expr_to_proxy is not None  # noqa: S101
+
+        # Resolve any free symbols not yet in the proxy map (single graph scan)
+        missing = {sym for sym in expr.free_symbols if sym not in self._expr_to_proxy}
+        if missing:
+            self._resolve_symbols(missing)
+
+        proxy = sympy_interp(PythonReferenceAnalysis, self._expr_to_proxy, expr)
+        proxy.node.meta["val"] = val
+        return proxy.node
 
     @compatibility(is_backward_compatible=True)
     def node_copy(
