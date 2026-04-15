@@ -11274,7 +11274,7 @@ for shape in [(1,), ()]:
         # with grad
         a = torch.ones(1, requires_grad=True, device=device_type)
         y = f(a)
-        memory_with_grad = torch.accelerator.memory_allocated()
+        memory_with_grad = torch.get_device_module(device_type).memory_allocated()
         del a
         del y
 
@@ -11282,7 +11282,7 @@ for shape in [(1,), ()]:
         a = torch.ones(1, requires_grad=True, device=device_type)
         with torch.no_grad():
             y = f(a)
-        memory_without_grad = torch.accelerator.memory_allocated()
+        memory_without_grad = torch.get_device_module(device_type).memory_allocated()
         self.assertGreater(memory_with_grad, memory_without_grad)
         del a
         del y
