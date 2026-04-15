@@ -23,7 +23,7 @@ TORCH_LIB_PREFIXES = (
 # Match lines where the package name is exactly torch/torchvision/torchaudio,
 # not a substring of another package (e.g. terratorch, open_clip_torch).
 _TORCH_PKG_RE = re.compile(
-    r"""^\s*['"]?\s*(?:torchvision|torchaudio|torch)\s*(?:[=<>!;\[,\]'"@]|$)""",
+    r"""^\s*['"]?\s*(?:torchvision|torchaudio|torch)\s*(?:[=<>!;\[,\]'"@~#(]|$)""",
     re.IGNORECASE,
 )
 
