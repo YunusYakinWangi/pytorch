@@ -76,8 +76,6 @@ Tensor _mps_linear(const Tensor& input, const Tensor& weight_arg, const std::opt
   TORCH_CHECK(input.is_mps(), "Tensor for argument input is on ", input.device(), " but expected on mps");
   TORCH_CHECK(supportedFloatingOrComplexType(weight_arg), "MPS device does not support linear for non-float weights");
   TORCH_CHECK(weight_arg.is_mps(), "Tensor for argument weight is on ", weight_arg.device(), " but expected on mps");
-  TORCH_CHECK((input.scalar_type() != kComplexFloat && input.scalar_type() != kComplexHalf),
-              "mps linear does not support complex types");
 
   const Tensor& bias = *(at::borrow_from_optional_tensor(bias_opt));
   const bool is_bias_defined = bias.defined();
@@ -129,6 +127,9 @@ Tensor _mps_linear(const Tensor& input, const Tensor& weight_arg, const std::opt
       // Squeeze last dim of 1D linear
       return weight_arg.dim() != 1 ? output : output.squeeze(-1);
     }
+    _mps_linear_nograph(input, weight, bias, output);
+    // Squeeze last dim of 1D linear
+    return weight_arg.dim() != 1 ? output : output.squeeze(-1);
   }
   MPSStream* stream = getCurrentMPSStream();
   struct CachedGraph : public MPSCachedGraph {
