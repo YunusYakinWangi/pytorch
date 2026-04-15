@@ -304,8 +304,18 @@ class TestTypeSlots(TestCase):
         """All types with mp_subscript_impl overrides must have the C-level slot."""
         import torch
 
-        for t in [list, tuple, dict, str, bytes, range, collections.OrderedDict,
-                  collections.defaultdict, torch.Tensor, torch.Size]:
+        for t in [
+            list,
+            tuple,
+            dict,
+            str,
+            bytes,
+            range,
+            collections.OrderedDict,
+            collections.defaultdict,
+            torch.Tensor,
+            torch.Size,
+        ]:
             _, map_slots, _, _ = self._get_slot_info(t)
             self.assertTrue(
                 has_slot(map_slots, PyMappingSlots.MP_SUBSCRIPT),

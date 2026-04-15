@@ -819,6 +819,7 @@ class GetItemTests(torch._dynamo.test_case.TestCase):
         x = torch.randn(4)
         self.assertEqual(fn(x), self._compile(fn, x))
 
+
 if __name__ == "__main__":
     from torch._dynamo.test_case import run_tests
 
