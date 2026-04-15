@@ -8688,6 +8688,7 @@ for shape in [(1,), ()]:
         self.assertEqual(y.grad_fn.saved_tensors, ())
         self.assertEqual(y.grad_fn._raw_saved_tensors, ())
 
+    @skipIfTorchDynamo("boxed_grads_call is incompatible with compiled autograd")
     def test_custom_function_boxed_grads(self):
         """Test boxed_grads_call mechanism without torch.compile.
 
@@ -8717,6 +8718,7 @@ for shape in [(1,), ()]:
         # d/dx (2x).sum() = 2
         self.assertEqual(x.grad, torch.full_like(x, 2.0))
 
+    @skipIfTorchDynamo("boxed_grads_call is incompatible with compiled autograd")
     def test_custom_function_boxed_grads_multi_output(self):
         """Boxed grads with multiple outputs — grads list has one
         entry per output."""
@@ -8745,6 +8747,7 @@ for shape in [(1,), ()]:
         # return grad_a*2 + grad_b*3 = 2+3 = 5
         self.assertEqual(x.grad, torch.full_like(x, 5.0))
 
+    @skipIfTorchDynamo("boxed_grads_call is incompatible with compiled autograd")
     def test_custom_function_boxed_grads_no_extra_refs(self):
         """Framework holds no extra refs to grads with boxed calling convention.
 
@@ -8775,6 +8778,7 @@ for shape in [(1,), ()]:
         out.sum().backward()
         self.assertEqual(x.grad, torch.full_like(x, 2.0))
 
+    @skipIfTorchDynamo("boxed_grads_call is incompatible with compiled autograd")
     def test_custom_function_boxed_grads_cleanup_on_error(self):
         """Grads list is not leaked when backward raises."""
 
@@ -8794,6 +8798,7 @@ for shape in [(1,), ()]:
         with self.assertRaisesRegex(RuntimeError, "intentional failure"):
             out.sum().backward()
 
+    @skipIfTorchDynamo("boxed_grads_call is incompatible with compiled autograd")
     def test_custom_function_boxed_grads_chain(self):
         """Two boxed-grads functions chained — each gets its own grads list."""
 
@@ -8839,6 +8844,7 @@ for shape in [(1,), ()]:
         # d/dx (3 * 2 * x).sum() = grad 1 → Mul3 bwd: 1*3=3 → Mul2 bwd: 3*2=6
         self.assertEqual(x.grad, torch.full_like(x, 6.0))
 
+    @skipIfTorchDynamo("boxed_grads_call is incompatible with compiled autograd")
     def test_custom_function_boxed_grads_none_grads(self):
         """Boxed grads with materialize_grads=False and partial None grads.
 
@@ -8874,6 +8880,7 @@ for shape in [(1,), ()]:
         # forward: b=3x; backward: grad_b=1, return 1*3=3
         self.assertEqual(x.grad, torch.full_like(x, 3.0))
 
+    @skipIfTorchDynamo("boxed_grads_call is incompatible with compiled autograd")
     def test_custom_function_boxed_grads_materialize_grads(self):
         """boxed_grads_call works with materialize_grads(True).
 
@@ -8910,6 +8917,7 @@ for shape in [(1,), ()]:
         # forward: b=3x; backward: g1=0, g2=1, return 0*2 + 1*3 = 3
         self.assertEqual(x.grad, torch.full_like(x, 3.0))
 
+    @skipIfTorchDynamo("boxed_grads_call is incompatible with compiled autograd")
     def test_custom_function_boxed_grads_direct_apply(self):
         """Test both paths into backward with boxed_grads_call.
 
@@ -8953,6 +8961,7 @@ for shape in [(1,), ()]:
         # return 1*2 + 2*3 = 8
         self.assertEqual(result, torch.full_like(x2, 8.0))
 
+    @skipIfTorchDynamo("boxed_grads_call is incompatible with compiled autograd")
     def test_custom_function_boxed_grads_single_list_arg(self):
         """A plain list passed via grad_fn.apply() gets boxed into
         a list wrapping it — the user's list becomes an element."""
