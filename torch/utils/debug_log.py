@@ -21,7 +21,7 @@ Example::
 
 import logging
 
-import torch.distributed as dist
+import torch
 from torch._dynamo.decorators import leaf_function
 
 
@@ -31,6 +31,10 @@ log = logging.getLogger(__name__)
 
 
 def _get_rank() -> int:
+    if not torch.distributed.is_available():
+        return 0
+    import torch.distributed as dist
+
     return dist.get_rank() if dist.is_initialized() else 0
 
 
