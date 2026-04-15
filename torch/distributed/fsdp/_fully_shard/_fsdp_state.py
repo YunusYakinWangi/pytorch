@@ -315,19 +315,11 @@ class FSDPState(_State):
         if self._state_ctx.iter_forward_root is self:
             for state in self._state_ctx.all_states:
                 if state is not self and state._modules_to_run_forward:
-                    # A grouped fully_shard's forward did not run all modules
-                    # (e.g. chunked loss skipping lm_head). Force-complete the
-                    # group's post-forward so that params are resharded and
-                    # backward hooks are registered on the root output.
-                    warning_once(
-                        logger,
-                        f"{len(state._modules_to_run_forward)} of "
-                        f"{len(state._modules)} modules passed to "
-                        f"fully_shard did not run forward: "
-                        f"{list(state._modules_to_run_forward)}. Consider "
-                        f"using separate fully_shard() calls for modules "
-                        f"that may not always run together.",
-                    )
+                    # A grouped fully_shard's forward did not run all
+                    # modules (e.g. chunked loss skipping lm_head).
+                    # Force-complete the group's post-forward so that
+                    # params are resharded and backward hooks are
+                    # registered on the root output.
                     state._modules_to_run_forward.clear()
                     for fsdp_param_group in state._fsdp_param_groups:
                         fsdp_param_group.post_forward(module, input, output)
@@ -387,7 +379,9 @@ class FSDPState(_State):
                 # Clear iter_forward_root in case a grouped module's
                 # post-forward never fired (e.g. partial group forward
                 # followed by standalone calls in a chunk loop), leaving
-                # iter_forward_root stale.
+                # iter_forward_root stale. Not gated to grouped modules
+                # since this is a no-op in the normal case (_post_forward
+                # already cleared it).
                 self._state_ctx.iter_forward_root = None
                 # Catch the last module's RS states that no subsequent
                 # module's group N-1 wait will clear.
