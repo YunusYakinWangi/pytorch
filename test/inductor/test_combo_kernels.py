@@ -1488,6 +1488,7 @@ class ComboKernelTestsMaxAutotune(TestCase):
             f"Expected the first combo coordesc step to tune the largest subkernel first, got {changed_fields}",
         )
 
+
 if __name__ == "__main__":
     from torch._dynamo.test_case import run_tests
 
