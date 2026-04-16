@@ -159,6 +159,13 @@ its type to `common_constant_types`.
             self.value[arg.as_python_constant()],
         )
 
+    def sq_item_impl(
+        self, tx: InstructionTranslator, key: VariableTracker
+    ) -> VariableTracker:
+        # unicode_getitem: https://github.com/python/cpython/blob/62a6e898e01/Objects/unicodeobject.c#L13777
+        # bytes_item: https://github.com/python/cpython/blob/62a6e898e01/Objects/bytesobject.c#L319
+        return self.getitem_const(tx, key)
+
     @staticmethod
     def is_base_literal(obj: object) -> bool:
         return type(obj) in common_constant_types

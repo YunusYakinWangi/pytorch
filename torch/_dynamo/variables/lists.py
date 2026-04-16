@@ -264,6 +264,15 @@ class BaseListVariable(VariableTracker):
 
         return self.getitem_const(tx, key)
 
+    def sq_item_impl(
+        self,
+        tx: "InstructionTranslator",
+        key: VariableTracker,
+    ) -> VariableTracker:
+        # list_item: https://github.com/python/cpython/blob/62a6e898e01/Objects/listobject.c#L318
+        # Key is already int via nb_index_impl in vt_getitem.
+        return self.getitem_const(tx, key)
+
     def call_method(
         self,
         tx: "InstructionTranslator",
@@ -682,6 +691,14 @@ class RangeVariable(BaseListVariable):
                     ],
                 )
             key = key.nb_index_impl(tx)
+        return self.getitem_const(tx, key)
+
+    def sq_item_impl(
+        self,
+        tx: "InstructionTranslator",
+        key: VariableTracker,
+    ) -> VariableTracker:
+        # range_item: https://github.com/python/cpython/blob/62a6e898e01/Objects/rangeobject.c#L462
         return self.getitem_const(tx, key)
 
     def call_method(
