@@ -11,6 +11,7 @@ from .. import graph_break_hints
 from ..bytecode_transformation import create_call_function
 from ..exc import TYPE_CHECKING, unimplemented
 from ..graph_bytecode_inputs import (
+    CURRENT_STREAM_INDEX,
     get_external_object_by_index,
     register_graph_created_object,
     register_user_object,
@@ -273,6 +274,10 @@ class SymbolicStreamState:
             # entry at runtime so cudagraph capture uses the capture stream
             # instead of this stale trace-time stream.
             index = register_user_object(stream, source)
+            assert index == CURRENT_STREAM_INDEX, (
+                f"Current stream must be registered at index {CURRENT_STREAM_INDEX}, "
+                f"got {index}"
+            )
             stream_var = LazyVariableTracker.create(stream, source=source)
             # Set user_object_index as an instance attribute so accessing it
             # does NOT trigger LazyVariableTracker realization.
