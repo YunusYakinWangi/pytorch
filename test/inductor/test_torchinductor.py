@@ -5899,7 +5899,6 @@ class CommonTemplate:
             raise AssertionError(f"Expected dtype torch.bfloat16, got {out.dtype}")
 
     def test_as_strided_on_split_view(self):
-        # https://github.com/pytorch/pytorch/issues/175325
         # as_strided without an explicit storage_offset must preserve the
         # offset of split/slice views instead of resetting to the base tensor.
         def fn(x):

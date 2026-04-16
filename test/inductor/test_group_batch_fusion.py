@@ -460,8 +460,7 @@ class TestGroupBatchFusion(TestCase):
 
     @requires_gpu()
     def test_as_strided_storage_offset_after_mm_fusion(self):
-        """Regression test for github.com/pytorch/pytorch/issues/175325.
-
+        """
         Post-grad batch linear fusion rewrites parallel mm nodes into a
         batched bmm followed by select views. The select outputs preserve the
         original row stride, but they inherit a non-zero storage offset.
