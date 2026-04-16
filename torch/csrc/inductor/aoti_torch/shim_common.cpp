@@ -842,7 +842,7 @@ AOTITorchError aoti_torch_clone_preserve_strides(
     AtenTensorHandle self,
     AtenTensorHandle* ret) {
   AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE({
-    // To mimic clone_preserve_strides which is used in copy_misaligned_inputs
+    // To mimic clone_preserve_strides which is used in copy_if_misaligned_inputs
     at::Tensor* self_tensor = tensor_handle_to_tensor_pointer(self);
     int64_t needed_size = 1;
     for (int i = 0; i < self_tensor->dim(); i++) {

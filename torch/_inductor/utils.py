@@ -2528,7 +2528,7 @@ def align_inputs_from_check_idxs(
         return model
 
     def run(new_inputs: list[InputType]) -> Any:
-        copy_misaligned_inputs(new_inputs, inputs_to_check)
+        copy_if_misaligned_inputs(new_inputs, inputs_to_check)
         return model(new_inputs)
 
     return run
@@ -2546,7 +2546,7 @@ def clone_preserve_strides(x: torch.Tensor) -> torch.Tensor:
     return torch.as_strided(buffer, x.size(), x.stride())
 
 
-def copy_misaligned_inputs(
+def copy_if_misaligned_inputs(
     new_inputs: list[InputType], check_inputs_idxs: Sequence[int]
 ) -> None:
     for i in check_inputs_idxs:

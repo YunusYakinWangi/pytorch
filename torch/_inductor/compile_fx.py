@@ -110,7 +110,7 @@ from .triton_bundler import TritonBundler
 from .utils import (
     align_inputs_from_check_idxs,
     clone_preserve_strides,
-    copy_misaligned_inputs,
+    copy_if_misaligned_inputs,
     get_cloned_parameter_buffer_name,
     get_first_incompatible_cudagraph_node,
     maybe_get_suppress_shape_guards_ctx,
@@ -1562,7 +1562,7 @@ def cudagraphify_impl(
     static_input_idxs: OrderedSet[int] = OrderedSet(
         remove_unaligned_input_idxs(inputs, static_input_idxs)  # type: ignore[arg-type]
     )
-    copy_misaligned_inputs(inputs, check_input_idxs)  # type: ignore[arg-type]
+    copy_if_misaligned_inputs(inputs, check_input_idxs)  # type: ignore[arg-type]
 
     assert isinstance(inputs, list)
 

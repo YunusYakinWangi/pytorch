@@ -258,7 +258,7 @@ class CppWrapperGpu(CppWrapperCpu):
     def codegen_inputs(self):
         # See Note: [Input Alignment handling in Inductor]
         #
-        # JIT Inductor does not guard on input alignment. It relies on copy_misaligned_inputs to
+        # JIT Inductor does not guard on input alignment. It relies on copy_if_misaligned_inputs to
         # copy misaligned inputs to aligned buffers. For AOTInductor, we need to do the same in cpp.
 
         if config.is_fbcode():
