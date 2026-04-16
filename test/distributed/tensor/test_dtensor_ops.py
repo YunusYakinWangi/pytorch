@@ -256,7 +256,6 @@ dtensor_multi_threaded_fails = {
     xfail("nn.functional.huber_loss"),
     skip("nn.functional.max_unpool1d", "grad"),
     skip("nn.functional.max_unpool2d", "grad"),
-    xfail("nn.functional.max_unpool3d", "grad"),
     xfail("nn.functional.threshold"),
     skip("nn.functional.multi_head_attention_forward"),
 }
@@ -307,9 +306,6 @@ dtensor_compiled_fails = {
     xfail("nn.functional.interpolate", "nearest"),
     xfail("nn.functional.interpolate", "nearest-exact"),
     xfail("nn.functional.interpolate", "trilinear"),
-    xfail("nn.functional.max_unpool1d"),
-    xfail("nn.functional.max_unpool2d"),
-    xfail("nn.functional.max_unpool3d"),
     xfail("nn.functional.upsample_bilinear"),
     xfail("nn.functional.upsample_nearest"),
     # Data-dependent outputs (SymBool, unbacked shapes) that raise
@@ -320,11 +316,9 @@ dtensor_compiled_fails = {
     xfail("nonzero_static"),
     # Decompositions with .is_cuda checks that fail during sharding
     # propagation for aten.is_cuda / prim::device.
-    xfail("nn.functional.binary_cross_entropy"),
     xfail("nn.functional.binary_cross_entropy_with_logits"),
     xfail("nn.functional.gaussian_nll_loss"),
     xfail("nn.functional.logsigmoid"),
-    xfail("lu_unpack"),
     xfail("scatter"),
     xfail("take_along_dim"),
     # batch_norm variants decompose through squeeze.dims → as_strided under
