@@ -37,7 +37,12 @@ static bool cpp_meta_supports_symint(const c10::OperatorHandle& op) {
   return full_name.find("view_copy") != std::string::npos;
 }
 
-static bool any_tensor_has_symbolic_sizes(
+// Matches Python FakeTensorMode's has_symbolic_sizes which checks both
+// tensor symbolic sizes AND SymInt/SymFloat arguments (e.g. the size
+// parameter to expand). See fake_tensor.py:
+//   has_symbolic_sizes = any(i._has_symbolic_sizes_strides for i in ...)
+//                        or any(isinstance(a, SymInt) for a in flat_args)
+static bool has_symbolic_inputs(
     torch::jit::Stack* stack,
     size_t num_arguments) {
   auto arguments = torch::jit::last(*stack, num_arguments);
@@ -57,6 +62,9 @@ static bool any_tensor_has_symbolic_sizes(
           return true;
         }
       }
+    } else if (ivalue.isSymInt() || ivalue.isSymFloat() ||
+               ivalue.isSymIntList()) {
+      return true;
     }
   }
   return false;
@@ -280,10 +288,30 @@ void fakeFallback(
         });
   };
 
-  // call back to Python decomp table
-  if (any_tensor_has_symbolic_sizes(stack, num_arguments) &&
-      !cpp_meta_supports_symint(op) && mode && mode->decomp_fn_) {
-    if (mode->decomp_fn_(&op, stack)) {
+  // For symbolic sizes, try Python decomp table then CIA decomposition before
+  // the Meta kernel. Most C++ Meta kernels can't handle SymInt, but decomps
+  // break ops into sub-ops that re-enter fakeFallback individually.
+  if (has_symbolic_inputs(stack, num_arguments) &&
+      !cpp_meta_supports_symint(op) && mode) {
+    // 1. Try Python decomposition table
+    if (mode->decomp_fn_ && mode->decomp_fn_(&op, stack)) {
+      stamp_outputs_as_fake();
+      return;
+    }
+
+    // 2. Try CompositeImplicitAutograd decomposition. Run with Fake key
+    //    active in TLS so sub-ops re-enter fakeFallback, matching Python
+    //    FakeTensorMode's `with self: func.decompose(*args, **kwargs)`.
+    //    We must remove Fake from the redispatch keyset for THIS call so
+    //    the dispatcher doesn't re-enter fakeFallback for the op itself
+    //    (which would infinite-loop). Sub-ops called by the CIA kernel
+    //    compute fresh keysets from TLS where Fake is still active.
+    if (op.hasKernelForDispatchKey(c10::DispatchKey::CompositeImplicitAutograd)) {
+      auto ks = dispatchKeySet;
+      ks = ks.remove(c10::DispatchKey::Fake);
+      ks = ks.remove(c10::DispatchKey::Python);
+      ks = ks.remove(c10::DispatchKey::PythonTLSSnapshot);
+      op.redispatchBoxed(ks, stack);
       stamp_outputs_as_fake();
       return;
     }
