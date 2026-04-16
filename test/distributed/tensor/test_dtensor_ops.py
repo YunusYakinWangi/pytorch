@@ -199,8 +199,6 @@ dtensor_fails = {
     # DTensorConverter can't convert sparse tensor inputs
     xfail("sparse.sampled_addmm"),
     xfail("sparse.mm", "reduce"),
-    # bug in squeeze.dims strategy: TypeError with empty dims arg
-    xfail("squeeze", "multiple"),
     # meta tensor data not allocated yet during tensor_split
     xfail("tensor_split"),
     # output_specs count mismatch in unsafe_split strategy
@@ -417,7 +415,6 @@ dtensor_fails_no_strategy = {
     xfail("multinomial"),
     xfail("nanquantile"),
     xfail("nn.functional.bilinear"),
-    xfail("nn.functional.hardshrink"),
     xfail("nn.functional.multi_margin_loss"),
     xfail("nn.functional.multilabel_margin_loss"),
     xfail("nn.functional.pad", "reflect"),
