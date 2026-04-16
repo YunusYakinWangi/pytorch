@@ -15,6 +15,7 @@ import torch._dynamo.test_case
 import torch._functorch.config
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.utils.checkpoint
 from functorch.compile import (
     default_partition,
@@ -2741,6 +2742,164 @@ def forward(self, arg0_1):
 
         self.assertEqual(ref, result)
         self.assertEqual(x_ref.grad, x_test.grad)
+
+    def test_two_checkpoints_two_grads_both_remat(self):
+        """Two checkpointed blocks with two autograd.grad calls — both backward
+        regions get independent rematerialization."""
+        x = torch.randn(4, 4, requires_grad=True)
+        w1 = torch.randn(4, 4, requires_grad=True)
+        w2 = torch.randn(4, 4, requires_grad=True)
+
+        def fn(x, w1, w2):
+            z1 = torch.utils.checkpoint.checkpoint(
+                lambda a, b: torch.sin(a @ b), x, w1, use_reentrant=False
+            )
+            z2 = torch.utils.checkpoint.checkpoint(
+                lambda a, b: torch.sigmoid(a @ b), x, w2, use_reentrant=False
+            )
+            loss1 = z1.sum()
+            loss2 = z2.sum()
+            dx1 = _grad(loss1, (x,), retain_graph=True)
+            dx2 = _grad(loss2, (x,))
+            return (dx1[0] + dx2[0]).detach()
+
+        _, gm_with = self._compile_and_capture(fn, True, (x, w1, w2))
+
+        # mm_recomputed for first grad (sin), mm_1_recomputed for second grad (sigmoid)
+        self.assertExpectedInline(
+            gm_with.code.strip(),
+            """\
+def forward(self, arg0_1, arg1_1, arg2_1):
+    mm = torch.ops.aten.mm.default(arg0_1, arg1_1)
+    sin = torch.ops.aten.sin.default(mm);  mm = None
+    mm_1 = torch.ops.aten.mm.default(arg0_1, arg2_1)
+    sigmoid = torch.ops.aten.sigmoid.default(mm_1);  mm_1 = None
+    sum_1 = torch.ops.aten.sum.default(sin);  sin = None
+    sum_2 = torch.ops.aten.sum.default(sigmoid);  sigmoid = None
+    ones_like = torch.ops.aten.ones_like.default(sum_1, pin_memory = False, memory_format = torch.preserve_format);  sum_1 = None
+    expand = torch.ops.aten.expand.default(ones_like, [4, 4]);  ones_like = None
+    mm_recomputed = torch.ops.aten.mm.default(arg0_1, arg1_1)
+    cos = torch.ops.aten.cos.default(mm_recomputed);  mm_recomputed = None
+    mul = torch.ops.aten.mul.Tensor(expand, cos);  expand = cos = None
+    t = torch.ops.aten.t.default(arg1_1);  arg1_1 = None
+    mm_3 = torch.ops.aten.mm.default(mul, t);  mul = t = None
+    ones_like_1 = torch.ops.aten.ones_like.default(sum_2, pin_memory = False, memory_format = torch.preserve_format);  sum_2 = None
+    expand_1 = torch.ops.aten.expand.default(ones_like_1, [4, 4]);  ones_like_1 = None
+    mm_1_recomputed = torch.ops.aten.mm.default(arg0_1, arg2_1);  arg0_1 = None
+    sigmoid_recomputed = torch.ops.aten.sigmoid.default(mm_1_recomputed);  mm_1_recomputed = None
+    detach_4_recomputed = torch.ops.aten.detach.default(sigmoid_recomputed);  sigmoid_recomputed = None
+    detach_6 = torch.ops.aten.detach.default(detach_4_recomputed);  detach_4_recomputed = None
+    sigmoid_backward = torch.ops.aten.sigmoid_backward.default(expand_1, detach_6);  expand_1 = detach_6 = None
+    t_1 = torch.ops.aten.t.default(arg2_1);  arg2_1 = None
+    mm_5 = torch.ops.aten.mm.default(sigmoid_backward, t_1);  sigmoid_backward = t_1 = None
+    add = torch.ops.aten.add.Tensor(mm_3, mm_5);  mm_3 = mm_5 = None
+    detach_7 = torch.ops.aten.detach.default(add);  add = None
+    return (detach_7,)""",
+        )
+
+    def test_chunked_loss_remat(self):
+        """Chunked loss: multiple backward regions from chunk_loss.backward(),
+        only the final x.backward() needs remat."""
+        dim = 32
+        chunksz = 4
+
+        class Block(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.l1 = nn.Linear(dim, dim, bias=False)
+                self.l2 = nn.Linear(dim, dim, bias=False)
+
+            def _fn(self, x):
+                return self.l2(F.gelu(self.l1(x), approximate="tanh"))
+
+            def forward(self, x):
+                return checkpoint(self._fn, x, use_reentrant=False)
+
+        class ChunkedLoss(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.block = Block()
+                self.head = nn.Linear(dim, dim, bias=False)
+
+            def forward(self, x, y):
+                x = self.block(x)
+                x_detached = x.detach().requires_grad_()
+                total = 0
+                for start in range(0, x_detached.shape[0], chunksz):
+                    end = start + chunksz
+                    chunk_loss = (
+                        F.mse_loss(
+                            self.head(x_detached[start:end]),
+                            y[start:end],
+                            reduction="sum",
+                        )
+                        / x_detached.shape[0]
+                    )
+                    chunk_loss.backward()
+                    total = total + chunk_loss.detach()
+                x.backward(x_detached.grad)
+                return total
+
+        model = ChunkedLoss()
+        x = torch.randn(12, dim)
+        y = torch.randn(12, dim)
+
+        result_with, gm_with = self._compile_and_capture(model, True, (x, y))
+        result_without, gm_without = self._compile_and_capture(model, False, (x, y))
+
+        torch.testing.assert_close(result_with, result_without)
+
+        gelu_without = self.count_op(gm_without, torch.ops.aten.gelu.default)
+        gelu_with = self.count_op(gm_with, torch.ops.aten.gelu.default)
+        self.assertEqual(gelu_without, 1)
+        self.assertEqual(gelu_with, 2, "gelu should be recomputed in backward")
+
+    def test_two_backward_regions_both_needing_remat(self):
+        """Two checkpointed blocks with two .backward() calls — both regions
+        get independent rematerialization."""
+        dim = 32
+
+        class Block(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.l1 = nn.Linear(dim, dim, bias=False)
+                self.l2 = nn.Linear(dim, dim, bias=False)
+
+            def _fn(self, x):
+                return self.l2(F.gelu(self.l1(x), approximate="tanh"))
+
+            def forward(self, x):
+                return checkpoint(self._fn, x, use_reentrant=False)
+
+        class TwoBackwards(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.block1 = Block()
+                self.block2 = Block()
+
+            def forward(self, x):
+                y = self.block1(x)
+                z = self.block2(y)
+                z.sum().backward(retain_graph=True)
+                y.sum().backward()
+                return z.detach()
+
+        model = TwoBackwards()
+        x = torch.randn(8, dim, requires_grad=True)
+
+        result_with, gm_with = self._compile_and_capture(model, True, (x,))
+
+        torch._dynamo.reset()
+        result_without, gm_without = self._compile_and_capture(model, False, (x,))
+
+        torch.testing.assert_close(result_with, result_without)
+
+        gelu_without = self.count_op(gm_without, torch.ops.aten.gelu.default)
+        gelu_with = self.count_op(gm_with, torch.ops.aten.gelu.default)
+        self.assertEqual(gelu_without, 2)
+        self.assertGreater(
+            gelu_with, gelu_without, "backward regions should recompute gelu"
+        )
 
     def test_two_autograd_grads_independent_recompute(self):
         """Two autograd.grad calls on the same checkpointed output produce
