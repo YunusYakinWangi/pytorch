@@ -1748,6 +1748,35 @@ class TestNewEmptyStridedUneven(DTensorTestBase):
         )
 
     @with_comms
+    def test_new_empty_propagates_partial(self):
+        """new_empty/new_empty_strided on a Partial DTensor should inherit Partial.
+
+        Uninitialized memory will be overwritten immediately, so the placement
+        only needs to match the source of the subsequent write. Without this,
+        copy_ from a Partial source to a Replicate destination triggers an
+        unwanted all-reduce (issue #180486).
+        """
+        mesh = self.build_device_mesh()
+        partial_dt = DTensor.from_local(
+            torch.randn(4, 8, device=self.device_type),
+            device_mesh=mesh,
+            placements=[Partial()],
+        )
+
+        empty_dt = partial_dt.new_empty(partial_dt.shape)
+        self.assertEqual(empty_dt.placements, (Partial(),))
+
+        empty_strided_dt = partial_dt.new_empty_strided(
+            partial_dt.shape, partial_dt.stride()
+        )
+        self.assertEqual(empty_strided_dt.placements, (Partial(),))
+
+        # Initialized factories must keep Replicate, otherwise their values
+        # would be incorrect after a Partial reduction (e.g. ones * world_size).
+        ones_dt = partial_dt.new_ones(partial_dt.shape)
+        self.assertEqual(ones_dt.placements, (Replicate(),))
+
+    @with_comms
     def test_backward_partial_grad_with_transpose(self):
         """Backward preserves Partial placement when grad is non-contiguous (issue #180486).
 
