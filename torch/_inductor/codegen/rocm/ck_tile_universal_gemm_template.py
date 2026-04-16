@@ -653,7 +653,6 @@ class CKTileGemmTemplate(CKTileTemplate):
                                                                      DsLayout,
                                                                      ELayout,
                                                                      CDEElementWise,
-                                                                     GemmPipelineProblem::kBlockSize,
                                                                      TileM,
                                                                      TileN,
                                                                      WarpM,
@@ -752,16 +751,32 @@ class CKTileGemmTemplate(CKTileTemplate):
             )
         filtered_instances = list(filter(self.filter_op, instances))
         # NB: when using a fixed list order, most likely we will pick the subset of instances
-        # which are very similar to each other. Randomizing the choice seems to solve this.
+        # which are very similar to each other. Stratified sampling ensures coverage of
+        # different pipeline/epilogue combinations while still randomizing within each stratum.
         random.seed(-11)
-        chosen_instances = (
-            random.sample(
-                filtered_instances,
-                min(len(filtered_instances), config.rocm.ck_tile_max_profiling_configs),
-            )
-            if config.rocm.ck_tile_max_profiling_configs
-            else filtered_instances
-        )
+        if config.rocm.ck_tile_max_profiling_configs:
+            # Group instances by (pipeline, epilogue) to ensure diverse coverage
+            from collections import defaultdict
+
+            strata: dict[tuple[str, str], list] = defaultdict(list)
+            for inst in filtered_instances:
+                strata[(inst.pipeline, inst.epilogue)].append(inst)
+            # Take at least one from each stratum, then fill remaining quota randomly
+            chosen_instances = []
+            remaining_budget = config.rocm.ck_tile_max_profiling_configs
+            for key, group in strata.items():
+                if remaining_budget > 0 and group:
+                    chosen_instances.append(random.choice(group))
+                    remaining_budget -= 1
+            # Fill remaining budget from all filtered instances (excluding already chosen)
+            chosen_set = set(id(x) for x in chosen_instances)
+            remaining = [x for x in filtered_instances if id(x) not in chosen_set]
+            if remaining_budget > 0 and remaining:
+                chosen_instances.extend(
+                    random.sample(remaining, min(len(remaining), remaining_budget))
+                )
+        else:
+            chosen_instances = filtered_instances
         log.debug(
             "generated %d ck instances after sample: %s",
             len(chosen_instances),
