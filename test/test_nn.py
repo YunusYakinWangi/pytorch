@@ -13493,9 +13493,16 @@ if __name__ == '__main__':
         # Test numerical stability with large beta values (issue #171249)
         # Previously, softplus returned inf for positive inputs when beta was very large
         # because exp(beta * x) would overflow. The fix uses a numerically stable formula.
+        #
+        # For float16 (max ~65504), use a large but representable beta that still
+        # triggers the overflow bug (exp(1000 * 0.5) overflows in any precision).
+        if dtype == torch.float16:
+            beta = 1000.0
+            threshold = 1000.0
+        else:
+            beta = 1e30
+            threshold = 1e30
         input = torch.tensor([0.5, -1.0, 2.0], device=device, dtype=dtype)
-        beta = 1e30
-        threshold = 1e30
 
         output = F.softplus(input, beta=beta, threshold=threshold)
 

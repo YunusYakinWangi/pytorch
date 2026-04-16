@@ -801,8 +801,8 @@ TORCH_IMPL_FUNC(softplus_out_mps)
                                                                                name:nil];
       MPSGraphTensor* positivePartTensor = [mpsGraph reLUWithTensor:inputTensor name:nil];
       MPSGraphTensor* softplusTensor = [mpsGraph additionWithPrimaryTensor:scaledLog1pTensor
-                                                          secondaryTensor:positivePartTensor
-                                                                     name:nil];
+                                                           secondaryTensor:positivePartTensor
+                                                                      name:nil];
       MPSGraphTensor* outputTensor = [mpsGraph selectWithPredicateTensor:predicateTensor
                                                      truePredicateTensor:reluTensor
                                                     falsePredicateTensor:softplusTensor
