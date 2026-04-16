@@ -1010,6 +1010,8 @@ combo_kernel_allow_mixed_sizes = 1
 combo_kernel_foreach_dynamic_shapes = True
 # Maximum number of arguments (read/write buffers) allowed in a combo kernel
 combo_kernel_max_num_args = 250
+# Maximum number of sub-kernels allowed in a single combo kernel
+combo_kernel_max_num_nodes = 8
 # When True, each combo sub-kernel gets its own block sizes (XBLOCK_0, YBLOCK_0, etc.)
 # allowing different sub-kernels to use different tile sizes based on their heuristics.
 # When False, all sub-kernels share block sizes (XBLOCK, YBLOCK, etc.)
@@ -1874,6 +1876,13 @@ class triton:
 
     # hint to Triton when arguments are divisible by 16
     divisible_by_16 = os.environ.get("TORCHINDUCTOR_DIVISIBLE_BY_16", "1") == "1"
+
+    # On AMD/HIP, annotate pointer args with tt.pointer_range=32 when the
+    # tensor storage provably fits in 2 GB. This lets Triton emit efficient
+    # buffer load/store ops. Disable if a Triton compiler bug is triggered.
+    emit_pointer_range_32 = (
+        os.environ.get("TORCHINDUCTOR_EMIT_POINTER_RANGE_32", "1") == "1"
+    )
 
     # Minimum R0_BLOCK to be used for a TritonSplitScanKernel
     # NOTE: This also indirectly controls the size of workspace buffer required
