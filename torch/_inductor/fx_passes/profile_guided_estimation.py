@@ -11,6 +11,7 @@ and no cross-rank synchronization is needed.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import math
@@ -22,6 +23,7 @@ import torch
 import torch.fx as fx
 from torch._inductor.analysis.profile_analysis import (
     _create_extern_mapping,
+    _dtype_map,
     _get_size_from_string,
 )
 from torch._inductor.fx_passes.bucketing import (
@@ -35,6 +37,18 @@ from torch.utils._ordered_set import OrderedSet
 
 
 log = logging.getLogger(__name__)
+
+# Profiler TypeMeta string -> torch.dtype. Extends profile_analysis._dtype_map
+# with c10:: prefixed types and C++ native type names from caffe2::TypeMeta::name().
+_TYPEMETA_TO_DTYPE: dict[str, torch.dtype] = {
+    **_dtype_map,
+    "c10::Half": torch.float16,
+    "c10::BFloat16": torch.bfloat16,
+    "double": torch.float64,
+    "signed char": torch.int8,
+    "unsigned char": torch.uint8,
+    "bool": torch.bool,
+}
 
 
 def _rank_stride(ranks: tuple[int, ...]) -> int | None:
@@ -76,7 +90,7 @@ class OpRecord:
 
     op_name: str  # normalized name, e.g. "aten::mm", "mylib::my_custom_op"
     input_shapes: tuple[tuple[int, ...], ...]
-    dtype: str
+    dtype: torch.dtype | None
     duration_us: float  # sum of all GPU kernels for this CPU op
 
 
@@ -109,9 +123,9 @@ class ProfileData:
     # ambiguity check (skip fallback if multiple PGs share the same mesh dim).
     _pg_count_by_mesh_dim: dict[tuple[int, int], int] = field(default_factory=dict)
     # Generic op index: (op_name, input_shapes, dtype) -> avg_dur_us
-    _op_index: dict[tuple[str, tuple[tuple[int, ...], ...], str], float] = field(
-        default_factory=dict
-    )
+    _op_index: dict[
+        tuple[str, tuple[tuple[int, ...], ...], torch.dtype | None], float
+    ] = field(default_factory=dict)
     # Peak observed bandwidth per PG (GB/s), computed from largest messages
     _pg_peak_bw: dict[tuple[int, ...], float] = field(default_factory=dict)
     # Mesh-dimension fallback: (stride, group_size) -> peak BW (GB/s)
@@ -247,7 +261,8 @@ class ProfileData:
         input_types = args.get("Input type", [])
         if not input_dims:
             return
-        dtype = input_types[0] if input_types else ""
+        dtype_str = input_types[0] if input_types else ""
+        dtype = _TYPEMETA_TO_DTYPE.get(dtype_str)
         # Skip empty entries (non-tensor args like scalars/None) so the shape
         # tuple matches what _get_node_input_shapes extracts from FX nodes.
         shapes = tuple(
@@ -515,7 +530,7 @@ class ProfileData:
         self,
         op_name: str,
         input_shapes: tuple[tuple[int, ...], ...],
-        dtype: str,
+        dtype: torch.dtype | None,
     ) -> float | None:
         """Look up op duration in ms by exact shape match. Returns None on miss."""
         key = (op_name, input_shapes, dtype)
@@ -525,55 +540,31 @@ class ProfileData:
         return None
 
 
-# Mapping from torch.dtype to C++ caffe2::TypeMeta::name() string, as emitted
-# by the Kineto profiler in the "Input type" field of Chrome Trace JSON events.
-# Related: profile_analysis._dtype_map provides the inverse for a subset of types.
-_DTYPE_TO_TYPEMETA_STR: dict[torch.dtype, str] = {
-    torch.float32: "float",
-    torch.float16: "c10::Half",
-    torch.bfloat16: "c10::BFloat16",
-    torch.float64: "double",
-    torch.int32: "int",
-    torch.int64: "long int",
-    torch.int8: "signed char",
-    torch.uint8: "unsigned char",
-    torch.bool: "bool",
-}
+@functools.cache
+def _dtype_to_nccl_str(dtype: torch.dtype) -> str:
+    """Convert torch.dtype to NCCL/ScalarType name (for collective matching).
 
-# Mapping from torch.dtype to the NCCL dtype string used in collective kernel
-# events (e.g. "Float", "BFloat16"). Different from TypeMeta names above.
-_DTYPE_TO_NCCL_STR: dict[torch.dtype, str] = {
-    torch.float32: "Float",
-    torch.float16: "Half",
-    torch.bfloat16: "BFloat16",
-    torch.float64: "Double",
-    torch.int32: "Int",
-    torch.int64: "Long",
-    torch.int8: "Char",
-    torch.uint8: "Byte",
-}
+    Derives the name from torch.Tensor.type() which returns e.g.
+    "torch.BFloat16Tensor" -> "BFloat16".
+    """
+    return (
+        torch.tensor([], dtype=dtype)
+        .type()
+        .removeprefix("torch.")
+        .removesuffix("Tensor")
+    )
 
 
-def _dtype_to_profile_str(dtype: torch.dtype) -> str:
-    """Convert torch.dtype to NCCL dtype string (for collective matching)."""
-    return _DTYPE_TO_NCCL_STR.get(dtype, str(dtype))
-
-
-def _dtype_to_typemeta_str(dtype: torch.dtype) -> str:
-    """Convert torch.dtype to TypeMeta name string (for op matching)."""
-    return _DTYPE_TO_TYPEMETA_STR.get(dtype, str(dtype))
-
-
-def _get_node_dtype_str(node: fx.Node) -> str:
-    """Extract dtype as TypeMeta name string from FX node metadata (for op matching)."""
+def _get_node_dtype(node: fx.Node) -> torch.dtype | None:
+    """Extract dtype from FX node metadata."""
     val = node.meta.get("val")
     if isinstance(val, torch.Tensor):
-        return _dtype_to_typemeta_str(val.dtype)
+        return val.dtype
     if isinstance(val, (list, tuple)) and val:
         first = val[0]
         if isinstance(first, torch.Tensor):
-            return _dtype_to_typemeta_str(first.dtype)
-    return ""
+            return first.dtype
+    return None
 
 
 def _fx_target_to_profile_name(node: fx.Node) -> str | None:
@@ -678,7 +669,7 @@ def _get_collective_info(
         nelems = 1
         for s in val.shape:
             nelems *= int(s)
-        dtype = _dtype_to_profile_str(val.dtype)
+        dtype = _dtype_to_nccl_str(val.dtype)
     else:
         # Try first arg
         if node.args and isinstance(node.args[0], fx.Node):
@@ -687,7 +678,7 @@ def _get_collective_info(
                 nelems = 1
                 for s in inp_val.shape:
                     nelems *= int(s)
-                dtype = _dtype_to_profile_str(inp_val.dtype)
+                dtype = _dtype_to_nccl_str(inp_val.dtype)
             else:
                 return None
         else:
@@ -730,7 +721,7 @@ class ProfileGuidedEstimator:
             {
                 "op": op_name,
                 "shapes": [list(s) for s in shapes],
-                "dtype": dtype,
+                "dtype": str(dtype) if dtype is not None else "",
                 "profile_ms": dur_us / 1e3,
             }
             for (op_name, shapes, dtype), dur_us in profile._op_index.items()
@@ -816,5 +807,5 @@ class ProfileGuidedEstimator:
         input_shapes = _get_node_input_shapes(node)
         if input_shapes is None:
             return None
-        dtype = _get_node_dtype_str(node)
+        dtype = _get_node_dtype(node)
         return self.profile.lookup_op(profile_name, input_shapes, dtype)

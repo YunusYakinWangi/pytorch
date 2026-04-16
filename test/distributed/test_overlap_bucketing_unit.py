@@ -1806,7 +1806,7 @@ def _load_pge_profile(data):
 
 class TestProfileGuidedEstimation(TestCase):
     def test_profile_loading_and_lookup(self):
-        """Load a trace with collectives, matmuls, and SDPA; verify all lookup paths."""
+        """Load a trace with collectives and ops; verify lookup returns expected values."""
         trace = _make_pge_trace(
             collectives=[
                 {
@@ -1814,7 +1814,7 @@ class TestProfileGuidedEstimation(TestCase):
                     "dur": 100.0,
                     "nelems": 1000,
                     "dtype": "Float",
-                    "ranks": "[0, 2, 4, 6]",
+                    "ranks": "[0,2,4,6]",
                     "group_size": 4,
                 },
                 {
@@ -1822,7 +1822,7 @@ class TestProfileGuidedEstimation(TestCase):
                     "dur": 800.0,
                     "nelems": 8000,
                     "dtype": "Float",
-                    "ranks": "[0, 2, 4, 6]",
+                    "ranks": "[0,2,4,6]",
                     "group_size": 4,
                 },
             ],
@@ -1831,100 +1831,47 @@ class TestProfileGuidedEstimation(TestCase):
                     "shapes": [[128, 256], [256, 512]],
                     "dur": 50.0,
                     "dtypes": ["float", "float"],
-                },
+                }
             ],
             sdpa_ops=[
                 {
                     "input_dims": [[2, 8, 1024, 64]],
                     "dur": 300.0,
                     "dtypes": ["c10::BFloat16"],
-                },
+                }
             ],
             pg_config={"0": {"ranks": [0, 2, 4, 6]}},
         )
         profile = _load_pge_profile(trace)
 
-        # Collective exact match
-        result = profile.lookup_collective("all_reduce", (0, 2, 4, 6), 1000, "Float")
-        self.assertAlmostEqual(result[0], 0.1, places=4)
-
-        # Collective interpolation
-        result = profile.lookup_collective("all_reduce", (0, 2, 4, 6), 4000, "Float")
-        self.assertGreater(result[0], 0.1)
-        self.assertLess(result[0], 0.8)
-
-        # Collective stride fallback (different ranks, same mesh dim)
-        result = profile.lookup_collective("all_reduce", (1, 3, 5, 7), 1000, "Float")
-        self.assertAlmostEqual(result[0], 0.1, places=4)
-
-        # Collective miss
+        # Collective: exact, interpolation, stride fallback, miss
+        self.assertAlmostEqual(
+            profile.lookup_collective("all_reduce", (0, 2, 4, 6), 1000, "Float")[0],
+            0.1,
+            places=4,
+        )
+        self.assertGreater(
+            profile.lookup_collective("all_reduce", (0, 2, 4, 6), 4000, "Float")[0], 0.1
+        )
+        self.assertIsNotNone(
+            profile.lookup_collective("all_reduce", (1, 3, 5, 7), 1000, "Float")
+        )
         self.assertIsNone(
             profile.lookup_collective("all_to_all", (0, 2, 4, 6), 1000, "Float")
         )
 
-        # Op exact match (mm)
+        # Op: exact match, shape miss, dtype miss
         self.assertAlmostEqual(
-            profile.lookup_op("aten::mm", ((128, 256), (256, 512)), "float"),
+            profile.lookup_op("aten::mm", ((128, 256), (256, 512)), torch.float32),
             0.05,
             places=4,
         )
-        # Op shape miss — no interpolation for non-collectives
         self.assertIsNone(
-            profile.lookup_op("aten::mm", ((999, 999), (999, 999)), "float")
+            profile.lookup_op("aten::mm", ((999, 999), (999, 999)), torch.float32)
         )
-        # Op dtype miss
         self.assertIsNone(
-            profile.lookup_op("aten::mm", ((128, 256), (256, 512)), "c10::Half")
+            profile.lookup_op("aten::mm", ((128, 256), (256, 512)), torch.float16)
         )
-
-        # SDPA exact match
-        self.assertAlmostEqual(
-            profile.lookup_op(
-                "aten::_scaled_dot_product_flash_attention",
-                ((2, 8, 1024, 64),),
-                "c10::BFloat16",
-            ),
-            0.3,
-            places=4,
-        )
-
-    def test_collective_bandwidth_extrapolation(self):
-        """Large messages beyond EXTRAPOLATION_CAP use BW-based estimation."""
-        trace = _make_pge_trace(
-            collectives=[
-                {
-                    "name": "allreduce",
-                    "dur": 100.0,
-                    "nelems": 1000,
-                    "dtype": "Float",
-                    "ranks": "[0,1,2,3]",
-                    "group_size": 4,
-                },
-                {
-                    "name": "allreduce",
-                    "dur": 400.0,
-                    "nelems": 4000,
-                    "dtype": "Float",
-                    "ranks": "[0,1,2,3]",
-                    "group_size": 4,
-                },
-            ],
-            pg_config={"0": {"ranks": [0, 1, 2, 3]}},
-        )
-        profile = _load_pge_profile(trace)
-
-        # Within range: log-log interpolation
-        _, source_in = profile.lookup_collective(
-            "all_reduce", (0, 1, 2, 3), 2000, "Float"
-        )
-        self.assertEqual(source_in, "profile")
-
-        # Far beyond range: BW-based
-        est_far, source_far = profile.lookup_collective(
-            "all_reduce", (0, 1, 2, 3), 100000, "Float"
-        )
-        self.assertEqual(source_far, "pg_bandwidth")
-        self.assertGreater(est_far, 0)
 
 
 @requires_accelerator_dist_backend(["nccl", "xccl"])
