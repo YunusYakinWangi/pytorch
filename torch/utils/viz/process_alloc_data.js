@@ -447,7 +447,7 @@ function process_alloc_data(snapshot, device, plot_segments, max_entries, includ
         pool_segment_events.push({
           position: actions.length,
           delta: is_add ? e.size : -e.size,
-          pool_key: `${pid[0]},${pid[1]},s${e.stream ?? 0}`,
+          pool_key: format_pool_key(pid, e.stream ?? 0),
         });
       }
     }
@@ -578,11 +578,14 @@ function process_alloc_data(snapshot, device, plot_segments, max_entries, includ
   const pools = {};
   const pool_active_elems = {};
 
+  function format_pool_key(pid, stream) {
+    return `${pid[0]},${pid[1]},s${stream}`;
+  }
+
   function get_pool_key(elem_idx) {
     const pid = elements[elem_idx].segment_pool_id;
     if (!isPrivatePoolId(pid)) return null;
-    const stream = elements[elem_idx].stream;
-    return `${pid[0]},${pid[1]},s${stream}`;
+    return format_pool_key(pid, elements[elem_idx].stream);
   }
 
   function get_or_create_pool(pool_key) {
@@ -744,7 +747,7 @@ function process_alloc_data(snapshot, device, plot_segments, max_entries, includ
     for (const seg of device_segments) {
       const pid = seg.segment_pool_id;
       if (isPrivatePoolId(pid)) {
-        const pk = `${pid[0]},${pid[1]},s${seg.stream ?? 0}`;
+        const pk = format_pool_key(pid, seg.stream ?? 0);
         snapshot_reserved[pk] = (snapshot_reserved[pk] || 0) + seg.total_size;
       }
     }
