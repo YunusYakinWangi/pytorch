@@ -1,3 +1,8 @@
+# File-path-based reviewer auto-assignment using merge_rules.yaml.
+# This complements (not replaces) auto_request_review.yml, which does
+# author-based routing via necojackarc/auto-request-review. That workflow
+# assigns reviewers based on who authored the PR; this one assigns domain
+# owners based on which files the PR touches.
 name: Auto Request Reviewers
 
 on:
@@ -5,10 +10,14 @@ on:
     types: [opened, synchronize]
   workflow_dispatch:
     inputs:
-      pr_url:
-        description: "PR link (e.g. https://github.com/pytorch/pytorch/pull/12345)"
+      pr:
+        description: "PR number or link (e.g. 12345 or https://github.com/pytorch/pytorch/pull/12345)"
         type: string
         required: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}-${{ github.event_name == 'workflow_dispatch' }}
+  cancel-in-progress: true
 
 jobs:
   request-reviewers:
@@ -23,22 +32,37 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          sparse-checkout: .github/merge_rules.yaml
+          # Pin to base branch SHA to ensure we never check out PR head under pull_request_target
+          ref: ${{ github.event.pull_request.base.sha || github.sha }}
+          sparse-checkout: |
+            .github/merge_rules.yaml
+            .github/scripts/gitutils.py
+            .github/scripts/match_reviewers.py
 
       - name: Resolve PR and check eligibility
         id: pr
         uses: actions/github-script@v7
+        env:
+          PR_INPUT: ${{ inputs.pr }}
         with:
           script: |
             let prNumber;
-            const prUrl = '${{ inputs.pr_url }}';
-            if (prUrl) {
-              const match = prUrl.match(/\/pull\/(\d+)/);
-              if (!match) {
-                core.setFailed(`Invalid PR link: ${prUrl}. Expected format: https://github.com/pytorch/pytorch/pull/12345`);
-                return;
+            const prInput = process.env.PR_INPUT;
+            if (prInput) {
+              if (/^\d+$/.test(prInput)) {
+                prNumber = parseInt(prInput);
+              } else {
+                const match = prInput.match(/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)/);
+                if (!match) {
+                  core.setFailed('Invalid input. Expected a PR number or URL like https://github.com/pytorch/pytorch/pull/12345');
+                  return;
+                }
+                if (match[1] !== 'pytorch/pytorch') {
+                  core.setFailed(`URL must be for pytorch/pytorch, got ${match[1]}`);
+                  return;
+                }
+                prNumber = parseInt(match[2]);
               }
-              prNumber = parseInt(match[1]);
             } else {
               prNumber = context.payload.pull_request.number;
             }
@@ -66,14 +90,24 @@ jobs:
             if (labels.includes('triaged')) return skip('already has "triaged" label');
             if (title.includes('WIP') || title.includes('TESTING')) return skip('title contains WIP or TESTING');
 
-            // Check if PR already has an approving review
-            const reviews = await github.rest.pulls.listReviews({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: prNumber,
-            });
-            const approved = reviews.data.some(r => r.state === 'APPROVED');
-            if (approved) return skip('PR already has an approving review');
+            // Skip if any reviewer has already approved or requested changes —
+            // the PR already has review activity and doesn't need auto-triage.
+            const allReviews = [];
+            for (let page = 1; ; page++) {
+              const resp = await github.rest.pulls.listReviews({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                per_page: 100,
+                page,
+              });
+              allReviews.push(...resp.data);
+              if (resp.data.length < 100) break;
+            }
+            const hasReviewActivity = allReviews.some(
+              r => r.state === 'APPROVED' || r.state === 'CHANGES_REQUESTED'
+            );
+            if (hasReviewActivity) return skip('PR already has review activity');
 
             core.info(`PR #${prNumber} is eligible for auto reviewer request`);
             core.setOutput('eligible', 'true');
@@ -84,9 +118,11 @@ jobs:
         if: steps.pr.outputs.eligible == 'true'
         id: changed
         uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
         with:
           script: |
-            const prNumber = ${{ steps.pr.outputs.number }};
+            const prNumber = parseInt(process.env.PR_NUMBER);
             const files = [];
             const per_page = 100;
             let page = 1;
@@ -106,63 +142,33 @@ jobs:
             }
             core.setOutput('files', JSON.stringify(files));
 
+      - name: Install PyYAML
+        if: steps.pr.outputs.eligible == 'true'
+        run: pip install PyYAML
+
       - name: Determine reviewers from merge rules
         if: steps.pr.outputs.eligible == 'true'
         id: reviewers
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const fs = require('fs');
-            const yaml = require('js-yaml');
-            const {minimatch} = require('minimatch');
-
-            const rules = yaml.load(fs.readFileSync('.github/merge_rules.yaml', 'utf8'));
-            const changedFiles = JSON.parse('${{ steps.changed.outputs.files }}');
-            const prAuthor = '${{ steps.pr.outputs.author }}'.toLowerCase();
-
-            // Skip wildcard-only rules and bot accounts
-            const SKIP_RULES = new Set(['superuser', 'Core Reviewers', 'Core Maintainers']);
-            const SKIP_USERS = new Set(['pytorchbot']);
-
-            const reviewers = new Set();
-            const teams = new Set();
-
-            for (const rule of rules) {
-              if (SKIP_RULES.has(rule.name)) continue;
-
-              const patterns = rule.patterns || [];
-              const approvers = rule.approved_by || [];
-
-              // Check if any changed file matches any pattern in this rule
-              const matched = changedFiles.some(file =>
-                patterns.some(pattern => minimatch(file, pattern, {matchBase: false}))
-              );
-
-              if (matched) {
-                for (const approver of approvers) {
-                  if (SKIP_USERS.has(approver)) continue;
-                  if (approver.startsWith('pytorch/')) {
-                    teams.add(approver.replace('pytorch/', ''));
-                  } else if (approver.toLowerCase() !== prAuthor) {
-                    reviewers.add(approver);
-                  }
-                }
-              }
-            }
-
-            core.info(`Matched reviewers: ${[...reviewers].join(', ')}`);
-            core.info(`Matched teams: ${[...teams].join(', ')}`);
-            core.setOutput('reviewers', JSON.stringify([...reviewers]));
-            core.setOutput('teams', JSON.stringify([...teams]));
+        env:
+          CHANGED_FILES: ${{ steps.changed.outputs.files }}
+          PR_AUTHOR: ${{ steps.pr.outputs.author }}
+        run: |
+          RESULT=$(echo "$CHANGED_FILES" | python3 .github/scripts/match_reviewers.py \
+            --merge-rules .github/merge_rules.yaml \
+            --pr-author "$PR_AUTHOR" \
+            --changed-files-stdin)
+          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
 
       - name: Request reviews
         if: steps.pr.outputs.eligible == 'true'
         uses: actions/github-script@v7
+        env:
+          PR_NUMBER: ${{ steps.pr.outputs.number }}
+          MATCH_RESULT: ${{ steps.reviewers.outputs.result }}
         with:
           script: |
-            const prNumber = ${{ steps.pr.outputs.number }};
-            const reviewers = JSON.parse('${{ steps.reviewers.outputs.reviewers }}');
-            const teams = JSON.parse('${{ steps.reviewers.outputs.teams }}');
+            const {reviewers, teams} = JSON.parse(process.env.MATCH_RESULT);
+            const prNumber = parseInt(process.env.PR_NUMBER);
 
             if (reviewers.length === 0 && teams.length === 0) {
               core.info('No reviewers to request.');
