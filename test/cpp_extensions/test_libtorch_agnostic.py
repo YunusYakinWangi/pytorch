@@ -1351,6 +1351,7 @@ except RuntimeError as e:
             capture_output=True,
             text=True,
             env=env,
+            check=False,
         )
 
         error_message = result.stdout + result.stderr
@@ -1527,6 +1528,7 @@ except RuntimeError as e:
             capture_output=True,
             text=True,
             env=env,
+            check=False,
         )
 
         error_message = result.stdout + result.stderr
