@@ -5124,7 +5124,7 @@ class TestEpilogueFusionStaticAnalysis(TestCase):
             epilogue_runtime = 0.3
             expect_fusion = False
         else:
-            raise RuntimeError("Invalid test case")
+            raise RuntimeError("Invalid test case, unreachable")
 
         f = self._get_mm_with_epilogue_fn()
         a, b = self._get_mm_inputs()
