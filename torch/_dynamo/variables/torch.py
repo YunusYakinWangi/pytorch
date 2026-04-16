@@ -938,6 +938,26 @@ class TorchInGraphFunctionVariable(BaseTorchVariable):
                 ],
             )
 
+        @register(torch.debug.watch)
+        def handle_watch(
+            self,
+            tx: "InstructionTranslator",
+            tensor: VariableTracker,
+            name: VariableTracker = None,
+        ) -> VariableTracker:
+            if name is None:
+                name_proxy = ""
+            else:
+                name_proxy = name.as_python_constant()
+
+            tx.output.create_node(
+                "call_function",
+                torch.debug.watch,
+                (tensor.as_proxy(), name_proxy),
+                {},
+            )
+            return tensor
+
         @register(torch.library.wrap_triton)
         def handle_wrap_triton(
             self,

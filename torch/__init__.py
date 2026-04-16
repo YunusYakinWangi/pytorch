@@ -2580,6 +2580,7 @@ def compile(
     options: dict[str, str | builtins.int | builtins.bool | _Callable] | None = None,
     name: str | None = None,
     disable: builtins.bool = False,
+    debug: builtins.bool = False,
 ) -> _Callable[_InputT, _RetT]: ...
 
 
@@ -2594,6 +2595,7 @@ def compile(
     options: dict[str, str | builtins.int | builtins.bool | _Callable] | None = None,
     name: str | None = None,
     disable: builtins.bool = False,
+    debug: builtins.bool = False,
 ) -> _Callable[[_Callable[_InputT, _RetT]], _Callable[_InputT, _RetT]]: ...
 
 
@@ -2608,6 +2610,7 @@ def compile(
     name: str | None = None,
     disable: builtins.bool = False,
     recompile_limit: builtins.int | None = None,
+    debug: builtins.bool = False,
 ) -> (
     _Callable[[_Callable[_InputT, _RetT]], _Callable[_InputT, _RetT]]
     | _Callable[_InputT, _RetT]
@@ -2738,6 +2741,7 @@ def compile(
                 options=options,
                 name=name,
                 disable=disable,
+                debug=debug,
             )
 
         return fn
@@ -2795,6 +2799,7 @@ def compile(
         disable=disable,
         guard_filter_fn=guard_filter_fn,
         recompile_limit=recompile_limit,
+        debug=debug,
     )(model)  # type: ignore[return-value]
 
 
@@ -3041,5 +3046,8 @@ def _as_tensor_fullprec(t):
 if _is_device_backend_autoload_enabled():
     _import_device_backends()
 
-# Register all registered custom / override ops in torch/_native
+# Register all registered custom / override ops in torch._native
 import torch._native
+import torch.debug
+__all__.append("debug")
+

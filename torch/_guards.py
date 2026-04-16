@@ -1119,6 +1119,7 @@ class TracingContext:
         # list of code objects for inlined functions
         self.traced_code: list[CodeType] = []
         self.cudagraph_annotation: Any = None
+        self.debug: bool = False
 
     def clear(self) -> None:
         # Look at the note in output_graph.py in function `save_global_state`

@@ -639,6 +639,13 @@ def unimplemented(
 
     msg = format_graph_break_message(gb_type, context, explanation, hints)
 
+    tracing_ctx = torch._guards.TracingContext.try_get()
+    if tracing_ctx and getattr(tracing_ctx, "debug", False):
+        msg += "\n\n[DCL DEBUG] Graph break detailed info:\n"
+        msg += f"GB Type: {gb_type}\n"
+        msg += f"Explanation: {explanation}\n"
+        msg += "Try to refactor this part to avoid data-dependent control flow or unsupported operations."
+
     if log_warning:
         log.warning(msg)
     if from_exc is not _NOTHING:

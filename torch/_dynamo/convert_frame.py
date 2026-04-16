@@ -587,6 +587,7 @@ class ConvertFrameAssert:
         export_constraints: Any | None = None,
         package: CompilePackage | None = None,
         recompile_limit: int | None = None,
+        debug: bool = False,
     ) -> None:
         # assert export_constraints is None
         reset_graph_break_dup_checker()
@@ -597,6 +598,7 @@ class ConvertFrameAssert:
         self._package = package
         self._recompile_limit = recompile_limit
         self._box = ConvertFrameBox()
+        self._debug = debug
 
     @property
     def _clone_with_backend(self) -> Callable[[CompilerFn], ConvertFrameAssert]:
@@ -752,6 +754,7 @@ class ConvertFrameAssert:
                     skip=skip + 1,
                     package=self._package,
                     convert_frame_box=self._box,
+                    debug=self._debug,
                 )
         finally:
             # Restore the previous initial_global_state for nested compilation handling
@@ -772,6 +775,7 @@ def convert_frame_assert(
     export_constraints: Any | None = None,
     package: CompilePackage | None = None,
     recompile_limit: int | None = None,
+    debug: bool = False,
 ) -> ConvertFrameAssert:
     """Fully convert a frame into an FX graph, raising an exception if we fail."""
     return ConvertFrameAssert(
@@ -781,6 +785,7 @@ def convert_frame_assert(
         export_constraints,
         package,
         recompile_limit,
+        debug,
     )
 
 
@@ -860,6 +865,7 @@ def trace_frame(
     frame_state: dict[str, int | FrameStateSizeEntry] | None = None,
     distributed_state: DistributedState | None = None,
     package: CompilePackage | None = None,
+    debug: bool = False,
 ) -> DynamoTracerOutput:
     from torch.fx.experimental.validator import bisect, translation_validation_enabled
 
@@ -883,6 +889,7 @@ def trace_frame(
         exn_vt_stack=exn_vt_stack,
         distributed_state=distributed_state,  # type: ignore[has-type]
         package=package,
+        debug=debug,
     )
 
     def run_tracer() -> None:
@@ -1430,6 +1437,7 @@ def compile_frame(  # type: ignore[return]
     frame_state: dict[str, int | FrameStateSizeEntry] | None = None,
     distributed_state: DistributedState | None = None,
     package: CompilePackage | None = None,
+    debug: bool = False,
     # pyrefly: ignore [bad-return]
 ) -> DynamoOutput:
     """
@@ -1464,6 +1472,7 @@ def compile_frame(  # type: ignore[return]
             frame_state=frame_state,
             distributed_state=distributed_state,
             package=package,
+            debug=debug,
         )
 
         assert tracer_output is not None
@@ -1546,6 +1555,7 @@ def _compile(
     # Can be used to record things for the caller, both
     # in the case of normal and exception code paths
     convert_frame_box: ConvertFrameBox | None = None,
+    debug: bool = False,
 ) -> ConvertFrameReturn:
     from torch.fx.experimental.validator import (
         BisectValidationException,
@@ -1641,6 +1651,7 @@ def _compile(
                     frame_state=frame_state,
                     distributed_state=distributed_state,
                     package=package,
+                    debug=debug,
                 )
         except exc.SkipFrame as e:
             if one_graph:
@@ -2159,6 +2170,7 @@ class ConvertFrame:
         hooks: Hooks,
         package: CompilePackage | None = None,
         recompile_limit: int | None = None,
+        debug: bool = False,
     ) -> None:
         self._torchdynamo_orig_backend = compiler_fn
         self._inner_convert = convert_frame_assert(
@@ -2166,9 +2178,11 @@ class ConvertFrame:
             one_graph=False,
             package=package,
             recompile_limit=recompile_limit,
+            debug=debug,
         )
         self._hooks = hooks
         self._recompile_limit = recompile_limit
+        self._debug = debug
 
     @property
     def _clone_with_backend(self) -> Callable[[WrapBackendDebug], ConvertFrame]:
@@ -2301,10 +2315,11 @@ def convert_frame(
     hooks: Hooks,
     package: CompilePackage | None = None,
     recompile_limit: int | None = None,
+    debug: bool = False,
 ) -> ConvertFrame:
     """Try to convert a frame into an FX graph, if error leave frame unmodified"""
     return ConvertFrame(
-        compiler_fn, hooks, package=package, recompile_limit=recompile_limit
+        compiler_fn, hooks, package=package, recompile_limit=recompile_limit, debug=debug
     )
 
 

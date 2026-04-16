@@ -744,6 +744,7 @@ class _TorchDynamoContext:
         compiler_config: Any | None = None,
         package: CompilePackage | None = None,
         hooks: Hooks | None = None,
+        debug: bool = False,
     ) -> None:
         super().__init__()
         assert callable(callback) or callback is False or callback is None
@@ -760,6 +761,7 @@ class _TorchDynamoContext:
         self.enter_exit_hooks = []
         self._package = package
         self._hooks = hooks
+        self.debug = debug
         patch_fn()
 
         # Save the backends so that we can reset them during torch._dynamo.reset
@@ -1169,6 +1171,7 @@ class OptimizeContext(_TorchDynamoContext):
         rebuild_ctx: Callable[[], OptimizeContext | _NullDecorator] | None = None,
         package: CompilePackage | None = None,
         hooks: Hooks | None = None,
+        debug: bool = False,
     ) -> None:
         def on_enter() -> None:
             install_generation_tagging_init()
@@ -1186,6 +1189,7 @@ class OptimizeContext(_TorchDynamoContext):
             compiler_config=compiler_config,
             package=package,
             hooks=hooks,
+            debug=debug,
         )
 
         if config.compiled_autograd:
@@ -1337,6 +1341,7 @@ def _optimize_catch_errors(
     compiler_config: Any | None = None,
     rebuild_ctx: Callable[[], OptimizeContext | _NullDecorator] | None = None,
     package: CompilePackage | None = None,
+    debug: bool = False,
 ) -> OptimizeContext:
     return OptimizeContext(
         convert_frame.catch_errors_wrapper(compile_fn, hooks),
@@ -1350,6 +1355,7 @@ def _optimize_catch_errors(
         rebuild_ctx=rebuild_ctx,
         package=package,
         hooks=hooks,
+        debug=debug,
     )
 
 
@@ -1536,6 +1542,7 @@ def _optimize(
     dynamic: bool | None = None,
     package: CompilePackage | None = None,
     recompile_limit: int | None = None,
+    debug: bool = False,
 ) -> OptimizeContext | _NullDecorator:
     """
     The main entrypoint of TorchDynamo.  Do graph capture and call
@@ -1595,6 +1602,7 @@ def _optimize(
             rebuild_ctx=rebuild_ctx,
             package=package,
             recompile_limit=recompile_limit,
+            debug=debug,
         )
 
     backend = get_compiler_fn(backend)
@@ -1619,6 +1627,7 @@ def _optimize(
             hooks,
             package=package,
             recompile_limit=recompile_limit,
+            debug=debug,
         ),
         hooks,
         backend_ctx_ctor,
@@ -1633,6 +1642,7 @@ def _optimize(
         ),
         rebuild_ctx=rebuild_ctx,
         package=package,
+        debug=debug,
     )
 
 
@@ -2472,6 +2482,7 @@ def _optimize_assert(
     dynamic: bool | None = None,
     package: CompilePackage | None = None,
     recompile_limit: int | None = None,
+    debug: bool = False,
 ) -> OptimizeContext:
     """
     Guarantees single-graph capture.
@@ -2511,6 +2522,7 @@ def _optimize_assert(
         dynamic=dynamic,
         rebuild_ctx=rebuild_ctx,
         package=package,
+        debug=debug,
     )
 
 

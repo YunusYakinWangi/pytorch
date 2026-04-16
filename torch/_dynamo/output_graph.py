@@ -611,6 +611,7 @@ class OutputGraph(OutputGraphCommon):
         torch_function_mode_stack: list[torch.overrides.TorchFunctionMode],
         package: Optional["CompilePackage"],
         one_graph: bool = False,
+        debug: bool = False,
     ) -> None:
         OutputGraphGuardsState.__init__(
             self,
@@ -629,6 +630,7 @@ class OutputGraph(OutputGraphCommon):
             _guards=torch._guards.GuardsSet(),
             _aotautograd_guards=[],
         )
+        self.debug = debug
         self.tracers = [SubgraphTracer(self, is_export=export)]
         # Map from graph input's `Source` to its `VariableTracker` to
         # de-duplicate graph inputs by source and reuse the tracker
@@ -698,6 +700,7 @@ class OutputGraph(OutputGraphCommon):
                 export=self.export,
             )
         self.tracing_context: TracingContext = TracingContext(fake_mode)
+        self.tracing_context.debug = debug
         self.tracing_context.traced_code.append(f_code)
         self.tracing_context.cudagraph_annotation = self.cudagraph_annotation
         self.traced_code = self.tracing_context.traced_code
@@ -2988,6 +2991,18 @@ class OutputGraph(OutputGraphCommon):
         )
 
         # pyrefly: ignore [bad-return]
+        if self.debug:
+            def shadow_executor(*args, **kwargs):
+                result_compiled = compiled_fn(*args, **kwargs)
+                try:
+                    result_eager = gm(*args, **kwargs)
+                    # Simple comparison for prototype
+                    torch.testing.assert_close(result_compiled, result_eager, rtol=1e-4, atol=1e-4)
+                except Exception as e:
+                    print(f"[DCL DEBUG] Numerical mismatch detected in shadow execution: {e}")
+                return result_compiled
+            return shadow_executor
+
         return compiled_fn
 
     def dedup_pass(self) -> dict[str, torch.fx.GraphModule]:
@@ -3854,6 +3869,16 @@ class SubgraphTracer(fx.Tracer):
             # official from_list stub doesn't have new-style type
             msgs = traceback.StackSummary.from_list(filtered_frame_summaries).format()
             rv.node.stack_trace = "".join(msgs)
+
+        if self.output.debug:
+            # Operation-Level Trace Mapping
+            rv.node.meta["debug_info"] = {
+                "filename": tx.f_code.co_filename,
+                "lineno": tx.lineno,
+                "name": rv.node.name,
+                "target": str(target),
+                "module_hierarchy": list(rv.node.meta.get("nn_module_stack", {}).keys()),
+            }
 
         if (
             torch._dynamo.config.use_graph_deduplication

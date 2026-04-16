@@ -8647,3 +8647,7 @@ def force_fallback(op: torch._ops.OpOverload):
             lowerings[op] = old_handler
         else:
             lowerings.pop(op)
+
+@register_lowering(torch.debug.watch)
+def watch_lowering(tensor, name):
+    return tensor
