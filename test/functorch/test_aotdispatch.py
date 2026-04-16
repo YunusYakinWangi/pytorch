@@ -3150,131 +3150,7 @@ def forward(self, arg0_1, arg1_1):
         self.assertTrue("as_strided_scatter" in str(fw_graph_overlap1.code))
         self.assertTrue("as_strided_scatter" in str(fw_graph_overlap2.code))
 
-    def test_merge_view_inputs_error_non_differentiable_views(self):
-        from unittest.mock import MagicMock
-
-        from torch._functorch._aot_autograd.runtime_wrappers import merge_view_inputs
-        from torch._functorch._aot_autograd.schemas import InputAliasInfo
-
-        def make_input_info(mutates_data):
-            return InputAliasInfo(
-                is_leaf=True,
-                mutates_data=mutates_data,
-                mutates_metadata=False,
-                mutations_hidden_from_autograd=False,
-                mutations_under_no_grad_or_inference_mode=False,
-                mutation_inductor_storage_resize=False,
-                mutates_storage_metadata=False,
-                requires_grad=False,
-                keep_input_mutations=False,
-            )
-
-        cfg = MagicMock()
-        cfg.aot_id = 0
-        cfg.aot_autograd_arg_pos_to_source = None
-
-        # Two inputs sharing storage via set_() — both have _base=None,
-        # so they are not differentiable views of each other.
-        base = torch.randn(10)
-        a = torch.empty(5, dtype=torch.float32)
-        a.set_(base.untyped_storage(), 0, (5,), (1,))
-        b = torch.empty(5, dtype=torch.float32)
-        b.set_(base.untyped_storage(), 0, (5,), (1,))
-
-        fwd_inputs = [a, b]
-        mutated_input_info = [make_input_info(True), make_input_info(False)]
-
-        self.assertExpectedRaisesInline(
-            AssertionError,
-            lambda: merge_view_inputs(
-                cfg, fwd_inputs, None, mutated_input_info, is_inference=False
-            ),
-            """aot_autograd() does not yet handle non-differentiable view input mutations. input 0 (__dummy0) and input 1 (__dummy1) share storage but are not differentiable views of each other.""",  # noqa: B950
-        )
-
-    def test_merge_view_inputs_error_different_bases(self):
-        from unittest.mock import MagicMock
-
-        from torch._functorch._aot_autograd.runtime_wrappers import merge_view_inputs
-        from torch._functorch._aot_autograd.schemas import InputAliasInfo
-
-        def make_input_info(mutates_data):
-            return InputAliasInfo(
-                is_leaf=True,
-                mutates_data=mutates_data,
-                mutates_metadata=False,
-                mutations_hidden_from_autograd=False,
-                mutations_under_no_grad_or_inference_mode=False,
-                mutation_inductor_storage_resize=False,
-                mutates_storage_metadata=False,
-                requires_grad=False,
-                keep_input_mutations=False,
-            )
-
-        cfg = MagicMock()
-        cfg.aot_id = 0
-        cfg.aot_autograd_arg_pos_to_source = None
-
-        # Two views with different _base tensors. Use inference mode to
-        # bypass the site-1 check (which would fire first in training mode).
-        big = torch.randn(10, requires_grad=True)
-        detached_big = big.detach().requires_grad_(True)
-        v1 = big[0:5]
-        v2 = detached_big[0:5]
-
-        fwd_inputs = [v1, v2]
-        mutated_input_info = [make_input_info(True), make_input_info(False)]
-
-        self.assertExpectedRaisesInline(
-            AssertionError,
-            lambda: merge_view_inputs(
-                cfg, fwd_inputs, None, mutated_input_info, is_inference=True
-            ),
-            """aot_autograd() does not yet handle non-differentiable view input mutations. Aliased inputs share storage but have different autograd ._base tensors: input 0 (__dummy0) and input 1 (__dummy1) have ._base fields that point to different tensors.""",  # noqa: B950
-        )
-
-    def test_merge_view_inputs_error_mixed_base_states(self):
-        from unittest.mock import MagicMock
-
-        from torch._functorch._aot_autograd.runtime_wrappers import merge_view_inputs
-        from torch._functorch._aot_autograd.schemas import InputAliasInfo
-
-        def make_input_info(mutates_data):
-            return InputAliasInfo(
-                is_leaf=True,
-                mutates_data=mutates_data,
-                mutates_metadata=False,
-                mutations_hidden_from_autograd=False,
-                mutations_under_no_grad_or_inference_mode=False,
-                mutation_inductor_storage_resize=False,
-                mutates_storage_metadata=False,
-                requires_grad=False,
-                keep_input_mutations=False,
-            )
-
-        cfg = MagicMock()
-        cfg.aot_id = 0
-        cfg.aot_autograd_arg_pos_to_source = None
-
-        # One view with _base set, one with _base=None, sharing storage.
-        # Use inference mode to bypass the site-1 check.
-        big = torch.randn(10, requires_grad=True)
-        a = big[0:5]  # a._base = big
-        b = torch.empty(5, dtype=torch.float32)
-        b.set_(big.untyped_storage(), 0, (5,), (1,))  # _base=None, shares storage
-
-        fwd_inputs = [a, b]
-        mutated_input_info = [make_input_info(True), make_input_info(False)]
-
-        self.assertExpectedRaisesInline(
-            AssertionError,
-            lambda: merge_view_inputs(
-                cfg, fwd_inputs, None, mutated_input_info, is_inference=True
-            ),
-            """aot_autograd() does not yet handle non-differentiable view input mutations. Aliased inputs share storage but have mixed autograd ._base states: ['input 0 (__dummy0)'] have ._base set, while ['input 1 (__dummy1)'] have ._base=None (and are not the synthetic base).""",  # noqa: B950
-        )
-
-    def _check_merge_view_inputs_error_e2e(self, make_inputs, expected_error_substr):
+    def _check_merge_view_inputs_error(self, make_inputs, expected_error):
         """Helper: compile a mutation function, assert the Dynamo graph and error message."""
         from torch._dynamo.testing import EagerAndRecordGraphs
 
@@ -3301,17 +3177,17 @@ class GraphModule(torch.nn.Module):
 """,
         )
 
-        # Now compile with aot_eager to trigger merge_view_inputs error.
-        # The error message should contain Dynamo source names (L['a'], L['b'])
+        # Compile with aot_eager to trigger merge_view_inputs error.
+        # The error message contains Dynamo source names (L['a'], L['b'])
         # from the graph placeholders above.
         torch._dynamo.reset()
         try:
             torch.compile(fn, backend="aot_eager")(*make_inputs())
             self.fail("Expected BackendCompilerFailed")
         except torch._dynamo.exc.BackendCompilerFailed as e:
-            self.assertExpectedInline(str(e.inner_exception), expected_error_substr)
+            self.assertExpectedInline(str(e.inner_exception), expected_error)
 
-    def test_merge_view_inputs_error_non_differentiable_views_e2e(self):
+    def test_merge_view_inputs_error_non_differentiable_views(self):
         # Training mode (requires_grad) reaches site-1 in merge_view_inputs.
         def make_inputs():
             big = torch.randn(10, requires_grad=True)
@@ -3320,12 +3196,12 @@ class GraphModule(torch.nn.Module):
             b.set_(big.untyped_storage(), 0, (5,), (1,))  # _base=None
             return [b, a]
 
-        self._check_merge_view_inputs_error_e2e(
+        self._check_merge_view_inputs_error(
             make_inputs,
             """aot_autograd() does not yet handle non-differentiable view input mutations. input 0 (L['a']) and input 1 (L['b']) share storage but are not differentiable views of each other.""",  # noqa: B950
         )
 
-    def test_merge_view_inputs_error_different_bases_e2e(self):
+    def test_merge_view_inputs_error_different_bases(self):
         # Inference mode (no requires_grad) skips site-1, reaching site-2.
         def make_inputs():
             x = torch.randn(10)
@@ -3335,12 +3211,12 @@ class GraphModule(torch.nn.Module):
             v2 = y[0:5]  # _base = y (different object, same storage)
             return [v1, v2]
 
-        self._check_merge_view_inputs_error_e2e(
+        self._check_merge_view_inputs_error(
             make_inputs,
             """aot_autograd() does not yet handle non-differentiable view input mutations. Aliased inputs share storage but have different autograd ._base tensors: input 0 (L['a']) and input 1 (L['b']) have ._base fields that point to different tensors.""",  # noqa: B950
         )
 
-    def test_merge_view_inputs_error_mixed_base_states_e2e(self):
+    def test_merge_view_inputs_error_mixed_base_states(self):
         # Inference mode (no requires_grad) skips site-1, reaching site-3.
         def make_inputs():
             x = torch.randn(10)
@@ -3349,7 +3225,7 @@ class GraphModule(torch.nn.Module):
             v2.set_(x.untyped_storage(), 0, (5,), (1,))  # _base=None
             return [v1, v2]
 
-        self._check_merge_view_inputs_error_e2e(
+        self._check_merge_view_inputs_error(
             make_inputs,
             """aot_autograd() does not yet handle non-differentiable view input mutations. Aliased inputs share storage but have mixed autograd ._base states: ["input 0 (L['a'])"] have ._base set, while ["input 1 (L['b'])"] have ._base=None (and are not the synthetic base).""",  # noqa: B950
         )
