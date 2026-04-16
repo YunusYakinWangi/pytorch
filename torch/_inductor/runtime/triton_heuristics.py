@@ -2017,7 +2017,7 @@ class StaticTritonCompileResult(CompileResult[_T]):
             result = check_can_launch()
             return result
         except CannotStaticallyLaunchKernel as e:
-            log.info("Bypassing StaticallyLaunchedCudaKernel due to %s", e)  # noqa: G200
+            log.info("Bypassing StaticallyLaunchedCudaKernel due to %s", e)
             if torch._inductor.config.strict_static_triton_launcher:
                 raise e
             return None
@@ -3871,7 +3871,7 @@ def cooperative_reduction(
     # the GPU, we want to create as many CTAs as possible, while keeping things
     # in powers of 2.
     target = last_power_of_2(triton_meta["device"].multi_processor_count)
-    split = max(1, min((rnumel, target // xnumel, TRITON_MAX_RSPLIT)))
+    split = max(1, min(rnumel, target // xnumel))
     if inductor_meta["persistent_reduction"]:
         configs = _persistent_reduction_configs(
             {"x": xnumel, "r0_": rnumel // split},
@@ -3888,7 +3888,9 @@ def cooperative_reduction(
     for config in configs:
         # Compensate for XBLOCK > 1.  For very small reductions, this will spawn more
         # threads than needed, but those reductions should complete quickly anyway.
-        config.kwargs["RSPLIT"] = split * config.kwargs["XBLOCK"]
+        config.kwargs["RSPLIT"] = min(
+            split * config.kwargs["XBLOCK"], TRITON_MAX_RSPLIT
+        )
 
     configs = _maybe_filter_configs_for_tma_restrictions(inductor_meta, configs)
     configs = filter_reduction_configs_for_determinism(inductor_meta, configs)
