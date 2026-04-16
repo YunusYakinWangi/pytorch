@@ -60,7 +60,11 @@ def _has_user_phase_annotation(gm: fx.GraphModule) -> bool:
 def _collect_backward_regions(
     gm: fx.GraphModule, use_phase: bool
 ) -> list[tuple[int, int, bool]]:
-    """Returns (bwd_start, bwd_end, needs_remat) for each backward region."""
+    """Returns (bwd_start, bwd_end, needs_remat) for each backward region.
+
+    Regions are maximal contiguous runs of backward nodes, as [start, end)
+    indices into the graph node list.
+    """
     regions: list[tuple[int, int, bool]] = []
     bwd_start: int | None = None
     needs_remat = False
@@ -113,6 +117,8 @@ def remat_using_tags_for_fwd_loss_bwd_graph(gm: fx.GraphModule) -> fx.GraphModul
 
     force_save_bw_mutation_src(gm)
 
+    # must_recompute (used inside _collect_backward_regions) requires
+    # cleanup_recompute_tags to have run first.
     use_phase = _has_user_phase_annotation(gm)
     regions = _collect_backward_regions(gm, use_phase)
     if not regions:
