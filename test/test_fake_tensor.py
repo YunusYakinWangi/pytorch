@@ -1669,6 +1669,7 @@ class FakeTensorConverterTest(TestCase):
             re_faked = mode.from_tensor(func_t)
         self.assertTrue(re_faked.requires_grad)
 
+    @skipIfTorchDynamo("make_fx tracing is incompatible with dynamo")
     def test_grad_dtype_make_fx(self):
         def train_step(w):
             y = (w.float() * 2).sum()
