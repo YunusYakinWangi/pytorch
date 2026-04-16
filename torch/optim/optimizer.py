@@ -460,7 +460,7 @@ class Optimizer:
             return
 
         # Determine available accelerator device
-        accelerator = torch.accelerator.current_accelerator()
+        accelerator = torch.accelerator.current_accelerator(check_available=True)
 
         if accelerator and accelerator.type in {"cuda", "xpu"}:
             capturing = torch.accelerator.current_stream().is_capturing()
