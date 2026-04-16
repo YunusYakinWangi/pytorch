@@ -3254,6 +3254,10 @@ class GetAttrBuiltinVariable(BaseBuiltinVariable):
         args: Sequence[VariableTracker],
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker:
+        from .lazy import LazyVariableTracker
+
+        if any(isinstance(a, LazyVariableTracker) for a in args):
+            args = [a.realize() if isinstance(a, LazyVariableTracker) else a for a in args]
         try:
             return self._call_getattr(tx, args, kwargs)
         except Unsupported:
