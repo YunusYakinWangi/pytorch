@@ -245,12 +245,13 @@ def vt_getitem(
     if type_implements_mp_subscript(obj_type):
         return obj.mp_subscript_impl(tx, key)
     # Branch 2: sq_item (only if mp_subscript is absent)
-    # CPython: abstract.c L168-181 — _PyIndex_Check(key) → PyNumber_AsSsize_t → sq_item
+    # CPython: abstract.c L168-181 — _PyIndex_Check(key) → PyNumber_AsSsize_t
+    #          → PySequence_GetItem (wraps negative, calls sq_item)
     if type_implements_sq_item(obj_type):
         key_type = maybe_get_python_type(key)
         if type_implements_nb_index(key_type):
             key = key.nb_index_impl(tx)
-            return obj.sq_item_impl(tx, key)
+            return vt_sequence_getitem(tx, obj, key)
         raise_observed_exception(
             TypeError,
             tx,
@@ -269,6 +270,39 @@ def vt_getitem(
         tx,
         args=[f"'{obj_type.__name__}' object is not subscriptable"],
     )
+
+
+def vt_sequence_getitem(
+    tx: "InstructionTranslator",
+    obj: VariableTracker,
+    index: VariableTracker,
+) -> VariableTracker:
+    """CPython's PySequence_GetItem — always sq_item, never mp_subscript.
+
+    https://github.com/python/cpython/blob/v3.13.3/Objects/abstract.c#L2165-L2194
+
+    Called by PyObject_GetItem branch 2, reversed() fallback, and the old
+    iteration protocol.  Wraps negative indices via sq_length before
+    dispatching to sq_item.
+    """
+    obj_type = maybe_get_python_type(obj)
+
+    if type_implements_sq_item(obj_type):
+        # Negative index wrapping (abstract.c L2175-2183)
+        if index.is_python_constant():
+            index_val = index.as_python_constant()
+            if isinstance(index_val, int) and index_val < 0:
+                if type_implements_sq_length(obj_type):
+                    length = obj.sq_length(tx)
+                    index = ConstantVariable.create(
+                        index_val + length.as_python_constant()
+                    )
+        return obj.sq_item_impl(tx, index)
+
+    if type_implements_mp_subscript(obj_type):
+        raise_type_error(tx, f"'{obj.python_type_name()}' is not a sequence")
+
+    raise_type_error(tx, f"'{obj.python_type_name()}' object does not support indexing")
 
 
 def generic_int(tx: "InstructionTranslator", obj: VariableTracker) -> VariableTracker:

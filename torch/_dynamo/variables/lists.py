@@ -270,8 +270,18 @@ class BaseListVariable(VariableTracker):
         key: VariableTracker,
     ) -> VariableTracker:
         # list_item: https://github.com/python/cpython/blob/62a6e898e01/Objects/listobject.c#L318
-        # Key is already int via nb_index_impl in vt_getitem.
-        return self.getitem_const(tx, key)
+        # tuple_item: https://github.com/python/cpython/blob/62a6e898e01/Objects/tupleobject.c#L347
+        # CPython's sq_item takes Py_ssize_t (already int from vt_getitem's
+        # nb_index_impl).  Unlike mp_subscript, sq_item never handles slices.
+        index = key.as_python_constant()
+        try:
+            return self.items[index]
+        except IndexError:
+            raise_observed_exception(
+                IndexError,
+                tx,
+                args=[f"{self.python_type_name()} index out of range"],
+            )
 
     def call_method(
         self,
@@ -699,7 +709,10 @@ class RangeVariable(BaseListVariable):
         key: VariableTracker,
     ) -> VariableTracker:
         # range_item: https://github.com/python/cpython/blob/62a6e898e01/Objects/rangeobject.c#L462
-        return self.getitem_const(tx, key)
+        # CPython's sq_item takes Py_ssize_t (already int from vt_getitem's
+        # nb_index_impl).  Unlike mp_subscript (range_subscript), no slices.
+        index = key.as_python_constant()
+        return self.apply_index(tx, index)
 
     def call_method(
         self,
@@ -1205,8 +1218,13 @@ class DequeVariable(CommonListMethodsVariable):
         key: VariableTracker,
     ) -> VariableTracker:
         # deque_item: https://github.com/python/cpython/blob/62a6e898e01/Modules/_collectionsmodule.c#L1888
-        # Key has already been converted to int by vt_getitem.
-        return self.getitem_const(tx, key)
+        # CPython's sq_item takes Py_ssize_t (already int from vt_getitem's
+        # nb_index_impl).  deque has no mp_subscript, so this is the real path.
+        index = key.as_python_constant()
+        try:
+            return self.items[index]
+        except IndexError:
+            raise_observed_exception(IndexError, tx, args=["deque index out of range"])
 
     def debug_repr(self) -> str:
         if self.maxlen.as_python_constant() is None:
