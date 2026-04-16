@@ -707,44 +707,81 @@ class ProfileGuidedEstimator:
     profile trace.
     """
 
-    def __init__(self, trace_path: str) -> None:
+    def __init__(
+        self,
+        trace_path: str,
+        diagnostics_gm: torch.fx.GraphModule | None = None,
+    ) -> None:
         self.profile = ProfileData()
-        self.estimation_log: list[dict[str, Any]] = []
-        self.miss_log: list[dict[str, Any]] = []
         self.profile.load(trace_path)
-        self._log_profile_stats(trace_path)
+        self._log_profile_vs_analytical_comparison(diagnostics_gm)
 
-    def _log_profile_stats(self, trace_path: str) -> None:
-        """Log profile stats to trace_structured for tlparse."""
+    def _log_profile_vs_analytical_comparison(
+        self, diagnostics_gm: torch.fx.GraphModule | None
+    ) -> None:
+        """Log profile data and PGE vs analytical comparison to trace_structured.
+
+        Logs all profile entries (collectives, ops with durations).
+        If diagnostics_gm is provided, walks the graph and compares PGE
+        estimates with analytical (roofline / NCCL) for each matched node.
+        """
         profile = self.profile
-        coll_keys = profile.get_collective_keys()
-        op_count = profile.op_count
-        op_names = profile.get_op_names()
+        op_entries = [
+            {
+                "op": op_name,
+                "shapes": [list(s) for s in shapes],
+                "dtype": dtype,
+                "profile_ms": dur_us / 1e3,
+            }
+            for (op_name, shapes, dtype), dur_us in profile._op_index.items()
+        ]
+
+        diagnostics: list[dict[str, Any]] = []
+        if diagnostics_gm is not None:
+            from torch._inductor.fx_passes.overlap_scheduling import (
+                estimate_roofline_runtime_ms,
+            )
+
+            for node in diagnostics_gm.graph.nodes:
+                pge_est = self(node)
+                if pge_est is None:
+                    continue
+                entry: dict[str, Any] = {
+                    "node": node.name,
+                    "op": str(node.target),
+                    "pge_ms": pge_est,
+                }
+                if _is_collective_node(node):
+                    try:
+                        entry["analytical_ms"] = (
+                            torch._inductor.comm_analysis.estimate_nccl_collective_runtime_from_fx_node(
+                                node
+                            )
+                        )
+                    except Exception:
+                        pass
+                else:
+                    analytical = estimate_roofline_runtime_ms(node)
+                    if analytical is not None and analytical > 0:
+                        entry["analytical_ms"] = analytical
+                diagnostics.append(entry)
+
+        payload: dict[str, Any] = {
+            "collective_count": len(profile.collectives),
+            "op_count": profile.op_count,
+            "op_entries": op_entries,
+        }
+        if diagnostics:
+            payload["diagnostics"] = diagnostics
+
         trace_structured(
             "artifact",
             metadata_fn=lambda: {
-                "name": "pge_profile_loaded",
+                "name": "pge_profile_vs_analytical",
                 "encoding": "json",
             },
-            payload_fn=lambda: json.dumps(
-                {
-                    "path": trace_path,
-                    "collective_keys": [
-                        {
-                            "name": k[0],
-                            "ranks": list(k[1]),
-                            "group_size": len(k[1]),
-                            "stride": _rank_stride(k[1]),
-                            "dtype": k[2],
-                        }
-                        for k in coll_keys
-                    ],
-                    "op_count": op_count,
-                    "op_names": op_names,
-                }
-            ),
+            payload_fn=lambda: json.dumps(payload),
         )
-        log.info("PGE: using profile-guided estimation from %s", trace_path)
 
     def __call__(self, node: fx.Node, override_size: int | None = None) -> float | None:
         if _is_collective_node(node):
@@ -756,57 +793,19 @@ class ProfileGuidedEstimator:
     ) -> float | None:
         info = _get_collective_info(node)
         if info is None:
-            self.miss_log.append(
-                {
-                    "node": node.name,
-                    "target": str(node.target),
-                    "reason": "get_collective_info returned None",
-                }
-            )
             return None
         coll_name, pg_ranks, nelems, dtype = info
         val = node.meta.get("val")
         if override_size is not None:
             if override_size == 0:
-                return None  # no profile data for zero-size; fall back to analytical
+                return None
             if isinstance(val, torch.Tensor):
                 elem_size = val.element_size()
                 if elem_size > 0:
                     nelems = override_size // elem_size
-            else:
-                log.debug(
-                    "PGE: override_size=%d but val is not a tensor for %s",
-                    override_size,
-                    node.name,
-                )
-        dtype_bytes = val.element_size() if isinstance(val, torch.Tensor) else 0
         result = self.profile.lookup_collective(coll_name, pg_ranks, nelems, dtype)
         if result is not None:
-            est, source = result
-            self.estimation_log.append(
-                {
-                    "node": node.name,
-                    "op": coll_name,
-                    "nelems": nelems,
-                    "dtype": dtype,
-                    "dtype_bytes": dtype_bytes,
-                    "group_size": len(pg_ranks),
-                    "stride": _rank_stride(pg_ranks),
-                    "pge_ms": est,
-                    "source": source,
-                }
-            )
-            return est
-        self.miss_log.append(
-            {
-                "node": node.name,
-                "op": coll_name,
-                "nelems": nelems,
-                "dtype": dtype,
-                "group_size": len(pg_ranks),
-                "reason": "no match in profile",
-            }
-        )
+            return result[0]
         return None
 
     def _estimate_op(self, node: fx.Node) -> float | None:
@@ -818,199 +817,4 @@ class ProfileGuidedEstimator:
         if input_shapes is None:
             return None
         dtype = _get_node_dtype_str(node)
-        est = self.profile.lookup_op(profile_name, input_shapes, dtype)
-        if est is not None:
-            self.estimation_log.append(
-                {
-                    "node": node.name,
-                    "op": profile_name,
-                    "shapes": [list(s) for s in input_shapes],
-                    "dtype": dtype,
-                    "pge_ms": est,
-                    "source": "profile",
-                }
-            )
-        else:
-            self.miss_log.append(
-                {
-                    "node": node.name,
-                    "op": profile_name,
-                    "shapes": [list(s) for s in input_shapes],
-                    "dtype": dtype,
-                    "reason": "no match in profile",
-                }
-            )
-        return est
-
-    def log_diagnostics(
-        self,
-        gm: fx.GraphModule,
-    ) -> None:
-        """Log PGE vs analytical comparison to trace_structured for tlparse."""
-        from torch._inductor.fx_passes.node_runtime_estimation import (
-            _collect_analytical_estimates,
-        )
-
-        analytical = _collect_analytical_estimates(gm, self)
-        log_pge_estimations(self, analytical)
-
-
-def log_pge_estimations(
-    estimator: ProfileGuidedEstimator,
-    analytical_estimates: dict[str, float] | None = None,
-) -> None:
-    """Dump PGE estimation results via trace_structured for tlparse."""
-    rows = []
-    for entry in estimator.estimation_log:
-        row = dict(entry)
-        node_name = entry.get("node", "")
-        if analytical_estimates and node_name in analytical_estimates:
-            analytical_ms = analytical_estimates[node_name]
-            row["analytical_ms"] = analytical_ms
-            pge_ms = entry.get("pge_ms", 0)
-            if analytical_ms > 0:
-                row["pge_vs_analytical_pct"] = round(
-                    (pge_ms - analytical_ms) / analytical_ms * 100, 1
-                )
-        rows.append(row)
-
-    table = _format_pge_table(rows, estimator.miss_log)
-    trace_structured(
-        "artifact",
-        metadata_fn=lambda: {
-            "name": "pge_estimations_table",
-            "encoding": "string",
-        },
-        payload_fn=lambda: table,
-    )
-
-    log.info(
-        "PGE: %d estimations, %d misses logged to trace_structured",
-        len(rows),
-        len(estimator.miss_log),
-    )
-
-
-def _format_bytes(nbytes: int) -> str:
-    """Format byte count as human-readable K/M/G string."""
-    if nbytes >= 1 << 30:
-        return f"{nbytes / (1 << 30):.1f}G"
-    if nbytes >= 1 << 20:
-        return f"{nbytes / (1 << 20):.1f}M"
-    if nbytes >= 1 << 10:
-        return f"{nbytes / (1 << 10):.0f}K"
-    return f"{nbytes}B"
-
-
-def _format_pge_table(
-    rows: list[dict[str, Any]],
-    miss_log: list[dict[str, Any]] | None = None,
-) -> str:
-    """Format PGE estimations + misses as a single aligned text table."""
-    misses: list[dict[str, Any]] = list(miss_log) if miss_log is not None else []
-    lines: list[str] = []
-    try:
-        gpu_name = torch.cuda.get_device_name(0)
-        gpu_count = torch.cuda.device_count()
-        lines.append(f"GPU: {gpu_name} x{gpu_count}")
-    except (RuntimeError, AssertionError):
-        lines.append("GPU: unknown")
-    lines.append("")
-
-    has_analytical = any("analytical_ms" in r for r in rows)
-
-    if has_analytical:
-        header = (
-            f"{'node':<45} {'op':<30} {'size':>8} {'gs':>4} {'st':>3}"
-            f" {'pge_ms':>10} {'analytical_ms':>15} {'diff%':>8} {'':>3}"
-            f" {'pge_GB/s':>10} {'analytical_GB/s':>15}"
-        )
-    else:
-        header = (
-            f"{'node':<45} {'op':<30} {'size':>8} {'gs':>4} {'st':>3} {'pge_ms':>10}"
-        )
-    lines.append(header)
-    lines.append("-" * len(header))
-
-    for row in rows:
-        node = row.get("node", "")[:44]
-        op = row.get("op", "")[:29]
-        gs = row.get("group_size", "")
-        stride = row.get("stride", "")
-        stride_str = str(stride) if stride is not None else "-"
-        pge_ms = row.get("pge_ms", 0)
-        dtype_bytes = row.get("dtype_bytes", 0)
-        n = row.get("nelems", 0) if isinstance(row.get("nelems"), int) else 0
-        size_str = _format_bytes(n * dtype_bytes) if dtype_bytes > 0 and n > 0 else "-"
-
-        if has_analytical:
-            anal_ms = row.get("analytical_ms", None)
-            diff_pct = row.get("pge_vs_analytical_pct", None)
-            anal_str = f"{anal_ms:.4f}" if anal_ms is not None else "-"
-            diff_str = f"{diff_pct:+.1f}%" if diff_pct is not None else "-"
-            flag = ""
-            if diff_pct is not None:
-                adp = abs(diff_pct)
-                if adp > 50:
-                    flag = "***"
-                elif adp > 15:
-                    flag = "**"
-            pge_bw_str = ""
-            anal_bw_str = ""
-            if dtype_bytes > 0 and n > 0:
-                data_bytes = n * dtype_bytes
-                if pge_ms > 0:
-                    pge_bw = data_bytes / (pge_ms * 1e-3) / 1e9
-                    pge_bw_str = f"{pge_bw:.1f}"
-                if anal_ms is not None and anal_ms > 0:
-                    anal_bw = data_bytes / (anal_ms * 1e-3) / 1e9
-                    anal_bw_str = f"{anal_bw:.1f}"
-            line = (
-                f"{node:<45} {op:<30} {size_str:>8} {gs:>4} {stride_str:>3}"
-                f" {pge_ms:>10.4f} {anal_str:>15} {diff_str:>8} {flag:>3}"
-                f" {pge_bw_str:>10} {anal_bw_str:>15}"
-            )
-        else:
-            line = (
-                f"{node:<45} {op:<30} {size_str:>8} {gs:>4} {stride_str:>3}"
-                f" {pge_ms:>10.4f}"
-            )
-        lines.append(line.rstrip())
-
-    lines.append("")
-    lines.append(f"Total: {len(rows)} estimations")
-    if has_analytical:
-        f1 = sum(
-            1
-            for r in rows
-            if r.get("pge_vs_analytical_pct") is not None
-            and abs(r["pge_vs_analytical_pct"]) > 50
-        )
-        f2 = sum(
-            1
-            for r in rows
-            if r.get("pge_vs_analytical_pct") is not None
-            and 15 < abs(r["pge_vs_analytical_pct"]) <= 50
-        )
-        lines.append(f"Flagged: {f2} ** (>15%), {f1} *** (>50%)")
-
-    if misses:
-        lines.append("")
-        lines.append(f"=== MISSES ({len(misses)}) ===")
-        miss_header = f"{'node':<45} {'op':<30} {'reason'}"
-        lines.append(miss_header)
-        lines.append("-" * len(miss_header))
-        for m in misses:
-            node = m.get("node", "")[:44]
-            op = (m.get("op") or m.get("target") or "")[:29]
-            reason = m.get("reason", "")
-            shapes = m.get("shapes")
-            shape_info = m.get("shape")
-            extra = ""
-            if shapes:
-                extra = f" shapes={shapes}"
-            elif shape_info:
-                extra = f" shape={shape_info}"
-            lines.append(f"{node:<45} {op:<30} {reason}{extra}".rstrip())
-
-    return "\n".join(lines)
+        return self.profile.lookup_op(profile_name, input_shapes, dtype)
