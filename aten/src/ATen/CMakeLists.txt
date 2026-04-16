@@ -289,7 +289,7 @@ if(USE_FLASH_ATTENTION)
 
     set_source_files_properties(${ck_sdpa_sources_hip} PROPERTIES LANGUAGE HIP)
     add_library(ck_sdpa STATIC ${ck_sdpa_sources_hip})
-    target_compile_options(ck_sdpa PRIVATE $<$<COMPILE_LANGUAGE:HIP>:${CK_SDPA_EXTRA_HIPCC_FLAGS}>)
+    target_compile_options(ck_sdpa PRIVATE $<$<COMPILE_LANGUAGE:HIP>:${CK_SDPA_EXTRA_HIPCC_FLAGS}> ${HIP_CXX_FLAGS})
     set_target_properties(ck_sdpa PROPERTIES POSITION_INDEPENDENT_CODE ON)
     target_compile_definitions(ck_sdpa PUBLIC ${CK_SDPA_EXTRA_HIPCC_OPTIONS})
     target_compile_definitions(ck_sdpa PRIVATE AITER_EMBEDDED_HSA_HEADER="aiter_embedded_hsa.h")
@@ -438,7 +438,7 @@ IF(USE_MSLK)
     set_target_properties(mslk PROPERTIES
       POSITION_INDEPENDENT_CODE ON
       HIP_ARCHITECTURES "${_mslk_hip_arches}")
-    target_compile_options(mslk PRIVATE $<$<COMPILE_LANGUAGE:HIP>:${MSLK_EXTRA_HIP_FLAGS}>)
+    target_compile_options(mslk PRIVATE $<$<COMPILE_LANGUAGE:HIP>:${MSLK_EXTRA_HIP_FLAGS}> ${HIP_CXX_FLAGS})
     target_compile_definitions(mslk PRIVATE MSLK_NO_EXTENDED_SHAPES)
 
     target_include_directories(mslk PRIVATE
