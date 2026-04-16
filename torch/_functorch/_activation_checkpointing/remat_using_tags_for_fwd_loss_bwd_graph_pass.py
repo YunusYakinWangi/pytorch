@@ -40,21 +40,27 @@ def _is_backward_node(node: fx.Node) -> bool:
     return node.meta.get("autograd_backward", False)
 
 
-def _collect_backward_regions(gm: fx.GraphModule) -> list[tuple[int, int]]:
-    nodes = list(gm.graph.nodes)
-    regions: list[tuple[int, int]] = []
-    bwd_start = None
+def _collect_backward_regions(gm: fx.GraphModule) -> list[tuple[int, int, bool]]:
+    """Returns (bwd_start, bwd_end, needs_remat) for each backward region."""
+    regions: list[tuple[int, int, bool]] = []
+    bwd_start: int | None = None
+    needs_remat = False
 
-    for idx, node in enumerate(nodes):
+    for idx, node in enumerate(gm.graph.nodes):
         if _is_backward_node(node):
             if bwd_start is None:
                 bwd_start = idx
+                needs_remat = False
+            if not needs_remat and any(
+                must_recompute(inp) for inp in node.all_input_nodes
+            ):
+                needs_remat = True
         elif bwd_start is not None:
-            regions.append((bwd_start, idx))
+            regions.append((bwd_start, idx, needs_remat))
             bwd_start = None
 
     if bwd_start is not None:
-        regions.append((bwd_start, len(nodes)))
+        regions.append((bwd_start, idx + 1, needs_remat))
 
     return regions
 
@@ -64,7 +70,7 @@ def remat_using_tags_for_fwd_loss_bwd_graph(gm: fx.GraphModule) -> fx.GraphModul
     Duplicate recompute nodes for backward use. DCE removes unused forward versions.
 
     Backward regions are identified by node.meta["autograd_backward"] == True,
-    set by Dynamo when tracing torch.autograd.grad or via make_fx.
+    set by Dynamo when tracing torch.autograd.grad.
 
     The graph may contain multiple disjoint backward regions (e.g. chunked
     loss). Each region is processed independently: regions that do not
@@ -74,12 +80,6 @@ def remat_using_tags_for_fwd_loss_bwd_graph(gm: fx.GraphModule) -> fx.GraphModul
     """
     if not has_recomputable_ops(gm):
         return gm
-
-    regions = _collect_backward_regions(gm)
-    if not regions:
-        return gm
-
-    order = {node: idx for idx, node in enumerate(gm.graph.nodes)}
 
     if has_recomputable_rng_ops(gm):
         raise RuntimeError(
@@ -93,22 +93,21 @@ def remat_using_tags_for_fwd_loss_bwd_graph(gm: fx.GraphModule) -> fx.GraphModul
 
     force_save_bw_mutation_src(gm)
 
+    regions = _collect_backward_regions(gm)
+    if not regions:
+        return gm
+
+    order = {node: idx for idx, node in enumerate(gm.graph.nodes)}
     new_graph = fx.Graph()
     env: dict[fx.Node, fx.Node] = {}
     nodes = list(gm.graph.nodes)
 
     prev_end = 0
-    for region_idx, (bwd_start, bwd_end) in enumerate(regions):
+    for region_idx, (bwd_start, bwd_end, needs_remat) in enumerate(regions):
         # Copy non-backward nodes before this region
         for node in nodes[prev_end:bwd_start]:
             env[node] = new_graph.node_copy(node, lambda x: env[x])
 
-        # Check if this region needs remat at all
-        needs_remat = any(
-            must_recompute(inp)
-            for node in nodes[bwd_start:bwd_end]
-            for inp in node.all_input_nodes
-        )
         if not needs_remat:
             for node in nodes[bwd_start:bwd_end]:
                 env[node] = new_graph.node_copy(node, lambda x: env[x])
