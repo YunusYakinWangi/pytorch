@@ -686,11 +686,9 @@ def extract_val(val: _ExtractValType, include_real: bool = False) -> _ExtractVal
         return snapshot_fake(val, include_real=include_real)
     elif isinstance(val, py_sym_types):
         return val
-    elif isinstance(val, (_AnyScriptObject, OpaqueBase)):
+    elif isinstance(val, _AnyScriptObject) or is_opaque_value(val):
         return val
     elif isinstance(val, BackwardState):
-        return val
-    elif is_opaque_value(val):
         return val
     elif isinstance(val, (list, tuple)):
         return val.__class__([extract_val(x) for x in val])
@@ -720,7 +718,7 @@ def extract_val(val: _ExtractValType, include_real: bool = False) -> _ExtractVal
     elif val is None:
         return None
 
-    typing_extensions.assert_never(val)
+    typing_extensions.assert_never(val)  # pyrefly: ignore[bad-argument-type]
 
 
 @contextmanager
@@ -1449,8 +1447,8 @@ class PythonKeyTracer(Tracer):
 
         # Try reconstructing untracked opaque reference types from existing
         # graph inputs (e.g. derive a DeviceMesh submesh from its root mesh).
-        if isinstance(a, (FakeScriptObject, OpaqueBase)):
-            node = self._try_reconstruct_opaque(a)
+        if isinstance(a, FakeScriptObject) or is_opaque_value(a):
+            node = self._try_reconstruct_opaque(a)  # pyrefly: ignore[bad-argument-type]
             if node is not None:
                 return node
 
