@@ -1107,13 +1107,12 @@ terrible spacing
         traced = torch.fx.symbolic_trace(mod)
 
         # Split into 2 partitions: relu in 0, sigmoid+tanh in 1
-        node_to_partition = {}
-        counter = 0
-        for node in traced.graph.nodes:
-            if node.op in ("placeholder", "get_attr", "output"):
-                continue
-            node_to_partition[node] = 0 if counter == 0 else 1
-            counter += 1
+        # (first op alone, rest grouped — doesn't fit the uniform helper)
+        node_to_partition = self._build_partition_map(traced.graph, ops_per_partition=1)
+        # Merge partitions 1 and 2 into partition 1
+        for node, pid in node_to_partition.items():
+            if pid > 0:
+                node_to_partition[node] = 1
 
         split_gm = split_module_simple(traced, node_to_partition)
 
@@ -1202,25 +1201,8 @@ terrible spacing
         inp = torch.randn(4, 8)
         expected = mod(inp)
 
-        node_partition_map = {}
-        op_counter = 0
-
-        def callback(node) -> int:
-            if node in node_partition_map:
-                return node_partition_map[node]
-            nonlocal op_counter
-            pid = op_counter // 1  # each op in its own partition
-            op_counter += 1
-            node_partition_map[node] = pid
-            return pid
-
         def backend(gm, inps):
-            # Build node_to_partition dict from callback
-            node_to_part = {}
-            for node in gm.graph.nodes:
-                if node.op in ("placeholder", "get_attr", "output"):
-                    continue
-                node_to_part[node] = callback(node)
+            node_to_part = TestFXExperimental._build_partition_map(gm.graph)
             return split_module_simple(gm, node_to_part)
 
         actual = torch.compile(mod, backend=backend)(inp)
@@ -1260,6 +1242,70 @@ terrible spacing
         x = torch.randn(3, 4)
         y = torch.randn(3, 4)
         self.assertEqual(split_gm_simple(x, y), split_gm_orig(x, y))
+
+    def test_split_module_simple_dead_code(self):
+        class ModWithDeadCode(torch.nn.Module):
+            def forward(self, x):
+                output = x * 2  # we want this
+                dead_line = x + 2  # noqa: F841 — this is dead code
+                return output
+
+        mod = ModWithDeadCode()
+        traced = torch.fx.symbolic_trace(mod)
+
+        # Split: mul in partition 1, add in partition 2
+        node_to_partition = {}
+        saw_mul = False
+        for node in traced.graph.nodes:
+            if node.op in ("placeholder", "get_attr", "output"):
+                continue
+            if node.target == operator.mul:
+                saw_mul = True
+                node_to_partition[node] = 1
+            elif not saw_mul:
+                node_to_partition[node] = 0
+            else:
+                node_to_partition[node] = 2
+
+        split = split_module_simple(traced, node_to_partition)
+        x = torch.randn((5,))
+        torch.testing.assert_close(split(x), traced(x))
+
+    def test_split_module_simple_kwargs(self):
+        class ModuleWithKwargs(torch.nn.Module):
+            def forward(self, x, **kwargs):
+                return x + kwargs["foo"]
+
+        mod = ModuleWithKwargs()
+        traced = torch.fx.symbolic_trace(mod)
+
+        seen_getitem = False
+        node_to_partition = {}
+        for node in traced.graph.nodes:
+            if node.op in ("placeholder", "get_attr", "output"):
+                continue
+            split_idx = int(seen_getitem)
+            if node.target == operator.getitem:
+                seen_getitem = True
+            node_to_partition[node] = split_idx
+
+        split = split_module_simple(traced, node_to_partition)
+        x = torch.randn(5, 3)
+        foo = torch.randn(5, 3)
+        torch.testing.assert_close(split(x, foo=foo), traced(x, foo=foo))
+
+    def test_split_module_simple_noop_graph(self):
+        # Verify split_module_simple handles a graph with no ops (just input->output)
+        def fn(x):
+            return (x,)
+
+        g = make_fx(fn, tracing_mode="fake")(torch.randn(3, 3))
+        split_gm = split_module_simple(g, {})
+
+        self.assertEqual(len(split_gm.graph.nodes), 2)
+        nodes = list(split_gm.graph.nodes)
+        self.assertEqual(nodes[0].op, "placeholder")
+        self.assertEqual(nodes[1].op, "output")
 
     def test_normalize_binary_operators(self):
         ops_to_test = {
