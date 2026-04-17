@@ -212,9 +212,9 @@ struct TORCH_API Node : c10::intrusive_ptr_target {
     return input_nr;
   }
 
-  uint32_t add_input_metadata(at::Tensor t) noexcept {
+  uint32_t add_input_metadata(const at::Tensor& t) noexcept {
     uint32_t input_nr = input_metadata_.size();
-    input_metadata_.emplace_back(std::move(t));
+    input_metadata_.emplace_back(t);
     return input_nr;
   }
 
