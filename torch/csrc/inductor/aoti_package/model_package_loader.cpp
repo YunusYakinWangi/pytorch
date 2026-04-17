@@ -537,8 +537,8 @@ std::unordered_map<std::string, std::string> AOTIModelPackageLoader::
   std::string model_directory;
 
   if (is_directory_mode) {
-    std::string root_dir = strip_trailing_separator(
-        normalize_path_separator(model_package_path));
+    std::string root_dir =
+        strip_trailing_separator(normalize_path_separator(model_package_path));
     list_files_recursive(root_dir, found_filenames);
     TORCH_CHECK(
         !found_filenames.empty(),
@@ -554,7 +554,8 @@ std::unordered_map<std::string, std::string> AOTIModelPackageLoader::
       if (pos != std::string::npos && c10::starts_with(path, root_with_sep) &&
           pos >= root_with_sep.length()) {
         if (pos > root_with_sep.length()) {
-          file_prefix = path.substr(root_with_sep.length(), pos - root_with_sep.length());
+          file_prefix =
+              path.substr(root_with_sep.length(), pos - root_with_sep.length());
         }
         break;
       }
@@ -691,8 +692,8 @@ AOTIModelPackageLoader::AOTIModelPackageLoader(
   if (fs::is_directory(model_package_path) &&
       !is_zip_file(model_package_path)) {
     shared_mode_ = true;
-    temp_dir_ = strip_trailing_separator(
-      normalize_path_separator(model_package_path));
+    temp_dir_ =
+        strip_trailing_separator(normalize_path_separator(model_package_path));
 
     list_files_recursive(temp_dir_, found_filenames);
     TORCH_CHECK(
@@ -715,8 +716,8 @@ AOTIModelPackageLoader::AOTIModelPackageLoader(
           c10::starts_with(path, temp_dir_with_sep) &&
           pos >= temp_dir_with_sep.length()) {
         if (pos > temp_dir_with_sep.length()) {
-          file_prefix =
-              path.substr(temp_dir_with_sep.length(), pos - temp_dir_with_sep.length());
+          file_prefix = path.substr(
+              temp_dir_with_sep.length(), pos - temp_dir_with_sep.length());
         }
         break;
       }
