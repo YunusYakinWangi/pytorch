@@ -36,6 +36,10 @@ void ThreadLocalState::set_multithreading_enabled(bool enabled) {
   autograd_tls_.set_multithreading_enabled(enabled);
 }
 
+void ThreadLocalState::clear_saved_py_objects() {
+  saved_objects_.clear_objs();
+}
+
 /* static */
 void ThreadLocalState::setThreadLocalState(
     const ThreadLocalState& state) {
