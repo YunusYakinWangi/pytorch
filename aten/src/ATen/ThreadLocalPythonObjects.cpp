@@ -29,5 +29,9 @@ const ThreadLocalPythonObjects& ThreadLocalPythonObjects::get_state() {
   return py_objects;
 }
 
+void ThreadLocalPythonObjects::clear_objs() {
+  obj_dict_.clear();
+}
+
 
 } // namespace at::impl

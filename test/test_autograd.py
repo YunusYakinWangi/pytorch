@@ -13674,6 +13674,31 @@ class TestAutogradDeviceType(TestCase):
         self.assertEqual(model.a.grad.device, torch.device("cpu"))
         self.assertEqual(model.b.grad.device, torch.device("cpu"))
 
+    @onlyCUDA
+    def test_tls_stash_not_destroyed_on_device_thread(self, device):
+        """SafePyObjects in GraphTask.thread_locals_ should be cleared in
+        exec_post_processing so they are never destroyed on a device thread
+        (where the GIL acquisition in the destructor can deadlock)."""
+        destroyed_on = []
+
+        class Ref:
+            def __del__(self):
+                destroyed_on.append(threading.current_thread())
+
+        main_thread = threading.current_thread()
+
+        for _ in range(20):
+            destroyed_on.clear()
+            torch._C._stash_obj_in_tls("test_obj", Ref())
+
+            x = torch.randn(10, device=device, requires_grad=True)
+            (x * x).sum().backward()
+
+            torch._C._stash_obj_in_tls("test_obj", None)
+
+            self.assertEqual(len(destroyed_on), 1)
+            self.assertIs(destroyed_on[0], main_thread)
+
 
 class TestAllowMutationOnSaved(TestCase):
     def assertClonedLenEqual(self, ctx, n):

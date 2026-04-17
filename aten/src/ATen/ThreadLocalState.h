@@ -35,6 +35,11 @@ class TORCH_API ThreadLocalState {
   //  autograd engine.
   void set_multithreading_enabled(bool enabled);
 
+  // Manually clearing python objects is useful for device threads where we know
+  // the calling thread has a shared_ptr so we can drop our shared_ptr without
+  // needing to acquire the gil.
+  void clear_saved_py_objects();
+
   // Sets thread local variables in the current thread,
   // according to the thread boundary specified
   static void setThreadLocalState(const ThreadLocalState& state);
