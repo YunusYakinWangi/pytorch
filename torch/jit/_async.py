@@ -10,6 +10,7 @@ functionalities in `torch.jit`.
 """
 
 import warnings
+from torch._warn_utils import warn as _warn_torch
 
 import torch
 from torch._jit_internal import Future
@@ -101,7 +102,7 @@ def fork(func, *args, **kwargs):
         mod = Mod()
         assert mod(input) == torch.jit.script(mod).forward(input)
     """
-    warnings.warn(
+    _warn_torch(
         "`torch.jit.fork` is deprecated. Please use `torch.compile` instead.",
         DeprecationWarning,
     )
@@ -121,7 +122,7 @@ def wait(future):
     Returns:
         `T`: the return value of the completed task
     """
-    warnings.warn(
+    _warn_torch(
         "`torch.jit.wait` is deprecated. Please use `torch.compile` instead.",
         DeprecationWarning,
     )

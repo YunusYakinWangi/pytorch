@@ -8,6 +8,7 @@ import logging
 import math
 import os
 import warnings
+from torch._warn_utils import warn as _warn_torch
 from collections.abc import Callable, Iterable, Iterator
 from itertools import chain
 from types import CodeType, FunctionType, ModuleType, TracebackType
@@ -992,7 +993,7 @@ class Tracer(TracerBase):
                     )
                     self.create_proxy("call_function", _assert_is_none, args, {})
                 else:
-                    warnings.warn(
+                    _warn_torch(
                         f"Was not able to add assertion to guarantee correct input {name} to "
                         f"specialized function. It is up to the user to make sure that your inputs match the "
                         f"inputs you specialized the function with."

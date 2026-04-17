@@ -25,6 +25,7 @@ import tempfile
 import textwrap
 import threading
 import warnings
+from torch._warn_utils import warn as _warn_torch
 from bisect import bisect_right
 from copy import copy
 from ctypes import c_void_p, CDLL, cdll
@@ -584,7 +585,7 @@ class FxGraphCachePickler(pickle.Pickler):
         values = t.tolist()
         elapsed = time() - start
         if elapsed > 1.0:
-            warnings.warn(
+            _warn_torch(
                 f"FX graph cache copying of a large constant took {elapsed:.1}s. "
                 "Please file an issue."
             )
