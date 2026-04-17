@@ -45,15 +45,6 @@ IS_SM90 = LazyVal(lambda: torch.cuda.is_available() and torch.cuda.get_device_ca
 IS_SM100 = LazyVal(lambda: torch.cuda.is_available() and torch.cuda.get_device_capability() == (10, 0))
 IS_SM12X = LazyVal(lambda: torch.cuda.is_available() and torch.cuda.get_device_capability()[0] == 12)
 
-@contextlib.contextmanager
-def blas_library_context(backend):
-    prev_backend = torch.backends.cuda.preferred_blas_library()
-    torch.backends.cuda.preferred_blas_library(backend)
-    try:
-        yield
-    finally:
-        torch.backends.cuda.preferred_blas_library(prev_backend)
-
 def evaluate_gfx_arch_within(arch_list):
     if not torch.cuda.is_available():
         return False
