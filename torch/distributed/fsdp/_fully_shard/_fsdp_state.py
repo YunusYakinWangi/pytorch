@@ -282,8 +282,14 @@ class FSDPState(_State):
                     fsdp_param_group.unshard()
                     fsdp_param_group.wait_for_unshard()
             return args, kwargs
+        # With grouped ``fully_shard([a, b, ...])`` the pre-hook fires per
+        # module so ``cast_forward_inputs`` and ``fsdp_param_group.pre_forward``
+        # run for each. Gate one-shot work (root setup, forward prefetch) on
+        # the first module's entry via state-level ``_training_state``.
+        state_first_in_pass = self._training_state != TrainingState.FORWARD
         self._training_state = TrainingState.FORWARD
-        args, kwargs = self._root_pre_forward(module, args, kwargs)
+        if state_first_in_pass:
+            args, kwargs = self._root_pre_forward(module, args, kwargs)
         if self._mp_policy.cast_forward_inputs and self._mp_policy.param_dtype:
             with torch.profiler.record_function("FSDP::cast_forward_inputs"):
                 cast_fn = functools.partial(
@@ -295,11 +301,12 @@ class FSDPState(_State):
                 )
         for fsdp_param_group in self._fsdp_param_groups:
             args, kwargs = fsdp_param_group.pre_forward(module, args, kwargs)
-        for fsdp_state in self._states_to_forward_prefetch:
-            # Forward order (not reversed) to match forward execution order;
-            # contrast with reversed() in _pre_backward for backward order.
-            for target_param_group in fsdp_state._fsdp_param_groups:
-                FSDPParamGroup._prefetch_unshard(target_param_group, "forward")
+        if state_first_in_pass:
+            for fsdp_state in self._states_to_forward_prefetch:
+                # Forward order (not reversed) to match forward execution order;
+                # contrast with reversed() in _pre_backward for backward order.
+                for target_param_group in fsdp_state._fsdp_param_groups:
+                    FSDPParamGroup._prefetch_unshard(target_param_group, "forward")
         return args, kwargs
 
     @_dynamo_disable
@@ -331,13 +338,16 @@ class FSDPState(_State):
                 )
         return output
 
+    @_dynamo_disable
     def _force_complete_incomplete_states(
         self, module: nn.Module, input: Any, output: Any
     ) -> Any:
         # Complete post-forward for any state whose group forward did not run
         # all modules (e.g. chunked loss where model.forward skips head).
-        # Resharding and pre-backward hook registration are done on the root's
-        # output so that the autograd graph correctly triggers them.
+        # Resharding, pre-backward hook registration, and the state's own
+        # ``output_dtype`` cast are applied to the root's output so the
+        # autograd graph routes grads correctly. Hook registration happens
+        # before the cast so grads flow back through the pre-cast tensor.
         for state in self._state_ctx.all_states:
             if state is self or not state._modules_to_run_forward:
                 continue
@@ -347,6 +357,14 @@ class FSDPState(_State):
                 fsdp_param_group.post_forward(module, input, output)
             output = state._register_pre_backward_hook(output)
             state._training_state = TrainingState.IDLE
+            if state._mp_policy.output_dtype is not None:
+                with torch.profiler.record_function("FSDP::cast_forward_outputs"):
+                    output = _apply_to_tensors(
+                        functools.partial(
+                            _cast_fp_tensor, state._mp_policy.output_dtype
+                        ),
+                        output,
+                    )
         return output
 
     @_dynamo_disable
@@ -447,10 +465,13 @@ def _register_group_forward_hooks(
 ):
     """
     Registers group forward pre and post-hooks. The pre-hook runs on every
-    module pre-forward (unshard is guarded by physical state in
-    ``FSDPParamGroup.pre_forward``). The post-hook runs upon the last module
-    to complete. If at least one module does not run forward, then the
-    post-hook does not run; root post-forward cleanup handles this case.
+    module pre-forward (``FSDPParamGroup.unshard`` short-circuits via
+    ``is_unsharded`` when already unsharded, and
+    ``FSDPParamGroup.pre_forward`` gates post-backward hook registration
+    via ``first_in_pass``). The post-hook runs upon the last module to
+    complete. If at least one module does not run forward, the post-hook
+    does not run; ``_force_complete_incomplete_states`` handles that case
+    from the root's post-forward.
     """
     modules_set = set(modules)
 

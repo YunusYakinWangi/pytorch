@@ -1177,6 +1177,87 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
             self.assertIsNotNone(param.grad, f"grad is None for {name}")
 
     @skip_if_lt_x_gpu(2, allow_cpu=True)
+    def test_partial_group_forward_inner_mp_policy_output_dtype(self):
+        """
+        Tests that when a nested grouped FSDP state has its own
+        ``mp_policy.output_dtype`` (distinct from the root's policy), the
+        force-complete path applies that inner state's cast. Without this,
+        ``h = model(skip_head=True)`` would bypass the inner
+        ``[norm, head]`` state's output_dtype because its post_forward
+        never fires for the partial-group-forward pattern.
+        """
+        self.run_subtests(
+            {
+                "reshard_after_forward": [True, False],
+                "output_dtype": [torch.bfloat16, torch.float16],
+            },
+            self._test_partial_group_forward_inner_mp_policy_output_dtype,
+        )
+
+    def _test_partial_group_forward_inner_mp_policy_output_dtype(
+        self,
+        reshard_after_forward: bool,
+        output_dtype: torch.dtype,
+    ):
+        dim, vocab_size = 32, 128
+
+        class Model(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.embed = nn.Embedding(vocab_size, dim)
+                self.norm = nn.RMSNorm(dim)
+                self.head = nn.Linear(dim, vocab_size, bias=False)
+
+            def forward(
+                self, tokens: torch.Tensor, *, skip_head: bool = False
+            ) -> torch.Tensor:
+                h = self.norm(self.embed(tokens))
+                if skip_head:
+                    return h
+                return self.head(h)
+
+        # Inner policy casts output to ``output_dtype``; root policy has no
+        # ``output_dtype`` so the root's own cast cannot mask the inner fix.
+        inner_mp = MixedPrecisionPolicy(
+            param_dtype=torch.float32,
+            output_dtype=output_dtype,
+        )
+        root_mp = MixedPrecisionPolicy(param_dtype=torch.float32)
+
+        torch.manual_seed(42)
+        model = Model().to(device_type)
+        with torch.no_grad():
+            for param in model.parameters():
+                dist.broadcast(param, src=0)
+        fully_shard(
+            [model.norm, model.head],
+            mp_policy=inner_mp,
+            reshard_after_forward=reshard_after_forward,
+        )
+        fully_shard(
+            model,
+            mp_policy=root_mp,
+            reshard_after_forward=reshard_after_forward,
+        )
+
+        tokens = torch.randint(0, vocab_size, (2, 16), device=device_type.type)
+
+        h = model(tokens, skip_head=True)
+        self.assertEqual(
+            h.dtype,
+            output_dtype,
+            msg=(
+                "inner [norm, head] state's output_dtype was not applied in "
+                "force-complete path"
+            ),
+        )
+        # Backward through the cast should still trigger FSDP's pre_backward
+        # for the inner state.
+        h.sum().backward()
+        for name, param in model.named_parameters():
+            self.assertIsNotNone(param.grad, f"grad is None for {name}")
+
+    @skip_if_lt_x_gpu(2, allow_cpu=True)
     def test_partial_group_forward_with_activation_checkpoint(self):
         """
         Tests partial-group-forward + chunked-loss composed with activation
@@ -1268,6 +1349,118 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
             for name, param in model.named_parameters():
                 self.assertIsNotNone(param.grad, f"grad is None for {name}")
                 param.grad = None
+
+    @skip_if_lt_x_gpu(2, allow_cpu=True)
+    def test_partial_group_forward_grad_accum_chunked(self):
+        """
+        Tests the chunked-loss pattern combined with gradient accumulation
+        via ``set_is_last_backward(False)`` / ``set_requires_gradient_sync``
+        across micro-batches. Validates that the unconditional
+        ``iter_forward_root`` clear in the post-backward callback and the
+        per-chunk post_backward hook registration correctly accumulate
+        gradients across micro-batches without over-reducing.
+        """
+        self.run_subtests(
+            {
+                "reshard_after_forward": [True, False],
+            },
+            self._test_partial_group_forward_grad_accum_chunked,
+        )
+
+    def _test_partial_group_forward_grad_accum_chunked(
+        self,
+        reshard_after_forward: bool,
+    ):
+        dim, vocab_size, n_chunks, n_microbatches = 32, 128, 2, 3
+
+        class Model(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.embed = nn.Embedding(vocab_size, dim)
+                self.norm = nn.RMSNorm(dim)
+                self.head = nn.Linear(dim, vocab_size, bias=False)
+
+            def forward(
+                self, tokens: torch.Tensor, *, skip_head: bool = False
+            ) -> torch.Tensor:
+                h = self.norm(self.embed(tokens))
+                if skip_head:
+                    return h
+                return self.head(h)
+
+        def _materialize_grad(grad):
+            if isinstance(grad, DTensor):
+                return grad.full_tensor().clone()
+            return grad.clone()
+
+        def _run_chunked_microbatch(m: nn.Module, tokens: torch.Tensor) -> None:
+            h = m(tokens, skip_head=True)
+            h_detached = h.detach().requires_grad_(True)
+            chunks = torch.chunk(h_detached, n_chunks, dim=1)
+            h_grads: list[torch.Tensor] = []
+            for chunk in chunks:
+                chunk = chunk.contiguous().detach().requires_grad_(True)
+                loss = m.head(chunk).sum()
+                loss.backward()
+                h_grads.append(chunk.grad.detach())
+            h.backward(torch.cat(h_grads, dim=1))
+
+        torch.manual_seed(42)
+        tokens_list = [
+            torch.randint(0, vocab_size, (2, 16), device=device_type.type)
+            for _ in range(n_microbatches)
+        ]
+
+        # Reference: non-grouped FSDP (no partial-forward quirks) with same
+        # micro-batch schedule.
+        torch.manual_seed(42)
+        ref_model = Model().to(device_type)
+        with torch.no_grad():
+            for param in ref_model.parameters():
+                dist.broadcast(param, src=0)
+        fully_shard(ref_model.embed, reshard_after_forward=reshard_after_forward)
+        fully_shard(ref_model.norm, reshard_after_forward=reshard_after_forward)
+        fully_shard(ref_model.head, reshard_after_forward=reshard_after_forward)
+        fully_shard(ref_model, reshard_after_forward=reshard_after_forward)
+
+        # Grouped FSDP [norm, head] — exercises force-complete per micro-batch.
+        torch.manual_seed(42)
+        model = Model().to(device_type)
+        with torch.no_grad():
+            for param in model.parameters():
+                dist.broadcast(param, src=0)
+        fully_shard(model.embed, reshard_after_forward=reshard_after_forward)
+        fully_shard(
+            [model.norm, model.head], reshard_after_forward=reshard_after_forward
+        )
+        fully_shard(model, reshard_after_forward=reshard_after_forward)
+
+        for m in (ref_model, model):
+            for i, tokens in enumerate(tokens_list):
+                is_last = i == n_microbatches - 1
+                m.set_requires_gradient_sync(is_last)
+                m.set_is_last_backward(is_last)
+                _run_chunked_microbatch(m, tokens)
+
+        # Post-accumulation grads on each model should be finite and
+        # nonzero for all parameters, and match between the grouped and
+        # non-grouped configurations.
+        for (ref_name, ref_param), (_, fsdp_param) in zip(
+            ref_model.named_parameters(), model.named_parameters()
+        ):
+            self.assertIsNotNone(ref_param.grad, f"ref grad None for {ref_name}")
+            self.assertIsNotNone(fsdp_param.grad, f"fsdp grad None for {ref_name}")
+            ref_full = _materialize_grad(ref_param.grad)
+            fsdp_full = _materialize_grad(fsdp_param.grad)
+            self.assertTrue(
+                torch.isfinite(fsdp_full).all().item(),
+                f"non-finite grad for {ref_name}",
+            )
+            self.assertEqual(
+                fsdp_full,
+                ref_full,
+                msg=f"grad mismatch for {ref_name} after grad-accum + chunks",
+            )
 
     @skip_if_lt_x_gpu(2, allow_cpu=True)
     def test_double_forward_with_nested_fsdp_and_checkpoint(self):

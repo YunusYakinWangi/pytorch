@@ -478,14 +478,9 @@ class FSDPParamGroup:
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
         logger.debug("%s", self._with_fqn("FSDP::pre_forward"))
         with record_function(self._with_fqn("FSDP::pre_forward")):
-            # ``_training_state == FORWARD`` at entry means another module
-            # in the same group already fired pre_forward for this pass
-            # (e.g. ``a`` in ``fully_shard([a, b])`` ran before ``b``). In
-            # that case, skip ``_register_post_backward_hook`` to avoid
-            # inserting redundant ``RegisterPostBackwardFunction`` autograd
-            # nodes. Multiple forward passes before a single backward must
-            # each register so each pass's autograd graph triggers
-            # post_backward.
+            # FORWARD at entry → another module in ``fully_shard([a, b])``
+            # already registered post_backward this pass; skip to avoid
+            # duplicate ``RegisterPostBackwardFunction`` autograd nodes.
             first_in_pass = self._training_state != TrainingState.FORWARD
             self._training_state = TrainingState.FORWARD
             self.unshard(self.unshard_async_op)
