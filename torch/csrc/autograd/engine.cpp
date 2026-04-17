@@ -778,6 +778,11 @@ void GraphTask::exec_post_processing() {
       cb_lock.lock();
     }
   }
+  // Clear saved Python objects so that when local_graph_task goes out of
+  // scope on the device thread, SafePyObject::~SafePyObject doesn't fire.
+  // The calling thread's TLS still holds its own shared_ptr, so it will
+  // handle destruction with the GIL held.
+  this->thread_locals_.clear_saved_py_objects();
 }
 
 void GraphTask::set_exception_without_signal(const std::shared_ptr<Node>& fn) {

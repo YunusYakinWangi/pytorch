@@ -13,6 +13,7 @@ struct TORCH_API ThreadLocalPythonObjects {
 
   static const ThreadLocalPythonObjects& get_state();
   static void set_state(ThreadLocalPythonObjects state);
+  void clear_objs();
 
  private:
   std::unordered_map<std::string, std::shared_ptr<c10::SafePyObject>> obj_dict_;
