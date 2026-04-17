@@ -550,6 +550,7 @@ def foreach_reduce(
     all_reduce_hook: Callable[[torch.Tensor], None] | None,
     force_sum_reduction_for_comms: bool = False,
     label_suffix: str = "",
+    prev_all_reduce_event: torch.Event | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Event,
@@ -693,9 +694,16 @@ def foreach_reduce(
             all_reduce_hook(reduce_output)
     # -- END: ops post reduce_scatter
 
+    if prev_all_reduce_event is not None:
+        all_reduce_stream.wait_event(prev_all_reduce_event)
+
     with device_handle.stream(post_reduce_stream):
         _div_if_needed(reduce_output, postdivide_factor)
         reduce_output = _to_dtype_if_needed(reduce_output, orig_dtype)
+        if all_reduce_input is not None and reduce_output is not all_reduce_input:
+            # Cast created a new tensor: the orphaned all_reduce_input's free
+            # must wait for the cast to finish reading it, not just all-reduce.
+            all_reduce_event = post_reduce_stream.record_event()
         # View out and accumulate sharded gradients
         flat_grad_offset = 0  # [0, reduce_scatter_output_numel - 1]
         for padded_unsharded_size, fsdp_param in zip(

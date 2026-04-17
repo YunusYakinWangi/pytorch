@@ -67,7 +67,12 @@ reference to avoid holding onto memory after forward.
 
 
 class FSDPCommContext:
-    """This has the communication state shared across FSDP states/parameter groups."""
+    """Communication state shared across FSDP states/parameter groups.
+
+    Cross-layer fields (all_gather_state, reduce_scatter_states,
+    mp_cast_all_reduce_state) assume backward passes sharing the context
+    run serially, not concurrently.
+    """
 
     def lazy_init(self, device: torch.device):
         self.device_handle = _get_device_handle(device.type)
@@ -96,6 +101,11 @@ class FSDPCommContext:
         # CUDA events for synchronization
         self.all_gather_state: AllGatherState | None = None
         self.reduce_scatter_states: list[ReduceScatterState] = []
+        # When the post-reduce dtype cast creates a new tensor, the HSDP
+        # all-reduce buffer loses refs from param grads. Kept on the shared
+        # comm_ctx so each layer frees its predecessor's buffer on the
+        # all-reduce stream (avoids O(n_layers) accumulation).
+        self.mp_cast_all_reduce_state: AllReduceState | None = None
         # Post-forward order for explicit backward prefetching
         self.post_forward_order: list[FSDPParamGroup] = []  # will cause ref cycles
 
@@ -110,6 +120,19 @@ class FSDPCommContext:
             return self.all_gather_copy_in_stream, self.all_gather_stream
         current_stream = self.device_handle.current_stream()
         return current_stream, current_stream
+
+    def flush_mp_cast_all_reduce_state(self):
+        """Drain the last layer's state at end of backward. Safe because
+        autograd serializes finalize callbacks; first group drains, rest no-op.
+        """
+        if (
+            self.mp_cast_all_reduce_state is not None
+            and self.mp_cast_all_reduce_state.event is not None
+        ):
+            self.device_handle.current_stream().wait_event(
+                self.mp_cast_all_reduce_state.event
+            )
+        self.mp_cast_all_reduce_state = None
 
 
 # See [Note: Overlapping all-gather copy-in and all-gather]
@@ -230,11 +253,6 @@ class FSDPParamGroup:
         # Only for HSDP, if accumulating gradients without all-reduce, save the
         # partial reduce output (only reduce-scattered but not all-reduced)
         self._partial_reduce_output: torch.Tensor | None = None
-        # Holds the all-reduce input and all-reduce event to keep it alive
-        # until the end of backward (critical when doing bf16 reduction with
-        # fp32 parameters since the all-reduce input is allocated in the RS
-        # stream and will have no refs to it after being upcast to fp32)
-        self._all_reduce_state: AllReduceState | None = None
 
     # Initialization #
     def _init_mp_dtypes(self) -> None:
@@ -581,6 +599,13 @@ class FSDPParamGroup:
                 all_reduce_stream = self.comm_ctx.all_reduce_stream
 
             self._wait_for_post_backward()
+            # Always drain: a no-cast layer following a cast layer must still
+            # free the predecessor's buffer on the all-reduce stream.
+            prev_all_reduce_state = self.comm_ctx.mp_cast_all_reduce_state
+            self.comm_ctx.mp_cast_all_reduce_state = None
+            prev_all_reduce_event = (
+                prev_all_reduce_state.event if prev_all_reduce_state else None
+            )
             (
                 reduce_scatter_input,
                 reduce_scatter_event,
@@ -614,7 +639,16 @@ class FSDPParamGroup:
                 self._all_reduce_hook,
                 self.force_sum_reduction_for_comms,
                 self._label_suffix,
+                prev_all_reduce_event,
             )
+            if prev_all_reduce_state is not None:
+                # Stream context is load-bearing: the caching allocator uses
+                # the current stream at free time to pick the reuse pool.
+                # Dropping outside this `with` would let a different stream
+                # reuse the block before all_reduce_stream's wait_event on
+                # it has completed.
+                with self.device_handle.stream(all_reduce_stream):
+                    del prev_all_reduce_state
             self.comm_ctx.reduce_scatter_states.append(
                 ReduceScatterState(reduce_scatter_input, reduce_scatter_event)
             )
@@ -624,12 +658,16 @@ class FSDPParamGroup:
                         raise AssertionError(
                             "Expected all_reduce_event to be set for non-CPU device"
                         )
-                self._all_reduce_state = AllReduceState(
-                    all_reduce_input, all_reduce_event
-                )
+                # Only the cast case orphans the buffer. No-cast: param grads
+                # hold refs via reduce_output, and _post_reduce_event syncs.
+                if all_reduce_input.dtype != self._orig_dtype:
+                    self.comm_ctx.mp_cast_all_reduce_state = AllReduceState(
+                        all_reduce_input, all_reduce_event
+                    )
 
     def finalize_backward(self):
         self._wait_for_post_backward()
+        self.comm_ctx.flush_mp_cast_all_reduce_state()
         for fsdp_param in self.fsdp_params:
             if fsdp_param.grad_offload_event is not None:
                 fsdp_param.grad_offload_event.synchronize()
@@ -649,12 +687,6 @@ class FSDPParamGroup:
         if self._post_reduce_event is not None:
             self.device_handle.current_stream().wait_event(self._post_reduce_event)
             self._post_reduce_event = None
-        if (
-            self._all_reduce_state is not None
-            and self._all_reduce_state.event is not None
-        ):
-            self.device_handle.current_stream().wait_event(self._all_reduce_state.event)
-        self._all_reduce_state = None
 
     def _backward_prefetch(self) -> None:
         if self._training_state == TrainingState.PRE_BACKWARD:
