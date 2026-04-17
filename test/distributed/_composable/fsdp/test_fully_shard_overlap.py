@@ -1287,6 +1287,52 @@ class TestFullyShardHSDPStreamBehavior(FSDPTest):
 
     @skip_if_lt_x_gpu(4)
     @unittest.skipIf(TEST_HPU, "Sleep is not supported on HPU")
+    def test_hsdp_offload_post_accumulate_grad_hook_sees_reduced_grad(self):
+        """(25) Under HSDP + ``CPUOffloadPolicy``, any param with a
+        registered ``post_accumulate_grad_hook`` must have its D2H copy
+        forced synchronous — otherwise the hook (e.g. optimizer-in-
+        backward) reads stale pinned memory while the async memcpy is
+        still in flight on the all-reduce stream. ``foreach_reduce``
+        extends its ``non_blocking`` gate to disable async offload when
+        a hook is registered.
+        """
+        ref, off, inp = self._make_hsdp_model_pair(n_layers=3)
+        hook_observed: dict[int, torch.Tensor] = {}
+
+        def _hook(p: torch.Tensor) -> None:
+            g = p.grad
+            local = g.to_local() if hasattr(g, "to_local") else g
+            hook_observed[id(p)] = local.detach().cpu().clone()
+
+        for p in off.parameters():
+            p.register_post_accumulate_grad_hook(_hook)
+
+        ref(inp).sum().backward()
+        off(inp).sum().backward()
+
+        # Every param's hook-observed value must match the non-offloaded
+        # reference. Before the non_blocking gate was extended to account
+        # for hooks, this was ~2/3 runs flaky with diffs up to 2.0.
+        for ref_p, off_p in zip(ref.parameters(), off.parameters()):
+            if ref_p.grad is None or id(off_p) not in hook_observed:
+                continue
+            ref_local = (
+                ref_p.grad.to_local() if hasattr(ref_p.grad, "to_local") else ref_p.grad
+            )
+            torch.testing.assert_close(
+                hook_observed[id(off_p)],
+                ref_local.cpu(),
+                atol=1e-5,
+                rtol=1e-4,
+                msg=lambda msg: (
+                    f"post_accumulate_grad_hook observed stale grad: "
+                    f"{msg}. foreach_reduce should force non_blocking=False "
+                    f"for the D2H copy when a hook is registered."
+                ),
+            )
+
+    @skip_if_lt_x_gpu(4)
+    @unittest.skipIf(TEST_HPU, "Sleep is not supported on HPU")
     def test_hsdp_post_optim_event_overlap(self):
         """(26) HSDP parity for ``set_post_optim_event`` — the existing
         ``test_fully_shard_post_optim_event_overlap`` only covers 1D FSDP.
