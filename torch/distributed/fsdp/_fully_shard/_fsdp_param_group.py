@@ -473,19 +473,20 @@ class FSDPParamGroup:
                 return
         self._to_sharded()
 
+    @_dynamo_disable
     def pre_forward(
         self, module: nn.Module, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
         logger.debug("%s", self._with_fqn("FSDP::pre_forward"))
         with record_function(self._with_fqn("FSDP::pre_forward")):
-            # FORWARD at entry → another module in ``fully_shard([a, b])``
+            # FORWARD at entry -> another module in ``fully_shard([a, b])``
             # already registered post_backward this pass; skip to avoid
             # duplicate ``RegisterPostBackwardFunction`` autograd nodes.
-            first_in_pass = self._training_state != TrainingState.FORWARD
+            group_first_in_pass = self._training_state != TrainingState.FORWARD
             self._training_state = TrainingState.FORWARD
             self.unshard(self.unshard_async_op)
             self.wait_for_unshard()
-            if first_in_pass:
+            if group_first_in_pass:
                 args, kwargs = self._register_post_backward_hook(args, kwargs)
             return args, kwargs
 
@@ -760,18 +761,12 @@ class FSDPParamGroup:
     def _register_post_backward_hook(
         self, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
-        # This is called at most once per forward pass (gated by the
-        # ``first_in_pass`` check in ``pre_forward`` so non-first modules
-        # in ``fully_shard([a, b, ...])`` don't insert redundant
-        # ``RegisterPostBackwardFunction`` autograd nodes). In
-        # partial-group-forward + standalone-call patterns (chunked loss
-        # calling ``model.head(chunk)`` multiple times) each standalone
-        # call is its own forward pass — the post_forward from
-        # ``_force_complete_incomplete_states`` resets ``_training_state``
-        # to IDLE, so each chunk's pre_forward re-registers. The
-        # root-level ``_root_post_backward_final_callback`` is the safety
-        # net: it force-runs post_backward for any state whose
-        # training_state is not POST_BACKWARD at the end of backward.
+        # Called at most once per forward pass: ``group_first_in_pass`` in
+        # ``pre_forward`` deduplicates within a grouped ``fully_shard``, and
+        # the preceding ``post_forward`` (normal or force-completed) resets
+        # ``_training_state`` to IDLE so each standalone call re-registers.
+        # ``_root_post_backward_final_callback`` is the safety net for any
+        # state that misses post_backward via the autograd graph.
         if not torch.is_grad_enabled():
             return args, kwargs
 

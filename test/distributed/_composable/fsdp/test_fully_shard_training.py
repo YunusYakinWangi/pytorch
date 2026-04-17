@@ -836,10 +836,11 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
     def test_partial_group_forward_then_standalone(self):
         """
         Tests the chunked-loss pattern with grouped FSDP modules: model forward
-        skips one module in the group, then that module is called standalone in a
-        chunk loop with per-chunk backward. This exercises the case where
-        ``modules_to_run`` in ``_register_group_forward_hooks`` has stale entries
-        from a previous incomplete group forward.
+        skips one module in the group, then that module is called standalone in
+        a chunk loop with per-chunk backward. This exercises the case where the
+        group forward leaves some modules unexecuted so the group post-hook
+        never fires and ``_force_complete_incomplete_states`` must complete
+        post-forward from the root.
 
         Uses separate ``fully_shard()`` calls as reference to verify gradient
         correctness end-to-end.

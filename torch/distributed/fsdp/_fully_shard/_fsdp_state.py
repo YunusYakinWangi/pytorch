@@ -344,15 +344,16 @@ class FSDPState(_State):
     ) -> Any:
         # Complete post-forward for any state whose group forward did not run
         # all modules (e.g. chunked loss where model.forward skips head).
-        # Resharding, pre-backward hook registration, and the state's own
-        # ``output_dtype`` cast are applied to the root's output so the
-        # autograd graph routes grads correctly. Hook registration happens
-        # before the cast so grads flow back through the pre-cast tensor.
-        for state in self._state_ctx.all_states:
+        # Iterate inner-first (reversed pre-order) so inner ``output_dtype``
+        # casts apply before outer ones, matching the natural unwinding in
+        # normal ``_post_forward``. Hook registration happens before the cast
+        # so grads flow back through the pre-cast tensor. ``_modules_to_run``
+        # is cleared only after post_forward succeeds so a mid-call exception
+        # leaves the state retryable.
+        for state in reversed(self._state_ctx.all_states):
             if state is self or not state._modules_to_run_forward:
                 continue
             logger.debug("FSDP::force_complete_post_forward")
-            state._modules_to_run_forward.clear()
             for fsdp_param_group in state._fsdp_param_groups:
                 fsdp_param_group.post_forward(module, input, output)
             output = state._register_pre_backward_hook(output)
@@ -365,6 +366,7 @@ class FSDPState(_State):
                         ),
                         output,
                     )
+            state._modules_to_run_forward.clear()
         return output
 
     @_dynamo_disable
@@ -405,6 +407,12 @@ class FSDPState(_State):
             # between full iterations. No-op in the normal case where
             # _post_forward already cleared it.
             self._state_ctx.iter_forward_root = None
+            # Defensive: force_complete and the group post-hook should have
+            # drained each state's _modules_to_run_forward. Clear any
+            # stragglers so a stale non-empty set cannot suppress the next
+            # iteration's force_complete (which guards on non-empty).
+            for state in self._state_ctx.all_states:
+                state._modules_to_run_forward.clear()
             if self._state_ctx.is_last_backward:
                 self._comm_ctx.post_forward_order.clear()
                 # Catch the last module's RS states that no subsequent
@@ -486,7 +494,12 @@ def _register_group_forward_hooks(
     def get_wrapped_post_hook(module: nn.Module):
         @functools.wraps(post_hook)
         def wrapped_post_hook(*args: Any, **kwargs: Any):
-            modules_to_run.discard(module)
+            # Skip if the set was already cleared by force-complete or
+            # finalize-backward, or if ``always_call=True`` double-fires
+            # during exception unwind. ``module not in`` covers both.
+            if module not in modules_to_run:
+                return
+            modules_to_run.remove(module)
             if len(modules_to_run) == 0:
                 return post_hook(*args, **kwargs)
 

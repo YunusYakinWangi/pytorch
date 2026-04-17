@@ -142,6 +142,14 @@ def fully_shard(
     overlap. Users generally should *not* call :meth:`fully_shard` only on the
     topmost root module.
 
+    When called with a list (``fully_shard([a, b, ...])``), the model's forward
+    may invoke only a subset of the grouped modules; the remaining modules may
+    be called later in the same iteration (e.g. chunked-loss patterns where a
+    norm+head group is split between the main forward and a per-chunk head
+    call). Post-forward work (reshard, pre-backward hook registration,
+    ``output_dtype`` cast) is completed from the root's post-forward for any
+    incomplete group.
+
     Args:
         module (Union[nn.Module, List[nn.Module]): The module or modules to
             shard with FSDP and group together for communication.
