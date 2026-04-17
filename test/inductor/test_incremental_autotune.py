@@ -337,5 +337,88 @@ class ResolverTest(TestCase):
         self.assertEqual(call_order, ["put", "ensure"])
 
 
+class CacheTest(TestCase):
+    @staticmethod
+    def _make_autotuner_mock(name="triton_kernel", src="def triton_kernel():..."):
+        """Build a minimal CachingAutotuner-shaped mock for cache key tests."""
+        from torch._inductor.runtime.triton_heuristics import CachingAutotuner
+
+        autotuner = MagicMock(spec=CachingAutotuner)
+        autotuner.fn = MagicMock()
+        autotuner.fn.__name__ = name
+        autotuner.fn.src = src
+        autotuner.inductor_meta = {"a": 1}
+        autotuner.triton_meta = {"b": 2}
+        return autotuner
+
+    @staticmethod
+    def _make_raw_launcher(x_block: int):
+        raw = MagicMock()
+        raw.config = MagicMock(kwargs={"X": x_block}, num_warps=4, num_stages=1)
+        raw.cache_hash = f"hash:{x_block}"
+        return raw
+
+    def test_kernel_key_none_when_fn_has_no_src(self):
+        from torch._inductor.runtime.incremental import _cache
+
+        autotuner = self._make_autotuner_mock()
+        del autotuner.fn.src
+        self.assertIsNone(_cache._caching_autotuner_kernel_key(autotuner))
+
+    def test_kernel_key_normalizes_kernel_name(self):
+        """Two autotuners with different kernel names but identical structure share a key."""
+        from torch._inductor.runtime.incremental import _cache
+
+        a = self._make_autotuner_mock(name="triton_a", src="def triton_a():\n    pass")
+        b = self._make_autotuner_mock(name="triton_b", src="def triton_b():\n    pass")
+        self.assertEqual(
+            _cache._caching_autotuner_kernel_key(a),
+            _cache._caching_autotuner_kernel_key(b),
+        )
+
+    def test_get_launcher_pool_shared_across_identical_autotuners(self):
+        from torch._inductor.runtime.incremental import _cache
+
+        a = self._make_autotuner_mock()
+        b = self._make_autotuner_mock()
+        with patch.object(_cache, "_caching_autotuner_registry", {}):
+            self.assertIs(_cache.get_launcher_pool(a), _cache.get_launcher_pool(b))
+
+    def test_get_launcher_pool_none_for_non_autotuner(self):
+        from torch._inductor.runtime.incremental import _cache
+
+        with patch.object(_cache, "_caching_autotuner_registry", {}):
+            self.assertIsNone(_cache.get_launcher_pool("not an autotuner"))
+
+    def test_get_or_create_launcher_reuses_existing(self):
+        from torch._inductor.runtime.incremental import _cache
+        from torch._inductor.runtime.incremental._launcher import (
+            Launcher as RealLauncher,
+        )
+
+        pool: dict[object, RealLauncher] = {}
+        raw = self._make_raw_launcher(x_block=16)
+        first = _cache.get_or_create_launcher(pool, raw, RealLauncher)
+        second = _cache.get_or_create_launcher(pool, raw, RealLauncher)
+        self.assertIs(first, second)
+        self.assertEqual(len(pool), 1)
+
+    def test_get_or_create_launcher_creates_new_for_distinct_config(self):
+        from torch._inductor.runtime.incremental import _cache
+        from torch._inductor.runtime.incremental._launcher import (
+            Launcher as RealLauncher,
+        )
+
+        pool: dict[object, RealLauncher] = {}
+        a = _cache.get_or_create_launcher(
+            pool, self._make_raw_launcher(x_block=16), RealLauncher
+        )
+        b = _cache.get_or_create_launcher(
+            pool, self._make_raw_launcher(x_block=32), RealLauncher
+        )
+        self.assertIsNot(a, b)
+        self.assertEqual(len(pool), 2)
+
+
 if __name__ == "__main__":
     run_tests()
