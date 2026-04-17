@@ -313,18 +313,7 @@ class FSDPState(_State):
         output = self._register_pre_backward_hook(output)
         self._training_state = TrainingState.IDLE
         if self._state_ctx.iter_forward_root is self:
-            for state in self._state_ctx.all_states:
-                if state is not self and state._modules_to_run_forward:
-                    # A grouped fully_shard's forward did not run all
-                    # modules (e.g. chunked loss skipping lm_head).
-                    # Force-complete the group's post-forward so that
-                    # params are resharded and backward hooks are
-                    # registered on the root output.
-                    state._modules_to_run_forward.clear()
-                    for fsdp_param_group in state._fsdp_param_groups:
-                        fsdp_param_group.post_forward(module, input, output)
-                    output = state._register_pre_backward_hook(output)
-                    state._training_state = TrainingState.IDLE
+            output = self._force_complete_incomplete_states(module, input, output)
             if all_gather_state := self._comm_ctx.all_gather_state:
                 # Free the last all-gather result if needed; refer to
                 # [Note: Overlapping all-gather copy-in and all-gather]
@@ -340,6 +329,24 @@ class FSDPState(_State):
                     functools.partial(_cast_fp_tensor, self._mp_policy.output_dtype),
                     output,
                 )
+        return output
+
+    def _force_complete_incomplete_states(
+        self, module: nn.Module, input: Any, output: Any
+    ) -> Any:
+        # Complete post-forward for any state whose group forward did not run
+        # all modules (e.g. chunked loss where model.forward skips head).
+        # Resharding and pre-backward hook registration are done on the root's
+        # output so that the autograd graph correctly triggers them.
+        for state in self._state_ctx.all_states:
+            if state is self or not state._modules_to_run_forward:
+                continue
+            logger.debug("FSDP::force_complete_post_forward")
+            state._modules_to_run_forward.clear()
+            for fsdp_param_group in state._fsdp_param_groups:
+                fsdp_param_group.post_forward(module, input, output)
+            output = state._register_pre_backward_hook(output)
+            state._training_state = TrainingState.IDLE
         return output
 
     @_dynamo_disable
@@ -374,15 +381,14 @@ class FSDPState(_State):
                 state._training_state = TrainingState.IDLE
                 if self._state_ctx.is_last_backward:
                     state._finalize_backward()
+            # Clear iter_forward_root regardless of is_last_backward:
+            # partial-group-forward + standalone-call patterns can leave it
+            # stale between gradient-accumulation backwards too, not just
+            # between full iterations. No-op in the normal case where
+            # _post_forward already cleared it.
+            self._state_ctx.iter_forward_root = None
             if self._state_ctx.is_last_backward:
                 self._comm_ctx.post_forward_order.clear()
-                # Clear iter_forward_root in case a grouped module's
-                # post-forward never fired (e.g. partial group forward
-                # followed by standalone calls in a chunk loop), leaving
-                # iter_forward_root stale. Not gated to grouped modules
-                # since this is a no-op in the normal case (_post_forward
-                # already cleared it).
-                self._state_ctx.iter_forward_root = None
                 # Catch the last module's RS states that no subsequent
                 # module's group N-1 wait will clear.
                 for rs_state in self._comm_ctx.reduce_scatter_states:

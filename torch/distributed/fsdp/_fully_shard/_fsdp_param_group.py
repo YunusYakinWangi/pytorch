@@ -762,6 +762,17 @@ class FSDPParamGroup:
     def _register_post_backward_hook(
         self, args: tuple[Any, ...], kwargs: dict[str, Any]
     ) -> tuple[tuple[Any, ...], dict[str, Any]]:
+        # This is called only on the first forward that actually unshards
+        # (gated by ``not is_unsharded`` in ``pre_forward``). That means:
+        # - In partial-group-forward + standalone-call patterns (chunked loss
+        #   calling ``model.head(chunk)`` multiple times), only the first
+        #   forward that unshards wraps its inputs in
+        #   RegisterPostBackwardFunction. Subsequent forwards' inputs are
+        #   unwrapped because params stay unsharded across them.
+        #   Per-forward post_backward therefore does NOT fire via the
+        #   autograd path for those subsequent forwards. We rely on
+        #   ``_root_post_backward_final_callback`` to force-run post_backward
+        #   for any state whose training_state is not POST_BACKWARD.
         if not torch.is_grad_enabled():
             return args, kwargs
 
