@@ -360,6 +360,49 @@ class TestGpuWrapper(InductorTestCase):
         self.assertNotIn("void* kernel_args_[] = {", code)
         self.assertNotIn('R"TRITON(', code)
 
+    def test_extern_kernel_codegen_uses_extern_runtime(self):
+        """Test that extern (non-Triton) kernels in cpp_wrapper emit the shared
+        extern kernel runtime structures instead of the Triton lazy compile path."""
+        if not RUN_GPU:
+            self.skipTest("GPU not available")
+
+        try:
+            import cutlass.cute  # noqa: F401
+        except ImportError:
+            self.skipTest("cutlass (CuTeDSL) not available")
+
+        from torch._inductor.codegen.cutedsl.cutedsl_template import (
+            CuteDSLTemplate,
+        )
+
+        if not CuteDSLTemplate.all_templates:
+            self.skipTest("No CuTeDSL templates registered")
+
+        def fn(a, b):
+            return torch.mm(a, b)
+
+        a = torch.randn(64, 64, device=self.device)
+        b = torch.randn(64, 64, device=self.device)
+        with config.patch({
+            "cpp_wrapper": True,
+            "max_autotune_gemm_backends": "CUTEDSL",
+            "max_autotune": True,
+        }):
+            compiled = torch.compile(fn)
+            _, code = test_torchinductor.run_and_get_cpp_code(compiled, a, b)
+
+        if "cutedsl_" not in code:
+            self.skipTest("CuTeDSL template was not selected by autotuning")
+
+        self.assertIn("static ExternModuleState _extern_kernel_module_state;", code)
+        self.assertIn("ExternKernelSpec", code)
+        self.assertIn("runExternKernel(", code)
+        self.assertIn("startExternKernelCompilesForModule(", code)
+        self.assertNotIn(
+            "triton_meta is required",
+            code,
+        )
+
 instantiate_parametrized_tests(TestGpuWrapper)
 
 

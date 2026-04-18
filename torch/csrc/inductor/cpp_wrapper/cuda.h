@@ -128,6 +128,7 @@ template <typename T>
 }
 
 #include <torch/csrc/inductor/cpp_wrapper/lazy_triton_compile.h>
+#include <torch/csrc/inductor/cpp_wrapper/extern_kernel_compile.h>
 
 #ifdef TORCH_INDUCTOR_PRECOMPILE_HEADERS
 #include <ATen/cuda/EmptyTensor.h>

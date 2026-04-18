@@ -771,6 +771,96 @@ class DeferredTritonCallWrapper:
             prefix.writeline(f"launchKernel({', '.join(launch_kernel_args)});")
 
 
+from .extern_meta import ExternKernelLaunch, ExternMeta
+
+
+@dataclasses.dataclass
+class DeferredExternCallWrapper:
+    """Deferred wrapper for extern (non-Triton) CUDA kernels that launch via
+    Python callback.  The generated C++ calls ``runExternKernel`` which acquires
+    the GIL and invokes the kernel's ``.run()`` method."""
+
+    wrapper_name: str
+    kernel_name: str
+    kernel_name_to_body: dict[str, str]
+    arg_types: list[Any]
+    extern_meta: ExternMeta
+
+    def _get_cpp_param_type(self, name: str, arg_type: Any) -> str:
+        if isinstance(arg_type, (torch_dtype, UnwrapUnspecArg)):
+            return f"const {name}_type_& {name}"
+        elif issubclass(arg_type, (SymbolicCallArg, sympy.Expr, int)):
+            return f"int64_t {name}"
+        elif arg_type is float:
+            return f"float {name}"
+        elif arg_type is bool:
+            return f"bool {name}"
+        else:
+            raise ValueError(f"Unexpected arg type {arg_type}")
+
+    def generate(self, wrapper: CppWrapperGpu):
+        prefix = wrapper.prefix
+        kernel_name = self.kernel_name
+        arg_names = self.extern_meta.arg_names
+
+        wrapper._lazy_extern_kernel_names.append(kernel_name)
+        if not wrapper._lazy_extern_module_state_emitted:
+            prefix.writeline(
+                "static ExternModuleState _extern_kernel_module_state;"
+            )
+            wrapper._lazy_extern_module_state_emitted = True
+
+        kernel_source_str = self.kernel_name_to_body.get(kernel_name, "")
+        kernel_source_path = write_text(kernel_source_str)
+        prefix.writeline(
+            f"static const char* {kernel_name}_source_path = "
+            f"{cpp_string_literal(kernel_source_path)};"
+        )
+        prefix.writeline(
+            f"static const ExternKernelSpec {kernel_name}_spec = "
+            f'{{"{kernel_name}", {kernel_name}_source_path}};'
+        )
+
+        template_types = [
+            f"typename {name}_type_"
+            for name, arg_type in zip(arg_names, self.arg_types)
+            if isinstance(arg_type, (torch_dtype, UnwrapUnspecArg))
+        ]
+        if template_types:
+            prefix.writeline(f"template <{', '.join(template_types)}>")
+
+        param_lines = [
+            self._get_cpp_param_type(name, arg_type)
+            for name, arg_type in zip(arg_names, self.arg_types)
+        ]
+        param_lines.append("int32_t device_idx_")
+        param_lines.append(
+            maybe_hipify_code_wrapper(
+                f"{wrapper.device_codegen.cpp_stream_type()} stream_"
+            )
+        )
+
+        prefix.writeline(
+            f"static __attribute__((noinline)) void {self.wrapper_name}("
+        )
+        with prefix.indent():
+            for i, param in enumerate(param_lines):
+                comma = "," if i < len(param_lines) - 1 else ""
+                prefix.writeline(f"{param}{comma}")
+        prefix.writeline("){")
+
+        with prefix.indent():
+            run_args = [
+                "&_extern_kernel_module_state",
+                f'"{kernel_name}"',
+                "stream_",
+            ]
+            for name in arg_names:
+                run_args.append(name)
+            prefix.writeline(f"runExternKernel({', '.join(run_args)});")
+        prefix.writeline("}")
+
+
 class CppWrapperGpu(CppWrapperCpu):
     """
     Generates cpp wrapper for running on GPU and calls CUDA kernels
@@ -786,6 +876,9 @@ class CppWrapperGpu(CppWrapperCpu):
         self.autotune_input_prefix = "_REAL_AUTOTUNE_INPUT"
         self._lazy_kernel_names: list[str] = []
         self._lazy_module_state_emitted = False
+        self._extern_call_wrappers: dict[str, DeferredExternCallWrapper] = {}
+        self._lazy_extern_kernel_names: list[str] = []
+        self._lazy_extern_module_state_emitted = False
 
     @staticmethod
     def create(
@@ -931,10 +1024,45 @@ static struct TritonKernelCompileInit {{
 
         triton_prefix = self.prefix
 
+        # Generate extern kernel callers (e.g. CuTeDSL)
+        self.prefix = IndentedBuffer()
+        for kernel in self._extern_call_wrappers.values():
+            self.prefix.writeline("\n")
+            kernel.generate(self)
+
+        if self._lazy_extern_kernel_names:
+            kernel_specs = "\n    ".join(
+                f"&{name}_spec," for name in self._lazy_extern_kernel_names
+            )
+            self.prefix.splice(
+                f"""\
+// Start parallel compilation of all extern kernels
+static inline void start_all_extern_kernel_compiles() {{
+    static const ExternKernelSpec* kernel_specs[] = {{
+    {kernel_specs}
+    }};
+    startExternKernelCompilesForModule(
+        &_extern_kernel_module_state,
+        kernel_specs,
+        sizeof(kernel_specs) / sizeof(kernel_specs[0]));
+}}
+
+// Static initializer to start extern kernel compilation on module load
+static struct ExternKernelCompileInit {{
+    ExternKernelCompileInit() {{
+        start_all_extern_kernel_compiles();
+    }}
+}} __extern_kernel_compile_init;
+"""
+            )
+
+        extern_prefix = self.prefix
+
         self.prefix = IndentedBuffer()
         super().finalize_prefix()
 
         self.prefix.splice(triton_prefix)
+        self.prefix.splice(extern_prefix)
 
         self.prefix.writeline("\n")
         self.prefix.splice(old_prefix)
@@ -1151,6 +1279,7 @@ static struct TritonKernelCompileInit {{
         graph_name="",
         original_fxnode_name=None,
         current_stream_idx=None,
+        extern_meta=None,
     ):
         """
         Override the default value of argument 'gpu' to True here.
@@ -1198,6 +1327,26 @@ static struct TritonKernelCompileInit {{
             if V.graph.aot_mode
             else self.write_get_raw_stream(device.index, graph_name)
         )
+
+        if (
+            isinstance(extern_meta, ExternMeta)
+            and extern_meta.launch == ExternKernelLaunch.PYTHON
+        ):
+            wrapper_name = f"call_{kernel_name}"
+            if wrapper_name not in self._extern_call_wrappers:
+                self._extern_call_wrappers[wrapper_name] = DeferredExternCallWrapper(
+                    wrapper_name,
+                    kernel_name,
+                    self._kernel_name_to_body,
+                    arg_types,
+                    extern_meta=extern_meta,
+                )
+
+            device_idx = "this->device_idx_" if V.graph.aot_mode else str(device.index)
+            call_args.append(device_idx)
+            call_args.append(stream)
+            self.writeline(f"{wrapper_name}({', '.join(call_args)});")
+            return
 
         if triton:
             call_args, arg_types = self.prepare_triton_wrapper_args(

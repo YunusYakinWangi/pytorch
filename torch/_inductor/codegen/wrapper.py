@@ -704,6 +704,7 @@ class KernelCallLine(WrapperLine):
     graph_name: str
     original_fxnode_name: str
     current_stream_idx: int | None = None
+    extern_meta: dict[str, Any] | None = None
 
     def codegen(self, code: IndentedBuffer) -> None:
         self.wrapper._generate_kernel_call_helper(
@@ -719,6 +720,7 @@ class KernelCallLine(WrapperLine):
             graph_name=self.graph_name,
             original_fxnode_name=self.original_fxnode_name,
             current_stream_idx=self.current_stream_idx,
+            extern_meta=self.extern_meta,
         )
 
     def codegen_fx(self, converter: FxConverter) -> FxConversionFunc:
@@ -3251,6 +3253,7 @@ class PythonWrapperCodegen(CodeGen):
         triton_meta=None,
         inductor_meta=None,
         original_fxnode_name=None,
+        extern_meta=None,
     ):
         """
         Generates kernel call code.
@@ -3291,6 +3294,7 @@ class PythonWrapperCodegen(CodeGen):
                 # pyrefly: ignore [bad-argument-type]
                 original_fxnode_name=original_fxnode_name,
                 current_stream_idx=current_stream_idx,
+                extern_meta=extern_meta,
             )
         )
 
@@ -3309,6 +3313,7 @@ class PythonWrapperCodegen(CodeGen):
         graph_name="",
         original_fxnode_name=None,
         current_stream_idx=None,
+        extern_meta=None,
     ):
         device = device or V.graph.get_current_device_or_throw()
         if not triton and device.type not in ("cuda", "xpu"):

@@ -384,8 +384,31 @@ class CuteDSLTemplateKernel(Kernel):
                 call_args.append(call_arg)
                 arg_types.append(arg_type)
 
-        # TODO this karg really should not be called `triton`
-        wrapper.generate_kernel_call(name, call_args, triton=True, arg_types=arg_types)
+        arg_names = []
+        for _, input_node in self._template_input_args:
+            arg_names.append(input_node.get_name())
+        for arg_def, call_arg, arg_type in zip(
+            orig_arg_defs, orig_call_args, orig_arg_types
+        ):
+            if arg_def.full_name() not in self._seen_input_args:
+                arg_names.append(arg_def.full_name())
+
+        from torch._inductor.codegen.extern_meta import (
+            ExternKernelBackend,
+            ExternMeta,
+        )
+
+        extern_meta = ExternMeta(
+            backend=ExternKernelBackend.CUTEDSL,
+            arg_names=arg_names,
+        )
+        wrapper.generate_kernel_call(
+            name,
+            call_args,
+            triton=True,
+            arg_types=arg_types,
+            extern_meta=extern_meta,
+        )
 
     def _get_subgraph(self, subgraph_number: int):
         """Get subgraph by number for modification processing."""
