@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Union
-
 import torch
 from torch._functorch.utils import exposed_in
 
@@ -11,7 +9,7 @@ __all__ = ["rearrange"]
 
 @exposed_in("torch.func")
 def rearrange(
-    tensor: Union[torch.Tensor, list[torch.Tensor], tuple[torch.Tensor, ...]],
+    tensor: torch.Tensor | list[torch.Tensor] | tuple[torch.Tensor, ...],
     pattern: str,
     **axes_lengths: int,
 ) -> torch.Tensor:
