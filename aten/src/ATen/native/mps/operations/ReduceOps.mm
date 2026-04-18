@@ -56,12 +56,10 @@ enum MPSReductionType {
   MIN,
   AMAX,
   AMIN,
-  SUM,
   PROD,
   MEAN,
   COUNT_NONZERO,
   TRACE,
-  NANSUM,
 };
 
 static void set_apparent_shapes(NSMutableArray<NSNumber*>*& apparent_out_shape,
@@ -205,8 +203,6 @@ static void reduction_out_mps(const Tensor& input_t,
       case MPSReductionType::MEAN:
         output_t.fill_(std::numeric_limits<float>::quiet_NaN());
         break;
-      case MPSReductionType::SUM:
-      case MPSReductionType::NANSUM:
       case MPSReductionType::COUNT_NONZERO:
         output_t.zero_();
         break;
@@ -250,9 +246,7 @@ static void reduction_out_mps(const Tensor& input_t,
 
       MPSGraphTensor* castOutputTensor = nil;
 
-      if (reduction_type == MPSReductionType::SUM) {
-        castOutputTensor = [mpsGraph reductionSumWithTensor:castInputTensor axes:wrappedAxes name:nil];
-      } else if (reduction_type == MPSReductionType::PROD) {
+      if (reduction_type == MPSReductionType::PROD) {
         castOutputTensor = [mpsGraph reductionProductWithTensor:castInputTensor axes:wrappedAxes name:nil];
       } else if (reduction_type == MPSReductionType::MEAN) {
         castOutputTensor = [mpsGraph meanOfTensor:castInputTensor axes:wrappedAxes name:nil];
@@ -272,23 +266,6 @@ static void reduction_out_mps(const Tensor& input_t,
                                                                  numUpper:0
                                                                      name:nil];
         castOutputTensor = [mpsGraph reductionSumWithTensor:bandPartWithTensor axes:@[ @0, @1 ] name:nil];
-      } else if (reduction_type == MPSReductionType::NANSUM) {
-        // Integral types cannot contain NaN, so just do regular sum
-        if (([castInputTensor dataType] & MPSDataTypeFloatBit) == 0) {
-          castOutputTensor = [mpsGraph reductionSumWithTensor:castInputTensor axes:wrappedAxes name:nil];
-        } else {
-          // Create a 0 tensor of the same shape as inputTensor
-          auto zeros = [mpsGraph constantWithScalar:0.0 dataType:castInputTensor.dataType];
-          // Find NaNs
-          auto nanMask = [mpsGraph isNaNWithTensor:castInputTensor name:nil];
-          // Replace NaNs with 0
-          auto nanReplaced = [mpsGraph selectWithPredicateTensor:nanMask
-                                             truePredicateTensor:zeros
-                                            falsePredicateTensor:castInputTensor
-                                                            name:nil];
-          // Sum
-          castOutputTensor = [mpsGraph reductionSumWithTensor:nanReplaced axes:wrappedAxes name:nil];
-        }
       }
 
       MPSGraphTensor* outputTensor = castOutputTensor;
@@ -891,40 +868,241 @@ static void argmax_argmin_out_mps(const Tensor& input_t,
   }
 }
 
+// Shared implementation for sum and nansum Metal kernels.
+// `kernel_prefix` is "sum_" or "nansum_" — selects which kernel variant to dispatch.
+static void sum_nansum_kernel_mps(TensorIterator& iter, const std::string& kernel_prefix) {
+  const Tensor& output = iter.output(0);
+  const Tensor& input = iter.input(0);
+
+  if (input.numel() == 0) {
+    output.zero_();
+    return;
+  }
+
+  if (output.numel() == 0) {
+    return;
+  }
+
+  uint32_t reduction_size = input.numel() / output.numel();
+
+  // TensorIterator ensures input and output have matching ndim
+  // (reduced dims have size 1 in output)
+  TORCH_INTERNAL_ASSERT(output.dim() == input.dim());
+
+  constexpr uint32_t NCHAINS = SUM_NCHAINS;
+
+  auto kernel_name =
+      fmt::format("{}reduction_{}_{}", kernel_prefix, scalarToMetalTypeString(input), scalarToMetalTypeString(output));
+
+  MPSStream* stream = getCurrentMPSStream();
+
+  // For large full reductions (output is scalar), use multi-TG with a
+  // two-pass approach: first pass splits work across num_groups TGs writing
+  // partial sums, second pass reduces the partials to the final scalar.
+  if (output.numel() == 1 && reduction_size > MAX_THREADGROUP_SIZE) {
+    uint32_t num_groups =
+        std::min(static_cast<uint32_t>(512),
+                 (reduction_size + MAX_THREADGROUP_SIZE * NCHAINS - 1) / (MAX_THREADGROUP_SIZE * NCHAINS));
+
+    auto partials = at::empty({num_groups}, output.options());
+    uint32_t elems_per_group = (reduction_size + num_groups - 1) / num_groups;
+
+    auto out_metal = scalarToMetalTypeString(output);
+    auto p1_kernel = fmt::format("{}reduction_{}_{}", kernel_prefix, scalarToMetalTypeString(input), out_metal);
+    auto p2_kernel = fmt::format("{}reduction_{}_{}", kernel_prefix, out_metal, out_metal);
+
+    // Model as 2D: input is [num_groups, elems_per_group], reduce dim=1
+    // Dim 0 (non-reduced): size=num_groups, input_stride=elems_per_group, output_stride=1
+    // Dim 1 (reduced):     size=elems_per_group, input_stride=1
+    NormParams params1;
+    params1.ndim = 2;
+    params1.p = 0;
+    params1.reduction_size = elems_per_group;
+    params1.input_sizes[0] = num_groups;
+    params1.input_strides[0] = elems_per_group;
+    params1.output_sizes[0] = num_groups;
+    params1.output_strides[0] = 1;
+    params1.input_sizes[1] = elems_per_group;
+    params1.input_strides[1] = 1;
+    params1.output_sizes[1] = 1;
+    params1.output_strides[1] = 0;
+
+    // Pass 2: partials[num_groups] -> output[1], reduce dim=0
+    NormParams params2;
+    params2.ndim = 1;
+    params2.p = 0;
+    params2.reduction_size = num_groups;
+    params2.input_sizes[0] = num_groups;
+    params2.input_strides[0] = 1;
+    params2.output_sizes[0] = 1;
+    params2.output_strides[0] = 0;
+
+    dispatch_sync_with_rethrow(stream->queue(), ^() {
+      @autoreleasepool {
+        id<MTLComputeCommandEncoder> compute_encoder = stream->commandEncoder();
+
+        // Pass 1: input -> partials
+        auto ps1 = lib.getPipelineStateForFunc(p1_kernel);
+        getMPSProfiler().beginProfileKernel(ps1, "sum_reduction_pass1", {input});
+        [compute_encoder setComputePipelineState:ps1];
+        mtl_setArgs(compute_encoder, input, partials, params1);
+        auto tpg1 = std::min(MAX_THREADGROUP_SIZE, elems_per_group);
+        [compute_encoder dispatchThreads:MTLSizeMake(num_groups * tpg1, 1, 1)
+                   threadsPerThreadgroup:MTLSizeMake(tpg1, 1, 1)];
+        getMPSProfiler().endProfileKernel(ps1);
+
+        // Pass 2: partials -> output
+        auto ps2 = lib.getPipelineStateForFunc(p2_kernel);
+        getMPSProfiler().beginProfileKernel(ps2, "sum_reduction_pass2", {partials});
+        [compute_encoder setComputePipelineState:ps2];
+        mtl_setArgs(compute_encoder, partials, output, params2);
+        auto tpg2 = std::min(MAX_THREADGROUP_SIZE, num_groups);
+        [compute_encoder dispatchThreads:MTLSizeMake(tpg2, 1, 1) threadsPerThreadgroup:MTLSizeMake(tpg2, 1, 1)];
+        getMPSProfiler().endProfileKernel(ps2);
+      }
+    });
+    return;
+  }
+
+  // Detect outer-dim (non-innermost) reduction on contiguous 2D tensor.
+  // For this case, use a specialized kernel with coalesced column reads.
+  // Condition: exactly one reduced dim, it's not the last dim, input is contiguous.
+  {
+    int num_reduced = 0;
+    int reduced_dim = -1;
+    for (int64_t d = 0; d < input.dim(); d++) {
+      if (input.size(d) != output.size(d)) {
+        num_reduced++;
+        reduced_dim = d;
+      }
+    }
+    bool is_outer_reduction = (num_reduced == 1 && reduced_dim < input.dim() - 1 && input.is_contiguous());
+    bool is_inner_reduction = (num_reduced == 1 && reduced_dim == input.dim() - 1 && input.is_contiguous());
+
+    if (is_outer_reduction && reduced_dim == 0) {
+      uint32_t M = input.size(0);
+      uint32_t N = input.numel() / M;
+
+      auto outer_kernel = fmt::format(
+          "{}reduction_outer_{}_{}", kernel_prefix, scalarToMetalTypeString(input), scalarToMetalTypeString(output));
+      constexpr uint32_t TG_X = 32, TG_Y = 32;
+      uint32_t num_tg_x = (N + TG_X - 1) / TG_X;
+
+      dispatch_sync_with_rethrow(stream->queue(), ^() {
+        @autoreleasepool {
+          id<MTLComputeCommandEncoder> compute_encoder = stream->commandEncoder();
+          auto ps = lib.getPipelineStateForFunc(outer_kernel);
+          getMPSProfiler().beginProfileKernel(ps, "sum_reduction_outer", {input});
+          struct {
+            uint32_t M, N, out_stride;
+          } sizes_s = {M, N, 1};
+          [compute_encoder setComputePipelineState:ps];
+          mtl_setArgs(compute_encoder, input, output, sizes_s);
+          [compute_encoder dispatchThreads:MTLSizeMake(num_tg_x * TG_X, TG_Y, 1)
+                     threadsPerThreadgroup:MTLSizeMake(TG_X, TG_Y, 1)];
+          getMPSProfiler().endProfileKernel(ps);
+        }
+      });
+      return;
+    }
+
+    if (is_inner_reduction) {
+      // M = product of all non-reduced dims, N = size of last dim
+      uint32_t N = input.size(input.dim() - 1);
+      uint32_t M = input.numel() / N;
+
+      auto inner_kernel = fmt::format(
+          "{}reduction_inner_{}_{}", kernel_prefix, scalarToMetalTypeString(input), scalarToMetalTypeString(output));
+      // Pack multiple rows per TG: each SIMD group (32 threads) handles one row
+      constexpr uint32_t TG_SIZE = 256; // 8 SIMD groups = 8 rows per TG
+      uint32_t rows_per_tg = TG_SIZE / 32;
+      uint32_t num_tgs = (M + rows_per_tg - 1) / rows_per_tg;
+
+      dispatch_sync_with_rethrow(stream->queue(), ^() {
+        @autoreleasepool {
+          id<MTLComputeCommandEncoder> compute_encoder = stream->commandEncoder();
+          auto ps = lib.getPipelineStateForFunc(inner_kernel);
+          getMPSProfiler().beginProfileKernel(ps, "sum_reduction_inner", {input});
+          struct {
+            uint32_t M, N;
+          } sizes_s = {M, N};
+          [compute_encoder setComputePipelineState:ps];
+          mtl_setArgs(compute_encoder, input, output, sizes_s);
+          [compute_encoder dispatchThreads:MTLSizeMake(num_tgs * TG_SIZE, 1, 1)
+                     threadsPerThreadgroup:MTLSizeMake(TG_SIZE, 1, 1)];
+          getMPSProfiler().endProfileKernel(ps);
+        }
+      });
+      return;
+    }
+  }
+
+  NormParams params;
+  params.ndim = input.dim();
+  params.p = 0;
+  params.reduction_size = reduction_size;
+
+  for (const auto dim_idx : c10::irange(input.dim())) {
+    params.input_sizes[dim_idx] = input.size(dim_idx);
+    params.input_strides[dim_idx] = input.stride(dim_idx);
+    params.output_sizes[dim_idx] = output.size(dim_idx);
+    params.output_strides[dim_idx] = output.stride(dim_idx);
+  }
+
+  dispatch_sync_with_rethrow(stream->queue(), ^() {
+    @autoreleasepool {
+      id<MTLComputeCommandEncoder> compute_encoder = stream->commandEncoder();
+      auto pipeline_state = lib.getPipelineStateForFunc(kernel_name);
+      getMPSProfiler().beginProfileKernel(pipeline_state, "sum_reduction", {input});
+      [compute_encoder setComputePipelineState:pipeline_state];
+      mtl_setArgs(compute_encoder, input, output, params);
+
+      auto threads_per_group = std::min(MAX_THREADGROUP_SIZE, reduction_size);
+      uint32_t num_threads = output.numel() * threads_per_group;
+
+      [compute_encoder dispatchThreads:MTLSizeMake(num_threads, 1, 1)
+                 threadsPerThreadgroup:MTLSizeMake(threads_per_group, 1, 1)];
+
+      getMPSProfiler().endProfileKernel(pipeline_state);
+    }
+  });
+}
+
+static void sum_kernel_mps(TensorIterator& iter) {
+  sum_nansum_kernel_mps(iter, "sum_");
+}
+
+static void nansum_kernel_mps(TensorIterator& iter) {
+  auto in_dtype = iter.input(0).scalar_type();
+  bool is_float = c10::isFloatingType(in_dtype) || c10::isComplexType(in_dtype);
+  sum_nansum_kernel_mps(iter, is_float ? "nansum_" : "sum_");
+}
+
+static void mean_kernel_mps(TensorIterator& iter) {
+  auto output = iter.output(0);
+  auto input = iter.input(0);
+  auto out_dtype = output.scalar_type();
+  int64_t reduction_size = input.numel() / output.numel();
+
+  // For low-precision outputs, dividing after casting to fp16/bf16 loses the
+  // benefit of the fp32 accumulation done inside the sum kernel.  Route via a
+  // float intermediate so the division happens before the cast.
+  if (out_dtype == kHalf || out_dtype == kBFloat16) {
+    auto float_out = at::empty(output.sizes(), output.options().dtype(kFloat));
+    auto float_iter = TensorIterator::reduce_op(float_out, input);
+    sum_nansum_kernel_mps(float_iter, "sum_");
+    float_out.div_(reduction_size);
+    output.copy_(float_out);
+    return;
+  }
+
+  sum_nansum_kernel_mps(iter, "sum_");
+  output.div_(reduction_size);
+}
+
 } // namespace mps
 
 using namespace mps;
-
-TORCH_IMPL_FUNC(sum_out_mps)
-(const Tensor& input_t,
- OptionalIntArrayRef opt_dim,
- bool keepdim,
- std::optional<ScalarType> dtype,
- const Tensor& output_t) {
-  reduction_out_mps(input_t, opt_dim, keepdim, dtype, output_t, MPSReductionType::SUM, "sum_out_mps");
-}
-
-Tensor& nansum_out_mps(const Tensor& self,
-                       OptionalIntArrayRef dim,
-                       bool keepdim,
-                       std::optional<ScalarType> opt_dtype,
-                       Tensor& result) {
-  TORCH_CHECK(!c10::isComplexType(self.scalar_type()), "nansum on MPS does not support complex inputs");
-  if (c10::isIntegralType(self.scalar_type(), true)) {
-    return at::sum_out(result, self, dim, keepdim, opt_dtype);
-  }
-  ScalarType dtype = get_dtype_from_result(result, opt_dtype);
-  const auto mask = make_dim_mask(dim, self.dim());
-  resize_reduction_result(result, self, mask, keepdim, dtype);
-  reduction_out_mps(self, dim, keepdim, dtype, result, MPSReductionType::NANSUM, "nansum_out_mps");
-  return result;
-}
-
-Tensor nansum_mps(const Tensor& self, OptionalIntArrayRef dim, bool keepdim, std::optional<ScalarType> opt_dtype) {
-  ScalarType dtype = get_dtype_from_self(self, opt_dtype, true);
-  Tensor result = create_reduction_result(self, dim, keepdim, dtype);
-  return nansum_out_mps(self, dim, keepdim, dtype, result);
-}
 
 Tensor trace_mps(const Tensor& self) {
   TORCH_CHECK(self.dim() == 2, "trace: expected a matrix, but got tensor with dim ", self.dim());
@@ -1021,15 +1199,6 @@ Tensor count_nonzero_mps(const Tensor& self, IntArrayRef dims) {
                     "count_nonzero_mps");
 
   return output_t;
-}
-
-TORCH_IMPL_FUNC(mean_out_mps)
-(const Tensor& input_t,
- OptionalIntArrayRef opt_dim,
- bool keepdim,
- std::optional<ScalarType> dtype,
- const Tensor& output_t) {
-  reduction_out_mps(input_t, opt_dim, keepdim, dtype, output_t, MPSReductionType::MEAN, "mean_out_mps");
 }
 
 Tensor _cdist_forward_mps(const Tensor& x1, const Tensor& x2, const double p, std::optional<int64_t> compute_mode) {
@@ -1519,5 +1688,8 @@ std::tuple<Tensor, Tensor> var_mean_mps(const Tensor& self,
 }
 
 REGISTER_DISPATCH(norm_stub, &mps::norm_kernel_mps)
+REGISTER_DISPATCH(sum_stub, &mps::sum_kernel_mps)
+REGISTER_DISPATCH(nansum_stub, &mps::nansum_kernel_mps)
+REGISTER_DISPATCH(mean_stub, &mps::mean_kernel_mps)
 
 } // namespace at::native
