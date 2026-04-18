@@ -721,8 +721,10 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
 
     @staticmethod
     def _materialize_grad(grad: torch.Tensor) -> torch.Tensor:
+        # Used for per-chunk snapshots where ``param.grad`` accumulates across
+        # chunks: each snapshot needs an independent copy.
         if isinstance(grad, DTensor):
-            return grad.full_tensor().clone()
+            return grad.full_tensor()  # full_tensor() already returns a new tensor
         return grad.clone()
 
     @skip_if_lt_x_gpu(2)
@@ -960,16 +962,19 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
                 )
             head_grad_after_chunks = per_chunk_head_grads[-1]
             h.backward(torch.cat(h_grads, dim=1).to(h.dtype))
-            grads = {}
             for name, param in model.named_parameters():
                 self.assertIsNotNone(param.grad, f"grad is None for {name}")
-                grad = self._materialize_grad(param.grad)
+                # Local shard is enough for finiteness; no all-gather needed.
+                local = (
+                    param.grad.to_local()
+                    if isinstance(param.grad, DTensor)
+                    else param.grad
+                )
                 self.assertTrue(
-                    torch.isfinite(grad).all().item(),
+                    torch.isfinite(local).all().item(),
                     f"non-finite grad for {name}",
                 )
-                grads[name] = grad
-            return total_loss, grads, head_grad_after_chunks
+            return total_loss, head_grad_after_chunks
 
         torch.manual_seed(42)
         tokens = torch.randint(0, vocab_size, (2, 16), device=device_type.type)
@@ -1008,14 +1013,10 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
         optim = torch.optim.Adam(model.parameters(), lr=1e-2)
 
         for iter_idx in range(10):
-            fsdp_loss, grads, fsdp_head_grad_chunks = _run_chunked(
-                model, expected_h_dtype
-            )
+            fsdp_loss, fsdp_head_grad_chunks = _run_chunked(model, expected_h_dtype)
 
             if do_parity:
-                ref_loss, ref_grads, ref_head_grad_chunks = _run_chunked(
-                    ref_model, torch.float32
-                )
+                ref_loss, ref_head_grad_chunks = _run_chunked(ref_model, torch.float32)
                 for param in ref_model.parameters():
                     if param.grad is not None:
                         dist.all_reduce(param.grad)
@@ -1033,11 +1034,18 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
                 self.assertEqual(
                     ref_loss, fsdp_loss, msg=f"Loss mismatch at iter {iter_idx}"
                 )
-                for name in ref_grads:
+                for (ref_name, ref_param), (_, fsdp_param) in zip(
+                    ref_model.named_parameters(), model.named_parameters()
+                ):
+                    fsdp_grad = (
+                        fsdp_param.grad.full_tensor()
+                        if isinstance(fsdp_param.grad, DTensor)
+                        else fsdp_param.grad
+                    )
                     self.assertEqual(
-                        grads[name],
-                        ref_grads[name],
-                        msg=f"Gradient mismatch for {name} at iter {iter_idx}",
+                        fsdp_grad,
+                        ref_param.grad,
+                        msg=f"Gradient mismatch for {ref_name} at iter {iter_idx}",
                     )
                 ref_optim.step()
                 ref_optim.zero_grad(set_to_none=(iter_idx % 2 == 0))
