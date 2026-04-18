@@ -1079,9 +1079,24 @@ static void nansum_kernel_mps(TensorIterator& iter) {
 }
 
 static void mean_kernel_mps(TensorIterator& iter) {
-  sum_nansum_kernel_mps(iter, "sum_");
   auto output = iter.output(0);
-  auto reduction_size = iter.input(0).numel() / output.numel();
+  auto input = iter.input(0);
+  auto out_dtype = output.scalar_type();
+  int64_t reduction_size = input.numel() / output.numel();
+
+  // For low-precision outputs, dividing after casting to fp16/bf16 loses the
+  // benefit of the fp32 accumulation done inside the sum kernel.  Route via a
+  // float intermediate so the division happens before the cast.
+  if (out_dtype == kHalf || out_dtype == kBFloat16) {
+    auto float_out = at::empty(output.sizes(), output.options().dtype(kFloat));
+    auto float_iter = TensorIterator::reduce_op(float_out, input);
+    sum_nansum_kernel_mps(float_iter, "sum_");
+    float_out.div_(reduction_size);
+    output.copy_(float_out);
+    return;
+  }
+
+  sum_nansum_kernel_mps(iter, "sum_");
   output.div_(reduction_size);
 }
 
