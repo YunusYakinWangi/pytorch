@@ -1548,9 +1548,12 @@ class VariableBuilder:
             # tracing, but in dynamo we handle it as a regular object so that
             # trace_rules-based graph breaks (e.g. initial_seed, manual_seed)
             # work gracefully — allowing dynamo to compile code before and
-            # after the generator call. Routing through TorchScriptObjectVariable
-            # would hit @_raise_hard_error_if_graph_break on unregistered
-            # member access, causing the entire function to fall back to eager.
+            # after the generator call. TorchScriptObjectVariable's var_getattr
+            # and call_method are decorated with @_raise_hard_error_if_graph_break,
+            # which turns any graph break into a hard error that falls back to
+            # eager for the entire function. Generator methods intentionally
+            # graph-break (they mutate/read RNG state), so they need the
+            # UserDefinedObjectVariable path which supports graceful graph breaks.
             return self.wrap_user_defined(value)
         elif TorchScriptObjectVariable.is_matching_cls(type(value)):
             from ..source import (
