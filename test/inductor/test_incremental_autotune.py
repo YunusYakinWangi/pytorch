@@ -7,7 +7,12 @@ import time
 from unittest.mock import MagicMock, patch
 
 from torch._inductor.runtime.incremental._launcher import Launcher
-from torch._inductor.runtime.incremental.config import TimingAggregation
+from torch._inductor.runtime.incremental._state import IncrementalAutotuneState
+from torch._inductor.runtime.incremental.config import (
+    max_samples_per_launcher,
+    min_samples_before_filter,
+    TimingAggregation,
+)
 from torch._inductor.test_case import run_tests, TestCase
 
 
@@ -28,6 +33,27 @@ def _make_launcher(name: str = "launcher") -> Launcher:
     # it on the launcher so the weakref doesn't die immediately.
     launcher._fn_keepalive = fn  # pyrefly: ignore
     return launcher
+
+
+def _make_state(
+    launchers: list[Launcher], **kwargs: object
+) -> IncrementalAutotuneState:
+    """Create an IncrementalAutotuneState seeded with launchers."""
+    state = IncrementalAutotuneState(**kwargs)
+    for launcher in launchers:
+        state.add_launcher(launcher)
+    return state
+
+
+def _force_total_timings(launcher: Launcher, n: int) -> None:
+    """Force ``num_total_timings`` to ``n`` by stuffing the in-flight counter."""
+    with launcher._lock:
+        launcher._num_timings_in_flight = n - len(launcher._timings)
+
+
+def _set_in_flight(launcher: Launcher, n: int) -> None:
+    with launcher._lock:
+        launcher._num_timings_in_flight = n
 
 
 class LauncherTest(TestCase):
@@ -121,8 +147,7 @@ class LauncherTest(TestCase):
 
     def test_add_timing_appends_to_available(self):
         launcher = _make_launcher()
-        with launcher._lock:
-            launcher._num_timings_in_flight = 2
+        _set_in_flight(launcher, 2)
         launcher.add_timing(1.0)
         self.assertEqual(launcher.num_in_flight_timings, 1)
         self.assertEqual(launcher.num_available_timings, 1)
@@ -132,8 +157,7 @@ class LauncherTest(TestCase):
 
     def test_num_total_timings_sums_in_flight_and_available(self):
         launcher = _make_launcher()
-        with launcher._lock:
-            launcher._num_timings_in_flight = 3
+        _set_in_flight(launcher, 3)
         self.assertEqual(launcher.num_total_timings, 3)
         launcher.add_timing(1.0)
         self.assertEqual(launcher.num_total_timings, 3)
@@ -189,6 +213,264 @@ class LauncherTest(TestCase):
             TimingAggregation.MEAN,
         ):
             self.assertAlmostEqual(launcher.timing, 22.0)
+
+
+class IncrementalAutotuneStateTest(TestCase):
+    def test_add_launcher_queue(self):
+        a = _make_launcher("a")
+        b = _make_launcher("b")
+        state = _make_state([a, b])
+        self.assertIs(state._queue[0], a)
+        self.assertIs(state._queue[1], b)
+        self.assertEqual(len(state._queue), 2)
+
+    def test_next_launcher_skips_when_in_flight_exhausts_budget(self):
+        a = _make_launcher("a")
+        b = _make_launcher("b")
+        state = _make_state([a, b])
+        _force_total_timings(a, 999)
+        self.assertIs(state._next_launcher(), b)
+        # Skipped (not filtered), so a remains in the active set.
+        self.assertIn(a, state._queue)
+
+    def test_next_launcher_returns_none_when_all_skipped(self):
+        a = _make_launcher("a")
+        state = _make_state([a])
+        _force_total_timings(a, 999)
+        self.assertIsNone(state._next_launcher())
+        self.assertIn(a, state._queue)
+
+    def test_next_launcher_promotes_first_done_to_best(self):
+        a = _make_launcher("a")
+        state = _make_state([a])
+        for _ in range(max_samples_per_launcher):
+            a.add_timing(1.0)
+        self.assertIsNone(state._next_launcher())
+        self.assertIs(state._best_launcher, a)
+
+    def test_next_launcher_replaces_best_with_faster_done(self):
+        dropped: list[Launcher] = []
+        old_best = _make_launcher("old")
+        new_best = _make_launcher("new")
+        for _ in range(max_samples_per_launcher):
+            old_best.add_timing(5.0)
+            new_best.add_timing(1.0)
+        state = IncrementalAutotuneState(on_discard_fn=dropped.append)
+        state._best_launcher = old_best
+        state._queue.append(new_best)
+        self.assertIsNone(state._next_launcher())
+        self.assertIs(state._best_launcher, new_best)
+        self.assertIn(old_best, dropped)
+
+    def test_next_launcher_discards_slower_done(self):
+        dropped: list[Launcher] = []
+        cached = _make_launcher("cached")
+        loser = _make_launcher("loser")
+        for _ in range(max_samples_per_launcher):
+            cached.add_timing(1.0)
+            loser.add_timing(5.0)
+        state = IncrementalAutotuneState(on_discard_fn=dropped.append)
+        state._best_launcher = cached
+        state._queue.append(loser)
+        self.assertIsNone(state._next_launcher())
+        self.assertIs(state._best_launcher, cached)
+        self.assertIn(loser, dropped)
+
+    def test_next_launcher_threshold_discards_slow_candidate(self):
+        dropped: list[Launcher] = []
+        best = _make_launcher("best")
+        slow = _make_launcher("slow")
+        for _ in range(max_samples_per_launcher):
+            best.add_timing(1.0)
+        state = IncrementalAutotuneState(on_discard_fn=dropped.append)
+        state._best_launcher = best
+        state._queue.append(slow)
+        for _ in range(min_samples_before_filter):
+            slow.add_timing(10.0)
+        self.assertIsNone(state._next_launcher())
+        self.assertIn(slow, dropped)
+
+    def test_next_launcher_threshold_silent_when_launcher_is_temp_best(self):
+        a = _make_launcher("a")
+        state = _make_state([a])
+        for _ in range(min_samples_before_filter):
+            a.add_timing(100.0)
+        # ``a`` is its own temp_best → threshold check skipped, dispatch ``a``.
+        self.assertIs(state._next_launcher(), a)
+
+    def test_next_launcher_threshold_uses_temp_best_from_queue(self):
+        """temp_best can come from the queue, not just the cached _best_launcher."""
+        dropped: list[Launcher] = []
+        fast = _make_launcher("fast")
+        slow1 = _make_launcher("slow1")
+        slow2 = _make_launcher("slow2")
+        state = IncrementalAutotuneState(on_discard_fn=dropped.append)
+        # Order matters: temp_best (fast) is at the back so the loop hits the
+        # slow launchers first and discards them against it.
+        state.add_launcher(slow1)
+        state.add_launcher(slow2)
+        state.add_launcher(fast)
+        for _ in range(min_samples_before_filter):
+            fast.add_timing(1.0)
+            slow1.add_timing(10.0)
+            slow2.add_timing(10.0)
+        self.assertIs(state._next_launcher(), fast)
+        self.assertIn(slow1, dropped)
+        self.assertIn(slow2, dropped)
+
+    def test_next_launcher_threshold_relaxed_when_best_has_few_samples(self):
+        dropped: list[Launcher] = []
+        best = _make_launcher("best")
+        candidate = _make_launcher("candidate")
+        # Best has only one sample → noisy, so we shouldn't discard a
+        # candidate that's only modestly slower despite the threshold.
+        best.add_timing(1.0)
+        state = IncrementalAutotuneState(on_discard_fn=dropped.append)
+        state._best_launcher = best
+        state._queue.append(candidate)
+        for _ in range(min_samples_before_filter):
+            candidate.add_timing(2.0)
+        self.assertIs(state._next_launcher(), candidate)
+        self.assertNotIn(candidate, dropped)
+
+    def test_converged_reflects_queue_state(self):
+        state = IncrementalAutotuneState()
+        self.assertTrue(state.converged)
+        state._queue.append(_make_launcher())
+        self.assertFalse(state.converged)
+
+    def test_best_launcher_returns_cached_when_converged(self):
+        state = IncrementalAutotuneState()
+        # Empty queue → converged.
+        self.assertIsNone(state.best_launcher)
+        a = _make_launcher("a")
+        state._best_launcher = a
+        self.assertIs(state.best_launcher, a)
+
+    def test_best_launcher_asserts_when_not_converged(self):
+        state = _make_state([_make_launcher()])
+        with self.assertRaises(AssertionError):
+            _ = state.best_launcher
+        with self.assertRaises(AssertionError):
+            _ = state.best_timing
+
+    def test_temp_best_launcher_picks_min_across_queue_and_cached(self):
+        state = IncrementalAutotuneState()
+        cached = _make_launcher("cached")
+        a = _make_launcher("a")
+        b = _make_launcher("b")
+        cached.add_timing(2.0)
+        a.add_timing(5.0)
+        b.add_timing(1.0)
+        state._queue.append(a)
+        state._queue.append(b)
+        state._best_launcher = cached
+        self.assertIs(state._temp_best_launcher, b)
+
+    def test_add_launcher_multiple(self):
+        launchers = [_make_launcher(f"l{i}") for i in range(3)]
+        state = _make_state(launchers)
+        self.assertEqual(len(state._queue), 3)
+
+    def test_dispatch_round_robin_and_convergence(self):
+        """__call__ iterates launchers round-robin and calls on_convergence when done."""
+        converged = threading.Event()
+        converged_launcher: list[Launcher | None] = [None]
+
+        def on_convergence(state: IncrementalAutotuneState) -> None:
+            converged_launcher[0] = state.best_launcher
+            converged.set()
+
+        a = _make_launcher("a")
+        b = _make_launcher("b")
+        # Make b reliably slower so it gets filtered.
+        a._fn_keepalive.return_value = "result_a"
+        state = _make_state([a, b], on_convergence_fn=on_convergence)
+
+        timing_for: dict[int, float] = {id(a): 1.0, id(b): 10.0}
+
+        def fake_submit(
+            callback: object,
+            _start: object,
+            _end: object,
+        ) -> None:
+            launcher = callback.__self__  # bound method → owning launcher
+            callback(timing_for[id(launcher)])
+
+        with (
+            patch("torch._inductor.runtime.incremental._state.sampling_rate", 1),
+            patch("torch.cuda.Event", return_value=MagicMock()),
+            patch(
+                "torch._inductor.runtime.incremental._launcher.submit_event"
+            ) as mock_submit,
+        ):
+            mock_submit.side_effect = fake_submit
+            for _ in range(100):
+                state(stream=0)
+                if converged.is_set():
+                    break
+
+        self.assertTrue(converged.is_set())
+        self.assertIs(converged_launcher[0], a)
+
+    def test_first_dispatch_per_launcher_is_untimed_warmup(self):
+        """A cold launcher gets one untimed warmup dispatch before timing."""
+        a = _make_launcher("a")
+        b = _make_launcher("b")
+        state = _make_state([a, b])
+
+        with (
+            patch("torch.cuda.Event", return_value=MagicMock()),
+            patch(
+                "torch._inductor.runtime.incremental._launcher.submit_event"
+            ) as mock_submit,
+        ):
+            # First dispatch per launcher: untimed warmup; is_warm becomes True.
+            state(stream=0)
+            state(stream=0)
+            self.assertEqual(mock_submit.call_count, 0)
+            self.assertTrue(a.is_warm)
+            self.assertTrue(b.is_warm)
+            # Subsequent dispatches: timed.
+            state(stream=0)
+            state(stream=0)
+            self.assertEqual(mock_submit.call_count, 2)
+
+    def test_dispatch_drops_invalid_config_and_retries(self):
+        """RuntimeError("invalid configuration ...") prunes the launcher and retries."""
+        bad = _make_launcher("bad")
+        good = _make_launcher("good")
+        bad._fn_keepalive.side_effect = RuntimeError(
+            "invalid configuration argument from CUDA launch"
+        )
+        state = _make_state([bad, good])
+
+        with (
+            patch("torch.cuda.Event", return_value=MagicMock()),
+            patch("torch._inductor.runtime.incremental._launcher.submit_event"),
+        ):
+            result = state(stream=0)
+
+        self.assertEqual(result, "result_good")
+        self.assertNotIn(bad, state._queue)
+
+    def test_on_discard_fn_invoked_on_discard_and_invalid_config(self):
+        dropped: list[Launcher] = []
+        bad = _make_launcher("bad")
+        good = _make_launcher("good")
+        bad._fn_keepalive.side_effect = RuntimeError(
+            "invalid configuration argument from CUDA launch"
+        )
+        state = IncrementalAutotuneState(on_discard_fn=dropped.append)
+        state.add_launcher(bad)
+        state.add_launcher(good)
+
+        with (
+            patch("torch.cuda.Event", return_value=MagicMock()),
+            patch("torch._inductor.runtime.incremental._launcher.submit_event"),
+        ):
+            state(stream=0)
+        self.assertIn(bad, dropped)
 
 
 class ResolverTest(TestCase):
