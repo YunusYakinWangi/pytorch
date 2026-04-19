@@ -73,7 +73,9 @@ def maybe_fetch_ops(device_type: str) -> list[Any] | None:
 
     # setup
     arch: str = utils.cutlass_arch(device_type)
-    version: str = utils.toolkit_version(device_type)
+    version = utils.toolkit_version(device_type)
+    if version is None:
+        return None
     if device_type == "cuda":
         # get_cuda_version might return "12.4.0" or "12.4"
         # but we want to use "12.4"

@@ -1,6 +1,9 @@
 import functools
 import logging
+import os
+import re
 import shutil
+import subprocess
 
 import torch
 from torch._inductor.utils import clear_on_fresh_cache
@@ -9,6 +12,29 @@ from ... import config
 
 
 log = logging.getLogger(__name__)
+
+
+def _get_cuda_version_from_nvcc() -> str | None:
+    nvcc = config.cuda.cuda_cxx
+    if nvcc is None or not nvcc_exist(nvcc):
+        nvcc = os.getenv("CUDACXX")
+    if nvcc is None or not nvcc_exist(nvcc):
+        nvcc = os.path.join(os.getenv("CUDA_HOME", ""), "bin/nvcc")
+    if nvcc is None or not nvcc_exist(nvcc):
+        nvcc = shutil.which("nvcc")
+    if nvcc is None:
+        return None
+
+    try:
+        output = subprocess.check_output(
+            [nvcc, "--version"], stderr=subprocess.STDOUT, text=True
+        )
+    except Exception:
+        log.debug("Error getting cuda version from nvcc", exc_info=True)
+        return None
+
+    match = re.search(r"release .+ V(.*)", output)
+    return match.group(1) if match else None
 
 
 @clear_on_fresh_cache
@@ -43,6 +69,8 @@ def get_cuda_version() -> str | None:
         cuda_version = config.cuda.version
         if cuda_version is None:
             cuda_version = torch.version.cuda
+        if cuda_version is None:
+            cuda_version = _get_cuda_version_from_nvcc()
         return cuda_version
     except Exception:
         log.exception("Error getting cuda version")

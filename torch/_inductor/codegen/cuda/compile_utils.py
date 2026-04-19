@@ -85,6 +85,9 @@ def _cuda_lib_options() -> list[str]:
     _set_gpu_runtime_env()  # cpp_extension consults the env
     from torch.utils import cpp_extension
 
+    if cpp_extension.CUDA_HOME is None:
+        cpp_extension.CUDA_HOME = cpp_extension._find_cuda_home()
+
     lpaths = cpp_extension.library_paths(device_type="cuda")
     if use_re_build():
         lpaths += [

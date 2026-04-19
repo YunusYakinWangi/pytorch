@@ -368,15 +368,20 @@ class CUTLASSTemplateKernel(CUTLASSKernel):
         wrapper = V.graph.wrapper_code
 
         arg_types: list[Any]
+        extern_meta = None
+        needs_extern_cabi = False
         if V.graph.cpp_wrapper:
-            # Make sure we initialize these kernels since they're exported as
-            # C-style symbol names.
             assert isinstance(wrapper, CppWrapperCpu)
-            wrapper.initialized_kernels[name] = self
             # We always originally initialize name with "KERNEL_NAME". So, we
             # we replace with the real kernel name passed as an arg to this function.
             self.signature = self.signature.replace(str(Placeholder.KERNEL_NAME), name)
             _, call_args, arg_types = self.args.cpp_argdefs(DTYPE_TO_CUTLASS_TYPE)
+            if V.graph.aot_mode:
+                # In AOT we still link the precompiled CUTLASS object directly into
+                # the model library and call the exported symbol through kernels.
+                wrapper.initialized_kernels[name] = self
+            else:
+                needs_extern_cabi = True
         else:
             _, call_args, _, arg_types = self.args.python_argdefs()
 
@@ -427,12 +432,25 @@ class CUTLASSTemplateKernel(CUTLASSKernel):
             call_args.append("nullptr" if V.graph.cpp_wrapper else "None")
         if V.graph.cpp_wrapper:
             arg_types.append("uint8_t*")
+            if needs_extern_cabi:
+                from torch._inductor.codegen.extern_meta import (
+                    ExternKernelBackend,
+                    ExternKernelLaunch,
+                    ExternMeta,
+                )
+
+                extern_meta = ExternMeta(
+                    backend=ExternKernelBackend.CUTLASS,
+                    arg_names=[f"arg_{i}" for i in range(len(call_args))],
+                    launch=ExternKernelLaunch.C_ABI,
+                )
 
         wrapper.generate_kernel_call(
             name,
             call_args,
             triton=False,
             arg_types=arg_types,
+            extern_meta=extern_meta,
         )
         if ws:
             wrapper.generate_workspace_deallocation(ws)

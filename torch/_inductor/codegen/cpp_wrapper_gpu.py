@@ -771,7 +771,7 @@ class DeferredTritonCallWrapper:
             prefix.writeline(f"launchKernel({', '.join(launch_kernel_args)});")
 
 
-from .extern_meta import ExternKernelLaunch, ExternMeta
+from .extern_meta import ExternKernelBackend, ExternKernelLaunch, ExternMeta
 
 
 @dataclasses.dataclass
@@ -979,6 +979,132 @@ class DeferredExternCApiCallWrapper:
         prefix.writeline("}")
 
 
+@dataclasses.dataclass
+class DeferredExternDirectCallWrapper:
+    """Deferred wrapper for extern CUDA kernels that already expose the final
+    C ABI symbol in the compiled shared library."""
+
+    wrapper_name: str
+    kernel_name: str
+    kernel_name_to_body: dict[str, str]
+    arg_types: list[Any]
+    extern_meta: ExternMeta
+
+    @staticmethod
+    def _is_pointer_arg(arg_type: Any) -> bool:
+        return isinstance(arg_type, str) and arg_type.endswith("*")
+
+    def _get_cpp_param_type(self, name: str, arg_type: Any) -> str:
+        if self._is_pointer_arg(arg_type):
+            return f"const {name}_type_& {name}"
+        return f"{arg_type} {name}"
+
+    def _get_direct_call_arg(self, name: str, arg_type: Any) -> str:
+        if self._is_pointer_arg(arg_type):
+            return f"externKernelPointerArg<{arg_type}>({name})"
+        return name
+
+    def generate(self, wrapper: CppWrapperGpu):
+        """Emit the deferred direct C ABI wrapper for a compiled extern kernel."""
+        prefix = wrapper.prefix
+        kernel_name = self.kernel_name
+        arg_names = self.extern_meta.arg_names
+
+        wrapper._lazy_extern_kernel_names.append(kernel_name)
+        if not wrapper._lazy_extern_module_state_emitted:
+            prefix.writeline("static ExternModuleState _extern_kernel_module_state;")
+            wrapper._lazy_extern_module_state_emitted = True
+        if not wrapper._extern_pointer_helper_emitted:
+            prefix.splice(
+                """
+template <typename PtrType>
+static inline PtrType externKernelPointerArg(decltype(nullptr)) {
+    return nullptr;
+}
+
+template <typename PtrType>
+static inline PtrType externKernelPointerArg(PtrType arg) {
+    return arg;
+}
+
+template <typename PtrType, typename Arg>
+static inline PtrType externKernelPointerArg(const Arg& arg) {
+    return reinterpret_cast<PtrType>(arg.data_ptr());
+}
+"""
+            )
+            wrapper._extern_pointer_helper_emitted = True
+
+        kernel_source_str = self.kernel_name_to_body.get(kernel_name, "")
+        kernel_source_path = write_text(kernel_source_str)
+        prefix.writeline(
+            f"static const char* {kernel_name}_source_path = "
+            f"{cpp_string_literal(kernel_source_path)};"
+        )
+        prefix.writeline(
+            f"static const ExternKernelSpec {kernel_name}_spec = "
+            f'{{"{kernel_name}", {kernel_name}_source_path}};'
+        )
+        prefix.writeline(f"static ExternCApiKernelState {kernel_name}_cabi_state;")
+
+        template_types = [
+            f"typename {name}_type_"
+            for name, arg_type in zip(arg_names, self.arg_types)
+            if self._is_pointer_arg(arg_type)
+        ]
+        if template_types:
+            prefix.writeline(f"template <{', '.join(template_types)}>")
+
+        param_lines = [
+            self._get_cpp_param_type(name, arg_type)
+            for name, arg_type in zip(arg_names, self.arg_types)
+        ]
+        param_lines.append("int32_t device_idx_")
+        param_lines.append(
+            maybe_hipify_code_wrapper(
+                f"{wrapper.device_codegen.cpp_stream_type()} stream_"
+            )
+        )
+
+        prefix.writeline(f"static __attribute__((noinline)) void {self.wrapper_name}(")
+        with prefix.indent():
+            for i, param in enumerate(param_lines):
+                comma = "," if i < len(param_lines) - 1 else ""
+                prefix.writeline(f"{param}{comma}")
+        prefix.writeline("){")
+
+        with prefix.indent():
+            prefix.writeline("(void)device_idx_;")
+            prepare_args = [
+                "&_extern_kernel_module_state",
+                f'"{kernel_name}"',
+                f"&{kernel_name}_cabi_state",
+                "stream_",
+            ]
+            prefix.writeline(
+                f"ensureExternCApiKernelReadyNoArgs({', '.join(prepare_args)});"
+            )
+
+            fn_param_types = [str(arg_type) for arg_type in self.arg_types]
+            fn_param_types.append(
+                maybe_hipify_code_wrapper(f"{wrapper.device_codegen.cpp_stream_type()}")
+            )
+            prefix.writeline(f"using FnType = int (*)({', '.join(fn_param_types)});")
+            prefix.writeline(
+                f"auto fn = reinterpret_cast<FnType>({kernel_name}_cabi_state.function);"
+            )
+            direct_call_args = [
+                self._get_direct_call_arg(name, arg_type)
+                for name, arg_type in zip(arg_names, self.arg_types)
+            ]
+            direct_call_args.append("stream_")
+            prefix.writeline(f"int status = fn({', '.join(direct_call_args)});")
+            prefix.writeline(
+                f'AOTI_TORCH_CHECK(status == 0, "Failed to run extern kernel {kernel_name}");'
+            )
+        prefix.writeline("}")
+
+
 class CppWrapperGpu(CppWrapperCpu):
     """
     Generates cpp wrapper for running on GPU and calls CUDA kernels
@@ -995,9 +1121,12 @@ class CppWrapperGpu(CppWrapperCpu):
         self._lazy_kernel_names: list[str] = []
         self._lazy_module_state_emitted = False
         self._extern_call_wrappers: dict[str, DeferredExternCallWrapper] = {}
-        self._extern_cabi_call_wrappers: dict[str, DeferredExternCApiCallWrapper] = {}
+        self._extern_cabi_call_wrappers: dict[
+            str, DeferredExternCApiCallWrapper | DeferredExternDirectCallWrapper
+        ] = {}
         self._lazy_extern_kernel_names: list[str] = []
         self._lazy_extern_module_state_emitted = False
+        self._extern_pointer_helper_emitted = False
 
     @staticmethod
     def create(
@@ -1454,6 +1583,10 @@ static struct ExternKernelCompileInit {{
             isinstance(extern_meta, ExternMeta)
             and extern_meta.launch == ExternKernelLaunch.PYTHON
         ):
+            call_args = [
+                arg if isinstance(arg, str) else self.val_to_arg_str(arg)
+                for arg in call_args
+            ]
             wrapper_name = f"call_{kernel_name}"
             assert arg_types is not None
             extern_arg_types = list(arg_types)
@@ -1476,18 +1609,27 @@ static struct ExternKernelCompileInit {{
             isinstance(extern_meta, ExternMeta)
             and extern_meta.launch == ExternKernelLaunch.C_ABI
         ):
+            call_args = [
+                arg if isinstance(arg, str) else self.val_to_arg_str(arg)
+                for arg in call_args
+            ]
             wrapper_name = f"call_{kernel_name}"
             assert arg_types is not None
             extern_arg_types = list(arg_types)
             if wrapper_name not in self._extern_cabi_call_wrappers:
-                self._extern_cabi_call_wrappers[wrapper_name] = (
-                    DeferredExternCApiCallWrapper(
-                        wrapper_name,
-                        kernel_name,
-                        self._kernel_name_to_body,
-                        extern_arg_types,
-                        extern_meta=extern_meta,
-                    )
+                wrapper_cls: type[
+                    DeferredExternCApiCallWrapper | DeferredExternDirectCallWrapper
+                ] = (
+                    DeferredExternDirectCallWrapper
+                    if extern_meta.backend == ExternKernelBackend.CUTLASS
+                    else DeferredExternCApiCallWrapper
+                )
+                self._extern_cabi_call_wrappers[wrapper_name] = wrapper_cls(
+                    wrapper_name,
+                    kernel_name,
+                    self._kernel_name_to_body,
+                    extern_arg_types,
+                    extern_meta=extern_meta,
                 )
 
             device_idx = "this->device_idx_" if V.graph.aot_mode else str(device.index)

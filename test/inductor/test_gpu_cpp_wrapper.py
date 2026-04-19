@@ -13,7 +13,8 @@ from torch._inductor.codegen.common import TritonScratchWorkspace
 from torch._inductor.codegen.cpp_wrapper_gpu import DeferredTritonCallWrapper
 from torch._inductor.codegen.cuda.device_op_overrides import CUDADeviceOpOverrides
 from torch._inductor.test_case import TestCase as InductorTestCase
-from torch._inductor.utils import IndentedBuffer
+from torch._inductor.utils import clear_caches, IndentedBuffer
+from torch.testing._internal.common_cuda import SM90OrLater
 from torch.testing._internal.common_utils import (
     instantiate_parametrized_tests,
     parametrize,
@@ -486,6 +487,51 @@ class TestGpuWrapper(InductorTestCase):
         self.assertIn("ExternCApiKernelState", code)
         self.assertIn("ensureExternCApiKernelReady(", code)
         self.assertIn("startExternKernelCompilesForModule(", code)
+
+    def test_cutlass_backend_codegen_uses_native_cabi_runtime(self):
+        if not RUN_GPU:
+            self.skipTest("GPU not available")
+        if GPU_TYPE != "cuda" or torch.version.hip:
+            self.skipTest("CUDA-only CUTLASS test")
+        if not SM90OrLater:
+            self.skipTest("need sm_90")
+
+        from torch._inductor.codegen.cuda.cuda_env import get_cuda_version
+        from torch._inductor.codegen.cutlass import utils as cutlass_utils
+        from torch.utils import cpp_extension
+
+        if not cutlass_utils.try_import_cutlass():
+            self.skipTest("CUTLASS backend not available")
+        if get_cuda_version() is None:
+            self.skipTest("CUDA toolkit version unavailable")
+        if cpp_extension.CUDA_HOME is None and cpp_extension._find_cuda_home() is None:
+            self.skipTest("CUDA toolkit home unavailable")
+
+        def fn(x, a, b):
+            return torch.addmm(x, a, b)
+
+        x = torch.randn(128, 128, device=self.device, dtype=torch.float16)
+        a = torch.randn(128, 16, device=self.device, dtype=torch.float16)
+        b = torch.randn(16, 128, device=self.device, dtype=torch.float16)
+        expected = fn(x, a, b)
+
+        torch._dynamo.reset()
+        clear_caches()
+        with config.patch(
+            {
+                "max_autotune": True,
+                "max_autotune_gemm_backends": "CUTLASS",
+                "cutlass.cutlass_max_profiling_configs": 1,
+            }
+        ):
+            compiled = torch.compile(fn, options={"cpp_wrapper": True})
+            actual, code = test_torchinductor.run_and_get_cpp_code(compiled, x, a, b)
+
+        torch.testing.assert_close(actual, expected, atol=1e-2, rtol=1e-2)
+        self.assertIn("static ExternCApiKernelState cutlass_", code)
+        self.assertIn("ensureExternCApiKernelReadyNoArgs(", code)
+        self.assertIn("startExternKernelCompilesForModule(", code)
+        self.assertNotIn("kernels.cutlass_", code)
         self.assertNotIn("runExternKernel(", code)
 
 

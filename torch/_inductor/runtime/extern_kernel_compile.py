@@ -106,9 +106,20 @@ def prepare_cabi_kernel(
     entry = _resolve_kernel_entry(pending_kernels, kernel_name)
 
     if entry["cabi_artifact"] is None:
-        entry["cabi_artifact"] = entry["kernel_obj"].prepare_cabi_kernel(
-            kernel_name, args, stream
-        )
+        kernel_obj = entry["kernel_obj"]
+        if hasattr(kernel_obj, "prepare_cabi_kernel"):
+            entry["cabi_artifact"] = kernel_obj.prepare_cabi_kernel(
+                kernel_name, args, stream
+            )
+        elif hasattr(kernel_obj, "lib_path"):
+            entry["cabi_artifact"] = {
+                "shared_object_path": kernel_obj.lib_path,
+                "symbol_name": kernel_name,
+            }
+        else:
+            raise RuntimeError(
+                f"Unsupported extern C ABI kernel object for '{kernel_name}': {type(kernel_obj)!r}"
+            )
 
     artifact = entry["cabi_artifact"]
     return artifact["shared_object_path"], artifact["symbol_name"]
