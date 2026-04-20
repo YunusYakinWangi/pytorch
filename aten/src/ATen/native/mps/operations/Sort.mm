@@ -60,10 +60,10 @@ static int select_tptg(int sort_size, size_t elem_size, int n_rows) {
 
 // returns true when multi-block merge sort would need so many merge-dispatch
 // passes that MPSGraph's sort is expected to win
-static bool should_use_mpsgraph_fallback(int sort_size, size_t elem_size) {
+static bool should_use_mpsgraph_fallback(int sort_size, size_t elem_size, int elems_per_tg) {
   if (elem_size > 4)
     return false;
-  int n_blocks_merge = at::ceil_div(sort_size, 4096);
+  int n_blocks_merge = at::ceil_div(sort_size, elems_per_tg);
   int merge_rounds = 0;
   for (int m = 2; (m / 2) < n_blocks_merge; m *= 2)
     merge_rounds++;
@@ -366,7 +366,7 @@ TORCH_IMPL_FUNC(sort_stable_out_mps)
   const int elems_per_tg = tptg * TN;
   const bool is_last_dim = (dim == self.ndimension() - 1);
 
-  const bool use_mpsgraph = should_use_mpsgraph_fallback(sort_size, self.element_size());
+  const bool use_mpsgraph = should_use_mpsgraph_fallback(sort_size, self.element_size(), elems_per_tg);
 
   if (use_mpsgraph) {
     sort_mpsgraph_fallback(self, out_vals, out_inds, dim, descending);
