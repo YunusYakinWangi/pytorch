@@ -469,7 +469,7 @@ class Optimizer:
                 group["capturable"] for group in self.param_groups
             ):
                 raise RuntimeError(
-                    f"Attempting {accelerator.type} graph capture of step() for an instance of "
+                    f"Attempting {accelerator.type.upper()} graph capture of step() for an instance of "
                     + self.__class__.__name__
                     + " but param_groups' capturable is False."
                 )
@@ -481,7 +481,7 @@ class Optimizer:
             ):
                 warnings.warn(
                     "This instance was constructed with capturable=True or some of all the param_groups came with capturable=True, "
-                    f"but step() is running without {accelerator.type} graph capture. If you never intend to graph-capture this "
+                    f"but step() is running without {accelerator.type.upper()} graph capture. If you never intend to graph-capture this "
                     "instance, capturable=True can impair performance, and you should set capturable=False.",
                     stacklevel=2,
                 )

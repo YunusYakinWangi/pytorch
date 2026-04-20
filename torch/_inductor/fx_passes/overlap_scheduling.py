@@ -1677,14 +1677,14 @@ def gather_node_runtime_estimations(
             compute_nodes.append(node)
             compute_analytical.append(est)
         elif node.op == "call_function" and node not in estimations:
-            est = None
             if custom_runtime_estimation is not None:
                 est = custom_runtime_estimation(node, None)
-            # Fall back to roofline if custom estimator returned None or absent
-            if est is None:
+                if est is not None:
+                    estimations[node] = est
+            else:
                 est = estimate_roofline_runtime_ms(node)
-            if est is not None and est > 0:
-                estimations[node] = est
+                if est > 0:
+                    estimations[node] = est
 
     # Fusion region costs (call_module nodes from collapse_fusion_regions)
     for node, region in fusion_region_of.items():
