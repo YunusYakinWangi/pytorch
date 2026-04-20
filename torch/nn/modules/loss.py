@@ -65,43 +65,6 @@ class _WeightedLoss(_Loss):
         self.weight: Tensor | None
 
 
-class _LinearLoss(_Loss):
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        bias: bool = True,
-        device=None,
-        dtype=None,
-        reduction: str = "mean",
-    ) -> None:
-        super().__init__(None, None, reduction)
-        self.linear = Linear(in_features, out_features, bias, device, dtype)
-
-
-class _WeightedLinearLoss(_LinearLoss):
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        bias: bool = True,
-        device=None,
-        dtype=None,
-        reduction: str = "mean",
-        weight: Tensor | None = None,
-    ) -> None:
-        super().__init__(
-            in_features,
-            out_features,
-            bias,
-            device,
-            dtype,
-            reduction,
-        )
-        self.register_buffer("loss_weight", weight)
-        self.loss_weight: Tensor | None
-
-
 class L1Loss(_Loss):
     r"""Creates a criterion that measures the mean absolute error (MAE) between each element in
     the input :math:`x` and target :math:`y`.
@@ -1444,9 +1407,9 @@ class CrossEntropyLoss(_WeightedLoss):
         )
 
 
-class LinearCrossEntropyLoss(_WeightedLinearLoss):
+class LinearCrossEntropyLoss(_WeightedLoss):
     r"""This criterion computes the cross entropy loss between input,
-    affinely transformed to logits, and target.
+    linearly transformed to logits, and target.
 
     See :class:`~torch.nn.CrossEntropyLoss` for the definition of cross entropy loss.
 
@@ -1468,17 +1431,16 @@ class LinearCrossEntropyLoss(_WeightedLinearLoss):
             ``'none'``: no reduction will be applied,
             ``'mean'``: the weighted mean of the output is taken,
             ``'sum'``: the output will be summed.
-            Note: :attr:`size_average` and :attr:`reduce` are in the
-            process of being deprecated, and in the meantime,
-            specifying either of those two args will override
-            :attr:`reduction`.
             Default: ``'mean'``.
         ignore_index (int, optional): Specifies a target value that is
             ignored and does not contribute to the input
-            gradient. When :attr:`size_average` is ``True``, the loss
-            is averaged over non-ignored targets. Note that
-            :attr:`ignore_index` is only applicable when the target
-            contains class indices.
+            gradient. Note that :attr:`ignore_index` is only
+            applicable when the target contains class indices.
+            Default: `None`. When target contains class indices, the
+            default value is mapped to `-100`. Note: the default
+            :attr:`ignore_index` in
+            :class:`~torch.nn.CrossEntropyLoss` is `-100` for both
+            target types.
         label_smoothing (float, optional): A float in [0.0, 1.0].
             Specifies the amount of smoothing when computing the loss,
             where 0.0 means no smoothing. The targets become a mixture
@@ -1518,7 +1480,6 @@ class LinearCrossEntropyLoss(_WeightedLinearLoss):
 
     __constants__ = [
         "num_classes",
-        "reduction",
         "out_features",
         "ignore_index",
         "label_smoothing",
@@ -1543,20 +1504,19 @@ class LinearCrossEntropyLoss(_WeightedLinearLoss):
         label_smoothing: float = 0.0,
         options: LinearCrossEntropyOptions | None = None,
     ) -> None:
-        bias = False  # linear_cross_entropy does not depend on bias
-        super().__init__(
-            in_features,
-            math.prod(out_features, start=num_classes),
-            bias,
-            device,
-            dtype,
-            reduction,
-            weight,
-        )
+        super().__init__(weight, None, None, reduction)
         self.num_classes = num_classes
         self.out_features = out_features
         self.ignore_index = ignore_index
         self.label_smoothing = label_smoothing
+        # Linear does not support multi-dimensional weights. To
+        # circumvent this limitation, we store the linear weights as
+        # two-dimensional weights and reshape it to multi-dimensional
+        # weights in forward prior passing the weights to
+        # linear_cross_entropy.
+        self.linear = Linear(
+            in_features, num_classes * math.prod(out_features), False, device, dtype
+        )
         self.options = options
 
     def forward(self, input: Tensor, target: Tensor) -> Tensor:
@@ -1568,18 +1528,11 @@ class LinearCrossEntropyLoss(_WeightedLinearLoss):
             input,
             linear_weight,
             target,
-            weight=self.loss_weight,
+            weight=self.weight,
             reduction=self.reduction,
             ignore_index=self.ignore_index,
             label_smoothing=self.label_smoothing,
             options=self.options,
-        )
-
-    def extra_repr(self) -> str:
-        return (
-            f"num_classes={self.num_classes}, reduction={self.reduction}, "
-            f"out_features={self.out_features}, ignore_index={self.ignore_index}, "
-            f"label_smoothing={self.label_smoothing} options={self.options}"
         )
 
 

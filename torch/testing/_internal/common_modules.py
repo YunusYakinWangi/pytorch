@@ -1791,7 +1791,7 @@ def module_inputs_torch_nn_LinearCrossEntropyLoss(module_info, device, dtype, re
         linear_weight = p[0].reshape(*m.out_features, m.num_classes, i.shape[-1])
         return linear_cross_entropy_loss_reference(
             i, linear_weight, t,
-            weight=m.loss_weight,
+            weight=m.weight,
             reduction=m.reduction, ignore_index=m.ignore_index, label_smoothing=m.label_smoothing)
 
     def make_target(num_classes, shape, ii, target_dtype):
@@ -1918,6 +1918,25 @@ def module_inputs_torch_nn_LinearCrossEntropyLoss(module_info, device, dtype, re
                 reference_fn=reference_fn)
         )
     return module_inputs
+
+
+def module_error_inputs_torch_nn_LinearCrossEntropyLoss(module_info, device, dtype, requires_grad, training, **kwargs):
+    make_input = partial(make_tensor, device=device, dtype=dtype, requires_grad=requires_grad)
+    return [
+        # Non-floating-point target with same shape as input (soft-target path)
+        ErrorModuleInput(
+            ModuleInput(
+                constructor_input=FunctionInput(3, 2, device=device, dtype=dtype),
+                forward_input=FunctionInput(
+                    make_input((4, 3)),
+                    torch.zeros((4, 2), device=device, dtype=torch.long),
+                ),
+            ),
+            error_on=ModuleErrorEnum.FORWARD_ERROR,
+            error_type=RuntimeError,
+            error_regex="Expected floating point type for target with class probabilities",
+        ),
+    ]
 
 
 def module_inputs_torch_nn_CTCLoss(module_info, device, dtype, requires_grad, training, **kwargs):
@@ -4477,13 +4496,15 @@ module_db: list[ModuleInfo] = [
                ),
     ModuleInfo(torch.nn.LinearCrossEntropyLoss,
                module_inputs_func=module_inputs_torch_nn_LinearCrossEntropyLoss,
-               dtypes=get_all_fp_dtypes(include_half=True,
-                                        include_bfloat16=False),
+               module_error_inputs_func=module_error_inputs_torch_nn_LinearCrossEntropyLoss,
+               dtypes=get_all_fp_dtypes(include_half=True, include_bfloat16=True),
                decorators=(
                    DecorateInfo(toleranceOverride({torch.float16: tol(atol=2e-3, rtol=1e-2)}), "TestModule",
                                 "test_non_contiguous_tensors", dtypes=[torch.float16]),
                    DecorateInfo(toleranceOverride({torch.float16: tol(atol=4e-2, rtol=3e-1)}), "TestModule",
                                 "test_cpu_gpu_parity", dtypes=[torch.float16]),
+                   DecorateInfo(unittest.expectedFailure, "TestModule", "test_cpu_gpu_parity", dtypes=[torch.bfloat16],
+                                device_type='cuda'),
                    DecorateInfo(toleranceOverride({torch.float16: tol(atol=2e-1, rtol=2e-3)}), "TestModule",
                                 "test_memory_format", device_type="cuda", dtypes=[torch.float16]),
                    DecorateInfo(toleranceOverride({torch.float16: tol(atol=2e-1, rtol=2e-3)}), "TestModule",
