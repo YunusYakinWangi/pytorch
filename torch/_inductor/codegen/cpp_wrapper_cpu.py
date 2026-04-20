@@ -14,7 +14,7 @@ import sympy
 
 import torch
 import torch._higher_order_ops.torchbind
-import torch._inductor.async_compile  # noqa: F401 required to warm up AsyncCompile pools
+import torch._inductor.async_compile
 import torch._ops
 from torch._inductor.runtime.runtime_utils import dynamo_timed
 from torch.fx.experimental.symbolic_shapes import ConvertIntKey, DivideByKey, SymTypes
@@ -147,6 +147,7 @@ class CppWrapperCpu(PythonWrapperCodegen):
         inductor_meta=None,
         graph_name="",
         original_fxnode_name=None,
+        current_stream_idx=None,
     ):
         """
         Generates kernel call code.
@@ -1581,8 +1582,14 @@ class CppWrapperCpu(PythonWrapperCodegen):
     def _generate_symbolic_call_arg_helper(
         self, arg: SymbolicCallArg, graph: GraphLowering
     ) -> None:
-        if (arg.inner, graph) not in self.kernel_numel_expr:
-            # declare expr once in each graph (scope)
+        enable_kernel_profile = config.cpp.enable_kernel_profile and sys.platform in [
+            "linux",
+            "win32",
+        ]
+        if enable_kernel_profile or (arg.inner, graph) not in self.kernel_numel_expr:
+            # When enable_kernel_profile is on, each kernel call is wrapped in
+            # its own {} scope block, so we must redeclare the variable each
+            # time since prior declarations are no longer visible.
             self.kernel_numel_expr.add((arg.inner, graph))
             self.writeline(f"int64_t {arg.inner} = {cexpr(arg.inner_expr)};")
         else:
@@ -2727,7 +2734,7 @@ if (!custom_op_wrapper) {
             dispatch_lines.writeline("AOTI_TORCH_ERROR_CODE_CHECK(")
             with dispatch_lines.indent():
                 dispatch_lines.writeline(
-                    f'aoti_torch_call_dispatcher("{op_overload._schema.name}", "{op_overload._schema.overload_name}", dispatch_vars.data())'  # noqa: B950
+                    f'aoti_torch_call_dispatcher("{op_overload._schema.name}", "{op_overload._schema.overload_name}", dispatch_vars.data())'
                 )
             dispatch_lines.writeline(");")
 
@@ -2800,7 +2807,7 @@ if (!custom_op_wrapper) {
             for idx, output_arg in enumerate(output_args):
                 if output_arg is None:
                     continue
-                lines += f"{output_arg} = reinterpret_cast<AtenTensorHandle>(PyCapsule_GetPointer(PyList_GET_ITEM(py_{buf_name}.get(), {idx}), NULL));\n"  # noqa: B950
+                lines += f"{output_arg} = reinterpret_cast<AtenTensorHandle>(PyCapsule_GetPointer(PyList_GET_ITEM(py_{buf_name}.get(), {idx}), NULL));\n"
 
         if raw_outputs:
             declarations_before_scope = [

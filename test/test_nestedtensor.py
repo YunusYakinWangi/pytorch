@@ -10,7 +10,6 @@ import sys
 import tempfile
 import unittest
 from functools import partial
-from typing import Optional
 
 import numpy as np
 
@@ -3935,7 +3934,7 @@ def get_atol(true_value: torch.Tensor, computed_value: torch.Tensor) -> float:
 def get_tolerances(
     true_value: torch.Tensor,
     computed_value: torch.Tensor,
-    fudge_factor: Optional[float] = None,
+    fudge_factor: float | None = None,
 ) -> tuple[float, float]:
     """Returns the absolute and relative tolerances for comparing two tensors."""
     fudge_factor = fudge_factor if fudge_factor is not None else 1.0
@@ -8769,6 +8768,11 @@ BACKWARD_SKIPS_AND_XFAILS = [
             in {"max.binary", "min.binary", "minimum", "maximum", "copysign"}
         ),
         name="unimplemented_masked_fill",
+    ),
+    XFailRule(
+        sample_match_fn=lambda device, sample: "(T, NT)" in sample.name,
+        op_match_fn=lambda device, op: op.full_name == "nextafter",
+        name="nextafter_backward_not_implemented",
     ),
 ]
 
