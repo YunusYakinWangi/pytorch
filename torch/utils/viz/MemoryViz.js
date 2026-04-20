@@ -1118,7 +1118,7 @@ function create_trace_view(
   dst.selectAll('svg').remove();
   dst.selectAll('div').remove();
 
-  max_entries = Math.min(max_entries, data.max_pool_elements);
+  max_entries = Math.min(max_entries, data.elements_length);
   if (include_private_inactive) {
     dst.append('div')
       .attr('style', 'padding: 4px 8px; background: #fff3cd; border: 1px solid #ffc107; font-size: 13px; margin-bottom: 4px;')
@@ -1129,13 +1129,13 @@ function create_trace_view(
   d.append('input')
     .attr('type', 'range')
     .attr('min', 0)
-    .attr('max', data.max_pool_elements)
+    .attr('max', data.elements_length)
     .attr('value', max_entries)
     .on('change', function () {
       create_trace_view(dst, snapshot, device, plot_segments, this.value, include_private_inactive);
     });
   d.append('label').text(
-    `Detail: ${max_entries} of ${data.max_pool_elements} entries`,
+    `Detail: ${max_entries} of ${data.elements_length} entries`,
   );
 
   d.append('span').text('  |  ');

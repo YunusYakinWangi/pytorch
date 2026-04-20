@@ -1312,7 +1312,7 @@ function test_per_pool_summarization() {
   const gs_max = Math.max(...global_summary.size);
   assertEqual(gs_max, 5500, 'global summarized max = 5500 (all default pool allocs)');
 
-  assertEqual(result.max_pool_elements, 20, 'max_pool_elements = 20 (total elements)');
+  assertEqual(result.elements_length, 20, 'elements_length = 20 (total elements)');
 }
 
 function test_per_pool_summarization_with_frees() {

@@ -1074,7 +1074,6 @@ function process_alloc_data(snapshot, device, plot_segments, max_entries, includ
     max_at_time,
     summarized_mem,
     elements_length: elements.length,
-    max_pool_elements: elements.length,
     context_for_id: id => {
       const elem = elements[id];
       let text = `Addr: ${formatAddr(elem)}`;
