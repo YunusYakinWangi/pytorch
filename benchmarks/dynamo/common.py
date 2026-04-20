@@ -2166,6 +2166,38 @@ class BenchmarkRunner:
             )
         return model
 
+    def _write_accuracy_row(self, status, dynamo_start_stats, tag):
+        """
+        Shared CSV + signpost writer for accuracy checks.
+        """
+        headers = ["dev", "name", "batch_size", "accuracy"]
+        fields = [current_device, current_name, current_batch_size, status]
+
+        if tag is not None:
+            headers.insert(3, "tag")
+            fields.insert(3, tag)
+
+        o_headers = list(headers)
+        o_fields = list(fields)
+
+        dynamo_stats = get_dynamo_stats()
+        dynamo_stats.subtract(dynamo_start_stats)
+        for k, v in dynamo_stats.items():
+            headers.append(k)
+            fields.append(v)
+
+        total_wall_time = output_signpost(
+            dict(zip(o_headers, o_fields)),
+            self.args,
+            self.suite_name,
+        )
+        headers.append("compilation_latency")
+        fields.append(total_wall_time)
+        write_outputs(output_filename, headers, fields)
+
+        if self.args.print_compilation_time:
+            print(f"Compilation time (from dynamo_timed): {total_wall_time}")
+
     def check_accuracy(
         self, name, model, example_inputs, optimize_ctx, experiment, tag
     ):
@@ -2188,34 +2220,7 @@ class BenchmarkRunner:
                 ):
                     accuracy_status = "pass"
 
-            headers = ["dev", "name", "batch_size", "accuracy"]
-            fields = [current_device, current_name, current_batch_size, accuracy_status]
-
-            if tag is not None:
-                headers.insert(3, "tag")
-                fields.insert(3, tag)
-
-            o_headers = list(headers)
-            o_fields = list(fields)
-
-            dynamo_stats = get_dynamo_stats()
-            dynamo_stats.subtract(dynamo_start_stats)
-            for k, v in dynamo_stats.items():
-                headers.append(k)
-                fields.append(v)
-
-            total_wall_time = output_signpost(
-                dict(zip(o_headers, o_fields)),
-                self.args,
-                self.suite_name,
-            )
-            headers.append("compilation_latency")
-            fields.append(total_wall_time)
-            write_outputs(output_filename, headers, fields)
-
-            if self.args.print_compilation_time:
-                print(f"Compilation time (from dynamo_timed): {total_wall_time}")
-
+            self._write_accuracy_row(accuracy_status, dynamo_start_stats, tag)
             return accuracy_status
 
         if name in self.skip_accuracy_checks_large_models_dashboard:
@@ -2527,29 +2532,7 @@ class BenchmarkRunner:
             ):
                 status = "pass"
 
-            headers = ["dev", "name", "batch_size", "accuracy"]
-            fields = [current_device, current_name, current_batch_size, status]
-            if tag is not None:
-                headers.insert(3, "tag")
-                fields.insert(3, tag)
-
-            o_headers = list(headers)
-            o_fields = list(fields)
-
-            dynamo_stats = get_dynamo_stats()
-            dynamo_stats.subtract(dynamo_start_stats)
-            for k, v in dynamo_stats.items():
-                headers.append(k)
-                fields.append(v)
-
-            total_wall_time = output_signpost(
-                dict(zip(o_headers, o_fields)),
-                self.args,
-                self.suite_name,
-            )
-            headers.append("compilation_latency")
-            fields.append(total_wall_time)
-            write_outputs(output_filename, headers, fields)
+            self._write_accuracy_row(status, dynamo_start_stats, tag)
             return status
 
         if name in self.skip_accuracy_checks_large_models_dashboard:
