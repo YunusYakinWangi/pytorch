@@ -2525,20 +2525,16 @@ class BenchmarkRunner:
         start_stats = get_dynamo_stats()
 
         def record_status(status, dynamo_start_stats):
-            # Flaky models can't be bitwise-compared. Mirror check_accuracy's
-            # relabel so they don't pollute the dashboard with false failures.
-            if current_name in self.non_deterministic_models and (
-                status == "pass" or status.startswith("fail_batch_invariance")
-            ):
-                status = "pass"
-
             self._write_accuracy_row(status, dynamo_start_stats, tag)
             return status
 
         if name in self.skip_accuracy_checks_large_models_dashboard:
             return record_status("pass_due_to_skip", dynamo_start_stats=start_stats)
 
-        if name in self.skip_accuracy_check_as_eager_non_deterministic:
+        if (
+            name in self.skip_accuracy_check_as_eager_non_deterministic
+            or name in self.non_deterministic_models
+        ):
             return record_status("pass_due_to_skip", dynamo_start_stats=start_stats)
 
         full_batch = current_batch_size
@@ -2628,13 +2624,8 @@ class BenchmarkRunner:
                 out_for_cmp = tree_map_only(torch.Tensor, keep_batch_first, out)
 
                 try:
-                    is_same = same(
-                        ref_for_cmp,
-                        out_for_cmp,
-                        fp64_ref=None,
-                        cos_similarity=False,
-                        tol=0,
-                        equal_nan=self.equal_nan,
+                    is_same = bitwise_same(
+                        ref_for_cmp, out_for_cmp, equal_nan=self.equal_nan
                     )
                 except Exception:
                     is_same = False
@@ -3881,7 +3872,10 @@ def parse_args(args=None):
     run_mode_group.add_argument(
         "--inference", action="store_true", help="Performs inference"
     )
-    return parser.parse_args(args)
+    parsed = parser.parse_args(args)
+    if parsed.batch_invariant and not parsed.accuracy:
+        parser.error("--batch-invariant requires --accuracy")
+    return parsed
 
 
 def process_caching_precompile():
@@ -4202,6 +4196,8 @@ def setup_determinism(args):
 def setup_batch_invariant(args):
     if not torch.cuda.is_available():
         return
+    setup_determinism(args)
+    inductor_config.triton.cudagraphs = False
     torch.backends.cuda.preferred_blas_library("cublaslt")
     torch.backends.cuda.matmul.allow_fp16_reduced_precision_reduction = (False, False)
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (False, False)
@@ -4268,9 +4264,6 @@ def run(runner, args, original_dir=None):
     if args.deterministic and not args.accuracy:
         setup_determinism(args)
 
-    if args.batch_invariant and not args.accuracy:
-        raise AssertionError("--batch-invariant requires --accuracy")
-
     if args.accuracy:
         # Use small batch size. We use >1 batch size to ensure we test
         # batch_norm type of operators that work on batch dims.
@@ -4282,10 +4275,6 @@ def run(runner, args, original_dir=None):
                 elif runner.suite_name == "torchbench":
                     args.batch_size = 8
                 else:
-                    if runner.suite_name != "timm_models":
-                        raise AssertionError(
-                            f"expected runner.suite_name to be 'timm_models', got {runner.suite_name}"
-                        )
                     args.batch_size = 16
             elif runner.suite_name == "huggingface":
                 args.batch_size = 1

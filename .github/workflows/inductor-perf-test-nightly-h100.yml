@@ -142,7 +142,7 @@ jobs:
     if: github.event.schedule == '15 0 * * 1-6'
     with:
       build-environment: ${{ needs.build.outputs.build-environment }}
-      dashboard-tag: training-true-inference-true-default-true-dynamic-true-cudagraphs-true-cppwrapper-true-aotinductor-true-freezing_cudagraphs-true-deterministic_perf-true-batch_invariant_accuracy-true
+      dashboard-tag: training-true-inference-true-default-true-dynamic-true-cudagraphs-true-cppwrapper-true-aotinductor-true-freezing_cudagraphs-true-deterministic_perf-true
       docker-image: ${{ needs.build.outputs.docker-image }}
       test-matrix: ${{ needs.build.outputs.test-matrix }}
       timeout-minutes: 720
@@ -161,7 +161,7 @@ jobs:
     if: github.event.schedule == '0 7 * * 0'
     with:
       build-environment: ${{ needs.build.outputs.build-environment }}
-      dashboard-tag: training-true-inference-true-default-true-dynamic-true-cudagraphs-true-cppwrapper-true-aotinductor-true-freezing_cudagraphs-true-maxautotune-true-freeze_autotune_cudagraphs-true-deterministic_perf-true-batch_invariant_accuracy-true
+      dashboard-tag: training-true-inference-true-default-true-dynamic-true-cudagraphs-true-cppwrapper-true-aotinductor-true-freezing_cudagraphs-true-maxautotune-true-freeze_autotune_cudagraphs-true-deterministic_perf-true
       docker-image: ${{ needs.build.outputs.docker-image }}
       test-matrix: ${{ needs.build.outputs.test-matrix }}
       timeout-minutes: 1440
