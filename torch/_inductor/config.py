@@ -997,7 +997,7 @@ compute_all_bounds = False
 
 # enable the combo kernel that combines data-independent kernels (additional
 # to foreach kernels) into a single one (Experimental)
-combo_kernels = False
+combo_kernels = True
 # benchmark combo kernels and only allow ones with perf gains
 benchmark_combo_kernel = False
 # combo_kernel autotuning options: 0 - disable, 1 - enable except for foreach,
@@ -1015,7 +1015,7 @@ combo_kernel_max_num_nodes = 8
 # When True, each combo sub-kernel gets its own block sizes (XBLOCK_0, YBLOCK_0, etc.)
 # allowing different sub-kernels to use different tile sizes based on their heuristics.
 # When False, all sub-kernels share block sizes (XBLOCK, YBLOCK, etc.)
-combo_kernel_per_subkernel_blocks = False
+combo_kernel_per_subkernel_blocks = True
 # When True, combo-kernel autotuning groups sub-kernels that share the same
 # candidate config set and kernel-analysis signature. Disabled by default.
 combo_kernel_autotune_grouping = False
@@ -1024,7 +1024,7 @@ combo_kernels_pointwise_only = False
 # When > 0, combo kernel creation simulates each group's peak memory impact
 # and rejects (or greedily shrinks) groups whose simulated peak exceeds
 # baseline + threshold (bytes). 0 disables the check.
-combo_kernel_peak_memory_threshold: int = 0
+combo_kernel_peak_memory_threshold: int = 1 * 1024 * 1024
 
 # constant folding on the joint graph
 joint_graph_constant_folding = True
