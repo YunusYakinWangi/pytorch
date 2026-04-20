@@ -341,7 +341,7 @@ def generic_float(tx: "InstructionTranslator", obj: VariableTracker) -> Variable
 
 
 def generic_iternext(
-    tx: "InstructionTranslator", obj: "VariableTracker"
+    tx: "InstructionTranslator", obj: VariableTracker
 ) -> "VariableTracker":
     """
     Implements PyIter_Next / tp_iternext semantics for VariableTracker objects.
@@ -354,14 +354,13 @@ def generic_iternext(
 
     T = maybe_get_python_type(obj)
     if not type_implements_tp_iternext(T):
-        raise_type_error(tx, f"'{obj.python_type_name()}' object is not an iterator")
+        raise_type_error(tx, f"expected an iterator, got '{obj.python_type_name()}'")
 
     return obj.tp_iternext_impl(tx)
 
 
-# TODO(guilhermeleobas): should we narrow the return type to IteratorVariable?
 def generic_getiter(
-    tx: "InstructionTranslator", obj: "VariableTracker"
+    tx: "InstructionTranslator", obj: VariableTracker
 ) -> "VariableTracker":
     """
     Implements PyObject_GetIter semantics for VariableTracker objects.
