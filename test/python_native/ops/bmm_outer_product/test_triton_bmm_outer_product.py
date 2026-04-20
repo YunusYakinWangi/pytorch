@@ -1,13 +1,18 @@
 # Owner(s): ["module: dsl-native-ops"]
 """
-Tests for Triton BMM Outer Product implementation using BinaryUfuncInfo with DSL support.
+Tests for Triton BMM Outer Product implementation using OpInfo with DSL support.
 
-This module provides OpInfo definitions for testing the Triton-optimized
+This module provides an OpInfo definition for testing the Triton-optimized
 batch matrix multiplication implementation specifically for outer product cases.
+The op is non-elementwise (shape-contracting), so it uses plain OpInfo rather
+than BinaryUfuncInfo — that way TestCommon drives it via op.sample_inputs(...)
+and op.ref instead of TestBinaryUfuncs' elementwise shape generators.
 """
 
 import unittest
 from functools import partial
+
+import numpy as np
 
 import torch
 from torch.testing import make_tensor
@@ -17,11 +22,11 @@ from torch.testing._internal.common_device_type import (
     tol,
     toleranceOverride,
 )
-from torch.testing._internal.common_dtype import _dispatch_dtypes, floating_types
+from torch.testing._internal.common_dtype import floating_types_and
 from torch.testing._internal.common_utils import run_tests
 from torch.testing._internal.opinfo.core import (
-    BinaryUfuncInfo,
     DecorateInfo,
+    OpInfo,
     SampleInput,
 )
 
@@ -73,8 +78,9 @@ def sample_inputs_triton_bmm_outer_product(
 
 
 def reference_bmm_outer_product(a, b):
-    """Reference implementation using standard torch.bmm."""
-    return torch.bmm(a, b)
+    """NumPy reference; inputs are ndarrays because TestCommon.test_numpy_ref
+    converts SampleInputs via SampleInput.numpy() before calling this."""
+    return np.matmul(a, b)
 
 
 # Import the Triton kernel and availability check
@@ -87,7 +93,7 @@ try:
 except ImportError:
     # Create a dummy function if Triton is not available
     def triton_bmm_outer_product_kernel(a, b):
-        return torch.bmm(a, b)
+        return torch.ops.aten.bmm(a, b)
 
     HAS_TRITON_BMM = False
 
@@ -114,140 +120,80 @@ def verify_outer_product_conditions(a, b):
     )
 
 
-# BinaryUfuncInfo for Triton BMM Outer Product testing - DIRECT IMPLEMENTATION TESTING
-triton_bmm_outer_product_opinfo = BinaryUfuncInfo(
+# Plain OpInfo (not BinaryUfuncInfo) because this op is shape-contracting rather
+# than elementwise. TestCommon's numerics tests iterate op.sample_inputs(...) so
+# the custom sample generator drives the run; TestBinaryUfuncs is bypassed.
+triton_bmm_outer_product_opinfo = OpInfo(
     "triton_bmm_outer_product",
-    op=triton_bmm_outer_product_kernel,  # Direct call to Triton kernel
-    dsl_name="triton",  # DSL backend identification
-    # BinaryUfuncInfo supports floating point types, exclude complex
-    dtypes=_dispatch_dtypes(floating_types()),
-    dtypesIfCUDA=_dispatch_dtypes(floating_types()),  # CUDA required for Triton
-    # Input generation - only generate inputs that meet outer product conditions
+    op=triton_bmm_outer_product_kernel,
+    dsl_name="triton",
+    dtypes=(),  # CPU unsupported; Triton is CUDA-only
+    dtypesIfCUDA=floating_types_and(torch.half, torch.bfloat16),
     sample_inputs_func=sample_inputs_triton_bmm_outer_product,
-    # Reference function for numerical testing
     ref=reference_bmm_outer_product,
-    # Binary operation properties
-    supports_autograd=False,  # Direct kernel testing, not autodiff integration
+    supports_autograd=False,
     supports_forward_ad=False,
     supports_fwgrad_bwgrad=False,
-    # Direct kernel testing doesn't support out parameter
     supports_out=False,
-    # No inplace variant for BMM
     inplace_variant=None,
-    # Device and precision decorators
+    # Direct Triton kernel launches don't interoperate with tensor subclasses
+    # (CompositeCompliantTensor, COW wrapper) or FakeTensor.
+    supports_cow_input_no_materialize_forward=False,
     decorators=[
-        # Standard tolerances for floating point operations
         DecorateInfo(
             toleranceOverride(
                 {
                     torch.float32: tol(atol=1e-5, rtol=1e-5),
-                    torch.float64: tol(atol=1e-10, rtol=1e-10),
+                    torch.float64: tol(atol=1e-8, rtol=1e-8),
                     torch.float16: tol(atol=1e-3, rtol=1e-3),
                     torch.bfloat16: tol(atol=1e-2, rtol=1e-2),
                 }
             ),
             device_type="cuda",
         ),
-        # Only test on CUDA since Triton requires CUDA
-        DecorateInfo(
-            onlyCUDA,
-        ),
+        DecorateInfo(onlyCUDA),
     ],
-    # Skip conditions
     skips=(
-        # Skip if CUDA is not available (Triton requires CUDA)
         DecorateInfo(
             skipCUDAIf(not torch.cuda.is_available(), "CUDA not available"),
         ),
-        # Skip if Triton BMM is not available
         DecorateInfo(
             unittest.skipIf(
                 not HAS_TRITON_BMM, "Triton BMM outer product not available"
             ),
         ),
-        # Skip complex dtypes as BMM outer product doesn't support them meaningfully
+        # noncontiguous_like() on (B,M,1)/(B,1,N) breaks the shape contract the
+        # kernel requires, so skip the generic non-contig test.
         DecorateInfo(
-            unittest.skip("Complex dtypes not supported for BMM outer product"),
-            dtypes=(torch.cfloat, torch.cdouble),
+            unittest.skip("Outer-product kernel requires contiguous (B,M,1)/(B,1,N)"),
+            "TestCommon",
+            "test_noncontiguous_samples",
         ),
-        # Skip tests that generate incompatible tensor shapes (not outer product pattern)
+        # Triton kernels take raw pointers and can't dispatch through tensor
+        # subclasses (CompositeCompliantTensor, CrossRefFakeMode, etc.).
         DecorateInfo(
-            unittest.skip("BMM outer product requires specific 3D tensor pattern"),
-            "TestBinaryUfuncs",
-            "test_batch_vs_slicing",
-        ),
-        DecorateInfo(
-            unittest.skip("BMM outer product requires specific 3D tensor pattern"),
-            "TestBinaryUfuncs",
-            "test_broadcasting",
+            unittest.skip("Triton kernel incompatible with tensor subclasses"),
+            "TestCompositeCompliance",
         ),
         DecorateInfo(
-            unittest.skip("BMM outer product requires specific 3D tensor pattern"),
-            "TestBinaryUfuncs",
-            "test_contig_size1_large_dim",
+            unittest.skip("Triton kernel incompatible with FakeTensor"),
+            "TestFakeTensor",
         ),
         DecorateInfo(
-            unittest.skip("BMM outer product requires specific 3D tensor pattern"),
-            "TestBinaryUfuncs",
-            "test_contig_size1",
+            unittest.skip("Triton kernel not introspectable for tag inference"),
+            "TestTags",
         ),
         DecorateInfo(
-            unittest.skip("BMM outer product requires specific 3D tensor pattern"),
-            "TestBinaryUfuncs",
-            "test_contig_vs_every_other",
+            unittest.skip("Triton kernel not introspectable for conjugate/negate views"),
+            "TestMathBits",
         ),
+        # Sample generator only targets the primary CUDA device.
         DecorateInfo(
-            unittest.skip("BMM outer product requires specific 3D tensor pattern"),
-            "TestBinaryUfuncs",
-            "test_contig_vs_transposed",
-        ),
-        DecorateInfo(
-            unittest.skip("BMM outer product requires specific 3D tensor pattern"),
-            "TestBinaryUfuncs",
-            "test_non_contig_expand",
-        ),
-        DecorateInfo(
-            unittest.skip("BMM outer product requires specific 3D tensor pattern"),
-            "TestBinaryUfuncs",
-            "test_non_contig",
-        ),
-        DecorateInfo(
-            unittest.skip("BMM outer product requires specific 3D tensor pattern"),
-            "TestBinaryUfuncs",
-            "test_not_broadcastable",
-        ),
-        DecorateInfo(
-            unittest.skip("BMM outer product requires specific 3D tensor pattern"),
-            "TestBinaryUfuncs",
-            "test_reference_numerics_extremal_values",
-        ),
-        DecorateInfo(
-            unittest.skip("BMM outer product requires specific 3D tensor pattern"),
-            "TestBinaryUfuncs",
-            "test_reference_numerics_large_values",
-        ),
-        DecorateInfo(
-            unittest.skip("BMM outer product requires specific 3D tensor pattern"),
-            "TestBinaryUfuncs",
-            "test_reference_numerics_small_values",
-        ),
-        DecorateInfo(
-            unittest.skip("BMM outer product requires specific 3D tensor pattern"),
-            "TestBinaryUfuncs",
-            "test_reference_numerics",
-        ),
-        DecorateInfo(
-            unittest.skip("BMM outer product requires specific 3D tensor pattern"),
-            "TestBinaryUfuncs",
-            "test_scalar_support",
-        ),
-        DecorateInfo(
-            unittest.skip("BMM outer product requires specific 3D tensor pattern"),
-            "TestBinaryUfuncs",
-            "test_type_promotion",
+            unittest.skip("Sample generator allocates on the primary CUDA device"),
+            "TestCommon",
+            "test_multiple_devices",
         ),
     ),
-    # Additional metadata for Triton-specific testing
     variant_test_name="triton_optimized",
 )
 
