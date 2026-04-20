@@ -26949,6 +26949,10 @@ def skipOps(test_case_name, base_test_name, to_skip):
         matching_opinfos = [o for o in all_opinfos
                             if o.name == op_name and o.variant_test_name == variant_name]
         if len(matching_opinfos) < 1:
+            # When OPINFO_RESTRICT_TO_DSL filters op_db down to a DSL subset,
+            # xfail entries targeting filtered-out ops are benign - just skip them.
+            if OPINFO_RESTRICT_TO_DSL:
+                continue
             raise AssertionError(f"Couldn't find OpInfo for {xfail}")
         for op in matching_opinfos:
             decorators = list(op.decorators)
