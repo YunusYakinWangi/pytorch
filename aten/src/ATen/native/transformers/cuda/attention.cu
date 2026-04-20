@@ -497,7 +497,11 @@ _flash_attention_forward_impl(
   std::optional<Tensor> alibi_slopes = _alibi_slopes;
   const float softcap = 0.0;
 
-#ifdef USE_ROCM  // ROCM backend accepts std::optional for window_size_left/right directly.
+#ifdef USE_ROCM
+  TORCH_CHECK(
+      !num_splits.has_value(),
+      "num_splits is not supported on ROCm");
+  // ROCM backend accepts std::optional for window_size_left/right directly.
 #ifdef DISABLE_AOTRITON  // CK backend, Passing window_size as it is
   const auto window_left = window_size_left;
   const auto window_right = window_size_right;
@@ -551,8 +555,11 @@ _flash_attention_forward_impl(
             window_right,
             softcap,
             return_debug_mask,
-            std::nullopt /*gen_*/,
-            num_splits.value_or(0));
+            std::nullopt /*gen_*/
+#ifndef USE_ROCM
+            , num_splits.value_or(0)
+#endif
+            );
   } else {
     std::tie(
         output,
