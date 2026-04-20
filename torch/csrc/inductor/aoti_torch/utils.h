@@ -10,15 +10,22 @@
 #include <c10/util/OptionalArrayRef.h>
 #include <torch/csrc/inductor/aoti_torch/c/shim.h>
 #include <optional>
+#include <string>
+
+namespace torch::aot_inductor {
+extern thread_local std::string aoti_last_error_msg;
+} // namespace torch::aot_inductor
 
 #define AOTI_TORCH_CONVERT_EXCEPTION_TO_ERROR_CODE(...)    \
   try {                                                    \
     __VA_ARGS__                                            \
   } catch (const std::exception& e) {                      \
     LOG(ERROR) << "Exception in aoti_torch: " << e.what(); \
+    torch::aot_inductor::aoti_last_error_msg = e.what();   \
     return AOTI_TORCH_FAILURE;                             \
   } catch (...) {                                          \
     LOG(ERROR) << "Exception in aoti_torch: UNKNOWN";      \
+    torch::aot_inductor::aoti_last_error_msg = "Unknown exception in aoti_torch"; \
     return AOTI_TORCH_FAILURE;                             \
   }                                                        \
   return AOTI_TORCH_SUCCESS;
