@@ -963,7 +963,7 @@ class VariableTracker(metaclass=VariableTrackerMeta):
             context=f"next({self.python_type_name()})",
             explanation=(
                 f"Dynamo does not support next() on {self.python_type_name()}."
-                " Add tp_iternext to this VariableTracker subclass."
+                " Add tp_iternext_impl to this VariableTracker subclass."
             ),
             hints=[*graph_break_hints.SUPPORTABLE],
         )

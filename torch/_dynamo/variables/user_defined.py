@@ -1553,14 +1553,32 @@ class UserDefinedObjectVariable(UserDefinedVariable):
     def sq_contains(
         self, tx: "InstructionTranslator", item: VariableTracker
     ) -> VariableTracker:
-        contains_fn = self._maybe_get_baseclass_method("__contains__")
-        if contains_fn and isinstance(contains_fn, types.FunctionType):
-            return variables.UserMethodVariable(
-                contains_fn,
-                self,
-                source=self.source and AttrSource(self.source, "__contains__"),
-            ).call_function(tx, [item], {})
+        method = self._maybe_get_baseclass_method("__contains__")
+        if (
+            self._base_vt is not None
+            and self._base_methods is not None
+            and method in self._base_methods
+        ):
+            return self._base_vt.tp_iternext_impl(tx)
+
+        if isinstance(method, types.FunctionType):
+            method_var = self.resolve_type_attr(tx, "__contains__", method, self.source)
+            return method_var.call_function(tx, [], {})
         return super().sq_contains(tx, item)
+
+    def tp_iternext_impl(self, tx: "InstructionTranslator") -> VariableTracker:
+        method = self._maybe_get_baseclass_method("__next__")
+        if (
+            self._base_vt is not None
+            and self._base_methods is not None
+            and method in self._base_methods
+        ):
+            return self._base_vt.tp_iternext_impl(tx)
+
+        if isinstance(method, types.FunctionType):
+            method_var = self.resolve_type_attr(tx, "__next__", method, self.source)
+            return method_var.call_function(tx, [], {})
+        return super().tp_iternext_impl(tx)
 
     def tp_iter_impl(self, tx: "InstructionTranslator") -> VariableTracker:
         method = self._maybe_get_baseclass_method("__iter__")
@@ -1572,13 +1590,8 @@ class UserDefinedObjectVariable(UserDefinedVariable):
             return self._base_vt.tp_iter_impl(tx)
 
         if isinstance(method, types.FunctionType):
-            source_fn = self.source and self.get_source_by_walking_mro(tx, "__iter__")
-            return variables.UserMethodVariable(
-                method,
-                self,
-                source_fn=source_fn,
-                source=self.source,
-            ).call_function(tx, [], {})
+            method_var = self.resolve_type_attr(tx, "__iter__", method, self.source)
+            return method_var.call_function(tx, [], {})
         return super().tp_iter_impl(tx)
 
     @staticmethod
@@ -1903,16 +1916,6 @@ class UserDefinedObjectVariable(UserDefinedVariable):
                 handle_observed_exception(tx)
                 break
         return result
-
-    def tp_iternext_impl(self, tx: "InstructionTranslator") -> VariableTracker:
-        iter_fn = self._maybe_get_baseclass_method("__next__")
-        if iter_fn:
-            return variables.UserMethodVariable(
-                iter_fn,
-                self,
-                source=self.source and AttrSource(self.source, "__next__"),
-            ).call_function(tx, [], {})
-        return super().tp_iternext_impl(tx)
 
     def is_supported_random(self) -> bool:
         try:
