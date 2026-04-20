@@ -1700,6 +1700,70 @@ class ComboKernelPeakMemoryTests(TestCase):
             f"1GB={peak_memory[1024 * 1024 * 1024]})",
         )
 
+    @requires_gpu_and_triton
+    def test_combo_kernel_peak_memory_pct_threshold(self):
+        model = self._make_wide_resnet_like().to(GPU_TYPE).eval()
+        x = torch.randn(1, 3, 224, 224, device=GPU_TYPE)
+        with torch.no_grad():
+            out_eager = model(x)
+
+        kernel_counts = {}
+        # Sweep: 50% is permissive, 0.0001 (0.01%) rejects everything with delta.
+        for pct in (0.5, 0.0001):
+            torch._dynamo.reset()
+            torch._inductor.metrics.reset()
+            torch.cuda.empty_cache()
+
+            with torch._inductor.config.patch(
+                combo_kernel_peak_memory_threshold=0,
+                combo_kernel_peak_memory_pct_threshold=pct,
+            ):
+                compiled_fn = torch.compile(model)
+                with torch.no_grad():
+                    out_compiled = compiled_fn(x)
+
+            self.assertEqual(out_eager, out_compiled)
+            kernel_counts[pct] = torch._inductor.metrics.generated_kernel_count
+
+        # Tighter percent threshold should produce strictly more kernels.
+        self.assertGreater(
+            kernel_counts[0.0001],
+            kernel_counts[0.5],
+            "Tight pct threshold should reject more combo groups than loose one",
+        )
+
+    @requires_gpu_and_triton
+    def test_combo_kernel_peak_memory_disabled_parity(self):
+        model = self._make_wide_resnet_like().to(GPU_TYPE).eval()
+        x = torch.randn(1, 3, 224, 224, device=GPU_TYPE)
+        with torch.no_grad():
+            out_eager = model(x)
+
+        # Disabled via both thresholds == 0.
+        torch._dynamo.reset()
+        torch._inductor.metrics.reset()
+        torch.cuda.empty_cache()
+        with torch._inductor.config.patch(
+            combo_kernel_peak_memory_threshold=0,
+            combo_kernel_peak_memory_pct_threshold=0.0,
+        ):
+            out_disabled = torch.compile(model)(x)
+        kernels_disabled = torch._inductor.metrics.generated_kernel_count
+
+        torch._dynamo.reset()
+        torch._inductor.metrics.reset()
+        torch.cuda.empty_cache()
+        out_default = torch.compile(model)(x)
+        kernels_default = torch._inductor.metrics.generated_kernel_count
+
+        self.assertEqual(out_eager, out_disabled)
+        self.assertEqual(out_eager, out_default)
+        self.assertEqual(
+            kernels_disabled,
+            kernels_default,
+            "Feature-disabled path must match the default schedule exactly",
+        )
+
 
 if __name__ == "__main__":
     from torch._dynamo.test_case import run_tests
