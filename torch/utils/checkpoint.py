@@ -1212,19 +1212,28 @@ def _is_compiling(func, args, kwargs):
 
 
 class _VersionWrapper:
-    # Check that cached tensors are not mutated.
-    def __init__(self, val) -> None:
+    def __init__(self, val, hooks=None) -> None:
+        if isinstance(val, torch.Tensor):
+            self.version: int | None = val._version
+            if hooks is not None:
+                pack_hook, _ = hooks
+                val = pack_hook(val)
+        else:
+            self.version = None
         self.val: torch.Tensor | Any = val
-        self.version: int | None = val._version if isinstance(val, torch.Tensor) else None
+        self.hooks = hooks
 
     def get_val(self, allow_cache_entry_mutation):
+        val = self.val
+        if self.hooks is not None:
+            _, unpack_hook = self.hooks
+            val = unpack_hook(val)
         if self.version is not None and not allow_cache_entry_mutation:
-            if self.val._version != self.version:
-                # Can we give user a stack trace of where the mutation happened?
+            if val._version != self.version:
                 raise RuntimeError(
                     "Tensor cached during selective activation checkpoint has been mutated"
                 )
-        return self.val
+        return val
 
 
 def _maybe_detach(x, any_ret_has_alias_info):
@@ -1246,17 +1255,17 @@ def _maybe_detach(x, any_ret_has_alias_info):
     return x
 
 
-def _detach_and_save(x, any_ret_has_alias_info):
-    x = _maybe_detach(x, any_ret_has_alias_info)
-    if isinstance(x, torch.Tensor):
-        return _make_saved_tensor(x, is_output=False)
-    return x
-
-
-def _unpack_saved(x):
-    if isinstance(x, SavedTensor):
-        return x.unpack()
-    return x
+def _get_user_hooks():
+    """Get user-registered saved tensor hooks, skipping checkpoint's own hooks."""
+    top = torch._C._autograd._top_saved_tensors_default_hooks(True)
+    if top is None:
+        return None
+    # Pop checkpoint's hooks to see if there are user hooks underneath
+    torch._C._autograd._pop_saved_tensors_default_hooks()
+    user_hooks = torch._C._autograd._top_saved_tensors_default_hooks(True)
+    # Restore checkpoint's hooks
+    torch._C._autograd._push_saved_tensors_default_hooks(*top)
+    return user_hooks
 
 
 class SelectiveCheckpointContext:
@@ -1356,16 +1365,11 @@ def save_tensor(tensor: torch.Tensor) -> None:
     if info is None:
         return
     func, idx, any_ret_has_alias_info = info
-    if mode.allow_cache_entry_mutation:
-        mode.storage[func][idx] = tree_map(
-            lambda x: _VersionWrapper(_maybe_detach(x, any_ret_has_alias_info)),
-            tensor,
-        )
-    else:
-        mode.storage[func][idx] = tree_map(
-            lambda x: _detach_and_save(x, any_ret_has_alias_info),
-            tensor,
-        )
+    hooks = mode.user_hooks
+    mode.storage[func][idx] = tree_map(
+        lambda x: _VersionWrapper(_maybe_detach(x, any_ret_has_alias_info), hooks),
+        tensor,
+    )
 
 
 class _CachingTorchDispatchMode(TorchDispatchMode):
@@ -1374,13 +1378,17 @@ class _CachingTorchDispatchMode(TorchDispatchMode):
         return True
 
     # Used together with _CachedTorchDispatchMode to implement SAC.
-    def __init__(self, policy_fn, storage, ac_graph_id=None, allow_cache_entry_mutation=False) -> None:
+    def __init__(self, policy_fn, storage, ac_graph_id=None) -> None:
         self.policy_fn = policy_fn
         self.storage = storage
         self.ac_graph_id = ac_graph_id
-        self.allow_cache_entry_mutation = allow_cache_entry_mutation
         self.func_counter: Dict[Any, int] = defaultdict(int)
         self.tensor_tracker: WeakTensorKeyDictionary = WeakTensorKeyDictionary()
+        self.user_hooks = None
+
+    def __enter__(self):
+        self.user_hooks = _get_user_hooks()
+        return super().__enter__()
 
     def __torch_dispatch__(self, func, types, args=(), kwargs=None):
         kwargs = {} if kwargs is None else kwargs
@@ -1435,10 +1443,9 @@ class _CachingTorchDispatchMode(TorchDispatchMode):
                     node.meta["recompute"] = policy
 
         if policy in (CheckpointPolicy.MUST_SAVE, CheckpointPolicy.PREFER_SAVE) or is_compiling:
-            if self.allow_cache_entry_mutation:
-                self.storage[func][idx] = tree_map(lambda x: _VersionWrapper(_maybe_detach(x, any_ret_has_alias_info)), out)
-            else:
-                self.storage[func][idx] = tree_map(lambda x: _detach_and_save(x, any_ret_has_alias_info), out)
+            hooks = self.user_hooks
+            self.storage[func][idx] = tree_map(
+                lambda x: _VersionWrapper(_maybe_detach(x, any_ret_has_alias_info), hooks), out)
         return out
 
 class _CachedTorchDispatchMode(TorchDispatchMode):
@@ -1470,10 +1477,7 @@ class _CachedTorchDispatchMode(TorchDispatchMode):
 
         cached = self.storage.get(func, {}).pop(idx, None)
         if cached is not None:
-            if self.allow_cache_entry_mutation:
-                out = tree_map(lambda x: x.get_val(True), cached)
-            else:
-                out = tree_map(_unpack_saved, cached)
+            out = tree_map(lambda x: x.get_val(self.allow_cache_entry_mutation), cached)
         elif policy in (CheckpointPolicy.MUST_SAVE, CheckpointPolicy.PREFER_SAVE) or is_compiling:
             if func not in self.storage:
                 raise RuntimeError(f"{func} encountered during backward, but not found in storage")
@@ -1567,7 +1571,7 @@ def create_selective_checkpoint_contexts(policy_fn_or_list, allow_cache_entry_mu
 
     storage: Dict[Any, Dict[int, Any]] = defaultdict(dict)
     return (
-        _CachingTorchDispatchMode(policy_fn, storage, allow_cache_entry_mutation=allow_cache_entry_mutation),
+        _CachingTorchDispatchMode(policy_fn, storage),
         _CachedTorchDispatchMode(policy_fn, storage, allow_cache_entry_mutation),
     )
 
