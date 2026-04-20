@@ -74,7 +74,7 @@ static IValue listToIValue(py::handle obj) {
 IValue toIValue(py::handle obj, const TypePtr& type, std::optional<int32_t> N) {
   switch (type->kind()) {
     case TypeKind::TensorType: {
-      if (obj.ptr() == Py_None) {
+      if (Py_IsNone(obj.ptr())) {
         // None gets converted to undefined Tensors
         return autograd::Variable();
       }
@@ -750,7 +750,7 @@ py::object toPyObject(IValue ivalue) {
     }
 
     auto pyCu = get_python_cu();
-    if (obj->name().find("__torch__.torch.classes") == 0) {
+    if (obj->name().starts_with("__torch__.torch.classes")) {
       return py::cast(Object(obj));
     }
     const auto classType = pyCu->get_class(c10::QualifiedName(obj->name()));
