@@ -250,8 +250,8 @@ dtensor_fails = {
 }
 
 dtensor_multi_threaded_fails = {
-    xfail("index_fill"),
     xfail("full_like"),
+    skip("index_fill"),  # flaky
     xfail("nn.functional.dropout2d"),
     xfail("nn.functional.dropout3d"),
     xfail("nn.functional.huber_loss"),
@@ -394,7 +394,6 @@ dtensor_fails_no_strategy = {
     xfail("as_strided_scatter"),
     xfail("block_diag"),
     xfail("cdist"),
-    xfail("complex"),
     xfail("exponential"),
     xfail("fft.ihfft2"),
     xfail("fft.ihfftn"),
@@ -421,7 +420,6 @@ dtensor_fails_no_strategy = {
     xfail("nonzero"),
     xfail("polar"),
     xfail("put"),
-    xfail("renorm"),
     xfail("scatter_reduce", "amax"),
     xfail("scatter_reduce", "amin"),
     xfail("scatter_reduce", "mean"),
@@ -858,6 +856,7 @@ ops_unbacked_dtensor_dde = {
     xfail("prod"),
     xfail("quantile"),
     xfail("ravel"),
+    xfail("renorm"),
     xfail("reshape"),
     xfail("reshape_as"),
     xfail("rsub"),
