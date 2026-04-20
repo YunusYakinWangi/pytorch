@@ -64,6 +64,65 @@ def fallthrough_kernel():
     raise NotImplementedError("fallthrough_kernel() should never be called.")
 
 
+def _validate_out_schema(schema: "str | torch._C.FunctionSchema") -> None:
+    """Validate that a schema has valid out semantics, i.e., it can be tagged with torch.Tag.out.
+
+    Requirements:
+    - Must have at least one mutable argument
+    - All returns must alias the mutable args in declaration order
+
+    torchgen has equivalent checks (torchgen/model.py), but we reimplement them here
+    because (1) it's simple and (2) torchgen uses a different schema object
+    (torchgen.model.FunctionSchema vs torch._C.FunctionSchema) so it's difficult to
+    share the function.
+    """
+    if isinstance(schema, str):
+        schema = torch._C.parse_schema(schema)
+    mutable_args = [
+        arg
+        for arg in schema.arguments
+        if arg.alias_info is not None and arg.alias_info.is_write
+    ]
+    if not mutable_args:
+        raise ValueError(
+            f"Schema tagged with torch.Tag.out must have at least one mutable argument. "
+            f"Got: {schema}"
+        )
+    positional_mutable = [arg for arg in mutable_args if not arg.kwarg_only]
+    if positional_mutable:
+        names = [a.name for a in positional_mutable]
+        raise ValueError(
+            f"Schema tagged with torch.Tag.out requires all mutable arguments to be "
+            f"keyword-only (after the *). Found mutable positional args: {names}. "
+            f"Got: {schema}"
+        )
+    returns = schema.returns
+    if len(returns) != len(mutable_args):
+        raise ValueError(
+            f"Schema tagged with torch.Tag.out must return all mutable arguments "
+            f"(got {len(mutable_args)} mutable args but {len(returns)} returns). "
+            f"Got: {schema}"
+        )
+    for i, (ret, arg) in enumerate(zip(returns, mutable_args)):
+        if ret.alias_info is None or arg.alias_info is None:
+            raise ValueError(
+                f"Return {i} of schema tagged with torch.Tag.out must alias mutable arg '{arg.name}'. "
+                f"Got: {schema}"
+            )
+        if not ret.alias_info.is_write:
+            raise ValueError(
+                f"Return {i} of schema tagged with torch.Tag.out must be a mutable alias "
+                f"(e.g., Tensor(a!), not Tensor(a)) of arg '{arg.name}'. "
+                f"Got: {schema}"
+            )
+        if ret.alias_info.before_set != arg.alias_info.before_set:
+            raise ValueError(
+                f"Return {i} of schema tagged with torch.Tag.out must alias mutable arg '{arg.name}' "
+                f"(return aliases {ret.alias_info.before_set} but arg aliases {arg.alias_info.before_set}). "
+                f"Got: {schema}"
+            )
+
+
 class Library:
     """
     A class to create libraries that can be used to register new operators or
@@ -159,6 +218,9 @@ class Library:
         has_preexisting_packet = hasattr(torch.ops, self.ns) and hasattr(
             getattr(torch.ops, self.ns), packet_name
         )
+
+        if torch.Tag.out in tags:
+            _validate_out_schema(schema)
 
         result = self.m.define(schema, alias_analysis, tuple(tags))
         name = schema.split("(")[0]
