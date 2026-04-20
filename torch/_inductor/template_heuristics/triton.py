@@ -2075,7 +2075,7 @@ class MMTemplateConfigMixin(GemmMaxAutotuneTemplateConfigHeuristics):
                 selector._problem,
                 selector._hardware,
                 selector._configs,
-                10,
+                config.origami_topk,
             )
             seen = OrderedSet()
             for result in topk_results:
