@@ -45,11 +45,11 @@ lib.define(
     """
     all_gather_copy_in(
         Tensor[] all_gather_inputs,
-        Tensor(a!) all_gather_output,
+        Tensor all_gather_output,
         SymInt[] inp_split_sizes,
         SymInt all_gather_input_numel,
         SymInt rank
-    ) -> (Tensor(a!), Tensor(a!))
+    ) -> (Tensor, Tensor)
     """
 )
 
@@ -830,7 +830,7 @@ def _get_gradient_divide_factors(
         if reduce_scatter_group is not None and factor == reduce_scatter_group.size():
             reduce_scatter_op = ReduceOp.AVG
         else:
-            reduce_scatter_op = torch.distributed._make_nccl_premul_sum(1 / factor)
+            reduce_scatter_op = ReduceOp.PREMUL_SUM(1 / factor)
         return None, None, reduce_scatter_op, ReduceOp.SUM
 
     if factor is None:
