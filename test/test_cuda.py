@@ -253,12 +253,23 @@ class TestCuda(TestCase):
                 "active_requests.peak": 0,
             }
 
-        def check_stats(expected):
+        def check_stats(expected_deltas):
             stats = torch.cuda.host_memory_stats()
-            for k, v in expected.items():
-                if v != stats[k]:
-                    print(f"key: {k}, expected: {v}, stats: {stats[k]}")
-                self.assertEqual(v, stats[k])
+            for k, v in expected_deltas.items():
+                # For peak stats, we want the delta from the peak at the start of the test.
+                # Since we reset peak stats at the start, stats[peak] will be at least initial_stats[current].
+                # For accumulated stats (allocated/freed), we also want the delta.
+                if "peak" in k:
+                    actual_delta = (
+                        stats[k] - initial_stats[k.replace("peak", "current")]
+                    )
+                else:
+                    actual_delta = stats[k] - initial_stats[k]
+                self.assertEqual(
+                    actual_delta,
+                    v,
+                    msg=f"key {k} failed. Actual: {stats[k]}, Initial: {initial_stats.get(k, 'N/A')}",
+                )
 
         # Setup the test cleanly
         alloc1 = 10
@@ -270,8 +281,13 @@ class TestCuda(TestCase):
         # Reset any lingering state
         gc.collect()
         torch._C._host_emptyCache()
+        torch.cuda.reset_peak_host_memory_stats()
+        torch.cuda.reset_accumulated_host_memory_stats()
 
-        # Check that stats are empty
+        # Take a baseline after reset
+        initial_stats = torch.cuda.host_memory_stats()
+
+        # Check that stats are empty (relative to baseline)
         check_stats(expected)
 
         # Make first allocation and check stats
