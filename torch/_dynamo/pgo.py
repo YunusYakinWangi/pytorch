@@ -477,7 +477,10 @@ def update_automatic_dynamic(
                 if i is None
                 else getattr(old_entry, tup_name)[i]
             )
-            symbolic_shape_log.info("marking %s as dynamic (from automatic dynamic)", name)
+            symbolic_shape_log.info(
+                "marking %s as dynamic (from automatic dynamic/PGO)",
+                name,
+            )
             log.debug(
                 "automatic dynamic %s %s %s %s != %s",
                 tup_name,
