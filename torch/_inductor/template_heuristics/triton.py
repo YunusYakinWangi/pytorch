@@ -2049,7 +2049,11 @@ class MMTemplateConfigMixin(GemmMaxAutotuneTemplateConfigHeuristics):
         # Get the appropriate config generator
         configs = self._get_config_generator()
         # Generate and process configs
-        if (torch.version.hip is not None) and config.origami:
+        if (
+            (torch.version.hip is not None)
+            and config.origami
+            and config.max_autotune_gemm_search_space == "DEFAULT"
+        ):
             try:
                 import origami
             except ImportError:
