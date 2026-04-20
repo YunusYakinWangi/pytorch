@@ -95,6 +95,7 @@ pexpr = PythonPrinter().doprint
 
 ReuseKey = tuple[torch.device, torch.dtype, str, bool, int]
 CommBufferReuseKey = tuple[torch.device, torch.dtype, str, "ir.CommBufferType", str]
+_comm_buffer_alloc_id = count()
 BufferLike = ir.Buffer | WorkspaceArg
 FxConversionFunc = Callable[["WrapperLine"], None]
 
@@ -971,7 +972,7 @@ class AllocateLine(MemoryPlanningLine):
                 f"{dtype}, "
                 f'torch.device("cuda:{device.index}"), '
                 f'group_name="{group_name}", '
-                f"alloc_id={random.randint(0, 2**64 - 1)})"
+                f"alloc_id={next(_comm_buffer_alloc_id)})"
             )
         else:
             raise NotImplementedError(
