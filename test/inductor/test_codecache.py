@@ -23,6 +23,7 @@ from torch._functorch._aot_autograd.autograd_cache import AOTAutogradCache
 from torch._inductor import config, metrics
 from torch._inductor.codecache import (
     BypassFxGraphCache,
+    CacheabilityValidator,
     CUDACodeCache,
     FxGraphCachePickler,
     FxGraphHashDetails,
@@ -2542,6 +2543,22 @@ class TestCustomPartitionerFn(CustomPartitionerFn):
 
 
 class TestFxGraphCacheHashing(TestCase):
+    def test_cacheability_validator_checks_mkldnn_constant(self):
+        if not torch.backends.mkldnn.is_available():
+            raise unittest.SkipTest("requires MKLDNN")
+
+        graph = torch.fx.Graph()
+        output = graph.get_attr("mkldnn_weight")
+        graph.output(output)
+        gm = torch.fx.GraphModule(
+            {"mkldnn_weight": torch.randn(2, 2).to_mkldnn()}, graph
+        )
+
+        with self.assertRaisesRegex(
+            BypassFxGraphCache, "mkldnn tensors unpickleable"
+        ):
+            CacheabilityValidator(gm, require_shape_env=False).validate()
+
     def test_parameter_constants(self):
         """
         Test the hashing of parameter constants.
