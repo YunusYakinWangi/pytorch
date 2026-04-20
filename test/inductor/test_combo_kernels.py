@@ -1661,6 +1661,49 @@ class ComboKernelMetadataTests(TestCase):
         code = self._combo_code(fn, inps)
         self.assertIn("'optimize_mem': False", code)
 
+    @requires_gpu_and_triton
+    @torch._inductor.config.patch({"benchmark_kernel": True})
+    def test_combo_inductor_meta_has_kernel_num_gb_and_flop(self):
+        def fn(a, b):
+            return torch.relu(a), torch.sigmoid(b)
+
+        inps = [torch.rand(1024, device=GPU_TYPE) for _ in range(2)]
+        code = self._combo_code(fn, inps)
+        self.assertIn("'kernel_num_gb'", code)
+        self.assertIn("'kernel_flop'", code)
+
+    @requires_gpu_and_triton
+    @torch._inductor.config.patch({"profile_bandwidth": True})
+    def test_combo_inductor_meta_has_kernel_num_gb_under_profile_bandwidth(self):
+        def fn(a, b):
+            return torch.relu(a), torch.sigmoid(b)
+
+        inps = [torch.rand(1024, device=GPU_TYPE) for _ in range(2)]
+        code = self._combo_code(fn, inps)
+        self.assertIn("'kernel_num_gb'", code)
+        self.assertNotIn("'kernel_flop'", code)
+
+    @requires_gpu_and_triton
+    def test_combo_inductor_meta_no_kernel_num_gb_without_profile(self):
+        def fn(a, b):
+            return torch.relu(a), torch.sigmoid(b)
+
+        inps = [torch.rand(1024, device=GPU_TYPE) for _ in range(2)]
+        code = self._combo_code(fn, inps)
+        self.assertNotIn("'kernel_num_gb'", code)
+        self.assertNotIn("'kernel_flop'", code)
+
+    @requires_gpu_and_triton
+    @torch._inductor.config.patch({"benchmark_combo_kernel": True})
+    def test_benchmark_combo_kernel_emits_real_num_gb(self):
+        def fn(a, b):
+            return torch.relu(a), torch.sigmoid(b)
+
+        inps = [torch.rand(1024, device=GPU_TYPE) for _ in range(2)]
+        code = self._combo_code(fn, inps)
+        self.assertNotIn("num_gb = 0\n", code)
+        self.assertRegex(code, r"num_gb = \d*\.\d+")
+
 
 if __name__ == "__main__":
     from torch._dynamo.test_case import run_tests
