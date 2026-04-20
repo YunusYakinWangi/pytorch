@@ -1033,7 +1033,7 @@ def forward(self, arg0_1, arg1_1):
 def forward(self, x_1, cfg_1):
     process_with_config = torch.ops._TestOpaqueObject.process_with_config.default(x_1, ValueConfig(mode='square'));  x_1 = None
     return process_with_config
-    """,
+    """,  # noqa: B950
         )
 
     def test_subclass_opaque_output_reuses_input_proxy(self):
@@ -4029,7 +4029,7 @@ class fn(torch.nn.Module):
         _opaque_obj0 = self._opaque_obj0
         randn: "f32[20, 20]" = torch.ops.aten.randn.generator([20, 20], generator = _opaque_obj0, device = device(type='cuda', index=0), pin_memory = False);  _opaque_obj0 = None
         return randn
-""",  # noqa: B950
+""",
         )
 
 
