@@ -111,6 +111,8 @@ class AutotuneCacheArtifact(CacheArtifact):
 
 @dataclasses.dataclass
 class AutotuneCache:
+    """Coordinates local and remote autotune cache lookups for one kernel."""
+
     configs_hash: str
     local_cache: tuple[RemoteCache[JsonDataTy], str] | None = None
     remote_cache: tuple[RemoteCache[JsonDataTy], str] | None = None
@@ -146,6 +148,10 @@ class AutotuneCache:
             best_config = cache.get(key)
             if best_config is not None:
                 assert isinstance(best_config, dict)
+                # Imagine we have a new model that reuses some existing kernels that
+                # have already been compiled. If we didn't put() here on cache hit,
+                # then the new model would only bundle newly compiled kernels, not
+                # existing kernels that were already compiled and cached.
                 AutotuneCacheBundler.put(key, best_config)
                 autotune_artifact_key = os.path.join(*key.split(os.sep)[-2:])
                 CacheArtifactManager.record_artifact(
@@ -408,16 +414,16 @@ class _AutotuneCacheBundlerImpl:
 
         # Go through the entries we got from the cache and save them locally.
         time_saved_ns = 0
+        local_cache = create_cache(
+            "local-autotune",
+            local_cache_cls=LocalAutotuneCache.__name__,
+        )
         for basename, data in entries.items():
             # Reconstruct the final filename (see put())
             root, ext = _splitext_nodot(basename)
             _, _, filename = codecache.get_path(root, ext)
             if isinstance(data, dict) and (tsns := data.get("time_saved_ns")):
                 time_saved_ns += int(tsns)  # type: ignore[arg-type]
-            local_cache = create_cache(
-                "local-autotune",
-                local_cache_cls=LocalAutotuneCache.__name__,
-            )
             if local_cache is not None:
                 local_cache.put(filename, data)
 
