@@ -871,14 +871,46 @@ def register_symm_mem_lowerings():
         inp: ir.TensorBox,
         group_name: str,
     ):
-        # Use _CollectiveKernel so that _WaitKernel.get_volatile_reads()
-        # can track the input's lifetime through wait_tensor, preventing
-        # the memory planner from reusing the input buffer while the
-        # backend stream is still reading it.
+        inp = _copy_input_to_comm_buffer(
+            inp, ir.CommBufferType.SYMM_MEM, group_name,
+        )
+        return pytree.tree_map(
+            ir.TensorBox.create,
+            ir.FallbackKernel.create(
+                symm_mem._low_contention_all_gather.default,
+                inp,
+                group_name,
+            ),
+        )
+
+    @register_lowering(symm_mem._low_contention_all_gather_v2)
+    def _symm_mem_low_contention_all_gather_v2(
+        inp: ir.TensorBox,
+        group_name: str,
+    ):
+        inp = _copy_input_to_comm_buffer(
+            inp, ir.CommBufferType.SYMM_MEM, group_name,
+        )
+        return pytree.tree_map(
+            ir.TensorBox.create,
+            ir.FallbackKernel.create(
+                symm_mem._low_contention_all_gather_v2.default,
+                inp,
+                group_name,
+            ),
+        )
+
+    @register_lowering(symm_mem._nccl_ce_all_gather)
+    def _symm_mem_nccl_ce_all_gather(
+        inp: ir.TensorBox,
+        group_name: str,
+        buffer_id: int = 0,
+    ):
         return _create_out_of_place(
-            symm_mem._low_contention_all_gather.default,
+            symm_mem._nccl_ce_all_gather.default,
             inp,
             group_name,
+            buffer_id,
         )
 
     @register_lowering(symm_mem._low_contention_reduce_scatter)
@@ -887,12 +919,27 @@ def register_symm_mem_lowerings():
         reduce_op: str,
         group_name: str,
     ):
-        # Use _CollectiveKernel so that _WaitKernel.get_volatile_reads()
-        # can track the input's lifetime through wait_tensor, preventing
-        # the memory planner from reusing the input buffer while the
-        # backend stream is still reading it.
+        inp = _copy_input_to_comm_buffer(
+            inp, ir.CommBufferType.SYMM_MEM, group_name,
+        )
+        return pytree.tree_map(
+            ir.TensorBox.create,
+            ir.FallbackKernel.create(
+                symm_mem._low_contention_reduce_scatter.default,
+                inp,
+                reduce_op,
+                group_name,
+            ),
+        )
+
+    @register_lowering(symm_mem._nccl_efficiency_reduce_scatter)
+    def _symm_mem_nccl_efficiency_reduce_scatter(
+        inp: ir.TensorBox,
+        reduce_op: str,
+        group_name: str,
+    ):
         return _create_out_of_place(
-            symm_mem._low_contention_reduce_scatter.default,
+            symm_mem._nccl_efficiency_reduce_scatter.default,
             inp,
             reduce_op,
             group_name,
