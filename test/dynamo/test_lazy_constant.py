@@ -1227,6 +1227,30 @@ class LazyConstantVariableTests(TestCase):
         compiled = opt_fn(x, [42, 99])
         self.assertTrue(same(eager, compiled))
 
+    def test_tuple_subclass_in_container_no_crash(self):
+        """Plain tuple subclasses inside containers must not crash try_peek_constant.
+
+        UserDefinedTupleVariable.get_construct_fn() raises NotImplementedError
+        for plain tuple subclasses (not namedtuples/structseqs). When such a
+        variable is inside a container checked by is_python_constant in codegen,
+        try_peek_constant must handle this gracefully.
+        """
+        import torch._numpy as np
+
+        class TupleSubclass(tuple):
+            __slots__ = ()
+
+        def fn():
+            arr = np.ones((5, 5))
+            index = TupleSubclass(([1], [1]))
+            return arr[index,].shape != (1,)
+
+        opt_fn = torch.compile(fn, backend="eager")
+        # Without the fix, this raises InternalTorchDynamoError from
+        # get_construct_fn() on the plain tuple subclass during codegen
+        self.assertTrue(opt_fn())
+        self.assertEqual(opt_fn(), fn())
+
     def test_namedtuple_with_lazy_constant_no_recompile(self):
         """Returning a namedtuple with lazy constants should not recompile on value change."""
         from collections import namedtuple
