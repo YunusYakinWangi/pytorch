@@ -1306,6 +1306,7 @@ class DistElementwiseOpsTest(DTensorOpTestBase):
         ]:
             self.assertEqual(op(dx, dn).to_local(), op(x, n))
 
+    @with_comms
     def test_to_other(self):
         device_mesh = self.build_device_mesh()
         t = torch.arange(32, dtype=torch.float32, device=self.device_type).reshape(8, 4)
@@ -1317,6 +1318,7 @@ class DistElementwiseOpsTest(DTensorOpTestBase):
         self.assertEqual(result.placements, (Shard(0),))
         self.assertEqual(result.full_tensor(), t.to(torch.float16))
 
+    @with_comms
     def test_fill_tensor(self):
         device_mesh = self.build_device_mesh()
         t = torch.arange(32, dtype=torch.float32, device=self.device_type).reshape(8, 4)
@@ -1329,6 +1331,7 @@ class DistElementwiseOpsTest(DTensorOpTestBase):
             torch.full((8, 4), 3.14, device=self.device_type),
         )
 
+    @with_comms
     def test_masked_fill_tensor(self):
         device_mesh = self.build_device_mesh()
         t = torch.arange(32, dtype=torch.float32, device=self.device_type).reshape(8, 4)
@@ -1345,6 +1348,7 @@ class DistElementwiseOpsTest(DTensorOpTestBase):
         torch.ops.aten.masked_fill_.Tensor(dt2, dmask, dval)
         self.assertEqual(dt2.full_tensor(), torch.where(mask, 99.0, t))
 
+    @with_comms
     def test_copy_tensor(self):
         device_mesh = self.build_device_mesh()
         src = torch.arange(32, dtype=torch.float32, device=self.device_type).reshape(
@@ -1453,14 +1457,7 @@ class TestPointwiseRuleValidation(TestCase):
 
 
 DistElementwiseOpsTestWithLocalTensor = create_local_tensor_test_class(
-    DistElementwiseOpsTest,
-    base_class=LocalDTensorOpTestBase,
-    skipped_tests=[
-        "test_to_other",
-        "test_fill_tensor",
-        "test_masked_fill_tensor",
-        "test_copy_tensor",
-    ],
+    DistElementwiseOpsTest, base_class=LocalDTensorOpTestBase
 )
 
 
