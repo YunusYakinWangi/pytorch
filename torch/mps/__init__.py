@@ -199,6 +199,71 @@ def is_available() -> bool:
     return device_count() > 0
 
 
+def _host_alias_storage(storage: "torch.UntypedStorage") -> "torch.UntypedStorage":
+    r"""Returns a CPU-device :class:`torch.UntypedStorage` that aliases the
+    host-visible contents of the MTLBuffer backing ``storage``.
+
+    The returned storage shares memory with ``storage``: writes through the
+    CPU alias land directly in the MPS-allocated MTLBuffer, avoiding a
+    CPU->MPS staging copy. This is intended for advanced interop with bulk
+    loaders (e.g. safetensors) that already know how to write into CPU
+    memory.
+
+    The alias storage retains a reference to the source MPS storage, so the
+    host pointer remains valid for the alias's lifetime even if the original
+    tensor is freed.
+
+    Raises :class:`TypeError` if ``storage`` is not an
+    :class:`torch.UntypedStorage`, :class:`ValueError` if it is not on the
+    MPS device, and :class:`RuntimeError` if it was not allocated by the
+    MPS allocator or is on a discrete-memory MPS device (no shared/unified
+    memory).
+
+    .. warning::
+        Use with caution. This bypasses the cache-coherence guarantees that
+        the higher-level PyTorch APIs (:meth:`torch.Tensor.cpu`,
+        :meth:`torch.Tensor.to`, ``copy_``) provide for you, and makes the
+        caller responsible for ordering CPU and GPU accesses to the same
+        memory. You should **always** call :func:`torch.mps.synchronize`
+        both **before** issuing host reads/writes through the alias (to
+        drain any in-flight GPU work that may still be touching the
+        buffer) and **after** (before launching GPU work that depends on
+        the host writes). Failure to do so can produce stale reads,
+        torn writes, or data corruption.
+
+        The alias is **not autograd-traceable**: writes through it are
+        invisible to autograd, and the returned storage has no graph
+        relationship to the source MPS tensor. Do not use on tensors
+        that are part of an active autograd computation.
+    """
+    return torch._C._mps_host_alias_storage(storage)
+
+
+def _host_alias_tensor(tensor: Tensor) -> Tensor:
+    r"""Returns a CPU-device tensor that aliases the host-visible contents of
+    ``tensor``'s MPS storage, preserving dtype, shape, strides, and
+    storage offset.
+
+    Writes to the returned tensor land directly in the source MTLBuffer.
+    The returned tensor retains a reference to the source MPS storage, so
+    its memory remains valid even after ``tensor`` itself is freed.
+
+    Raises the same exceptions as :func:`_host_alias_storage` if ``tensor``
+    is not backed by a shared-storage MPS allocation.
+
+    .. warning::
+        Use with caution — this bypasses PyTorch's usual cache-coherence
+        guarantees and is not autograd-traceable. **Always** call
+        :func:`torch.mps.synchronize` both before and after accessing the
+        alias from the host. See :func:`_host_alias_storage` for the full
+        contract.
+    """
+    host_storage = _host_alias_storage(tensor.untyped_storage())
+    return torch.empty(0, dtype=tensor.dtype).set_(
+        host_storage, tensor.storage_offset(), tensor.shape, tensor.stride()
+    )
+
+
 from . import profiler
 from .event import Event
 
