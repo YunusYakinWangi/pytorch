@@ -483,7 +483,7 @@ class VariableTracker(metaclass=VariableTrackerMeta):
         """Return True for TensorVariable instances"""
         return False
 
-    def get_handler_type_for_dispatch(self) -> type["VariableTracker"]:
+    def get_handler_type_for_dispatch(self) -> type[VariableTracker]:
         """Return the VariableTracker type to use for builtin handler dispatch.
 
         This is used by BuiltinVariable to look up the appropriate handler for
