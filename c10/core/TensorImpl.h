@@ -257,12 +257,8 @@ struct C10_API ExtraMeta {
     if (other.backend_meta_) {
       backend_meta_ = other.backend_meta_->clone(other.backend_meta_);
     }
-    if (other.custom_data_ptr_error_msg_) {
-      custom_data_ptr_error_msg_ = other.custom_data_ptr_error_msg_;
-    }
-    if (other.custom_storage_error_msg_) {
-      custom_storage_error_msg_ = other.custom_storage_error_msg_;
-    }
+    custom_data_ptr_error_msg_ = other.custom_data_ptr_error_msg_;
+    custom_storage_error_msg_ = other.custom_storage_error_msg_;
   }
   ExtraMeta& operator=(const ExtraMeta& other) = delete;
   ExtraMeta(ExtraMeta&& other) = delete;
