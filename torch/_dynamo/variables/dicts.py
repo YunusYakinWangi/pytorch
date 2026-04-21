@@ -453,6 +453,15 @@ class ConstDictVariable(VariableTracker):
         # Unhashable key check happens inside _HashableTracker (raise_unhashable → TypeError).
         return self.getitem_const_raise_exception_if_absent(tx, key)
 
+    def sq_contains(
+        self, tx: "InstructionTranslator", item: VariableTracker
+    ) -> VariableTracker:
+        if not is_hashable(item):
+            raise_unhashable(item, tx)
+        self.install_dict_contains_guard(tx, [item])
+        contains = item in self
+        return VariableTracker.build(tx, contains)
+
     def tp_iter_impl(self, tx: "InstructionTranslator") -> VariableTracker:
         from .iter import DictIterator
 
@@ -655,22 +664,6 @@ class ConstDictVariable(VariableTracker):
                 return ConstantVariable.create(None)
             else:
                 return super().call_method(tx, name, args, kwargs)
-        elif name == "__contains__":
-            if not len(args):
-                raise_args_mismatch(
-                    tx,
-                    name,
-                    "more than 1 args and 0 kwargs",
-                    f"{len(args)} args and {len(kwargs)} kwargs",
-                )
-
-            arg_hashable = args and is_hashable(args[0])
-            if not arg_hashable:
-                raise_unhashable(args[0], tx)
-
-            self.install_dict_contains_guard(tx, args)
-            contains = args[0] in self
-            return VariableTracker.build(tx, contains)
         elif name == "setdefault" and self.is_mutable():
             if len(args) not in (1, 2):
                 raise_args_mismatch(
@@ -929,6 +922,11 @@ class MappingProxyVariable(VariableTracker):
     def tp_iter_impl(self, tx: "InstructionTranslator") -> VariableTracker:
         return self.dv_dict.tp_iter_impl(tx)
 
+    def sq_contains(
+        self, tx: "InstructionTranslator", item: VariableTracker
+    ) -> VariableTracker:
+        return self.dv_dict.sq_contains(tx, item)
+
     def mp_length(self, tx: "InstructionTranslator") -> VariableTracker:
         return self.dv_dict.mp_length(tx)
 
@@ -1172,6 +1170,11 @@ class DictKeysVariable(DictViewVariable):
                 items.append(key_str)
             return "dict_keys([" + ",".join(items) + "])"
 
+    def sq_contains(
+        self, tx: "InstructionTranslator", item: VariableTracker
+    ) -> VariableTracker:
+        return self.dv_dict.sq_contains(tx, item)
+
     def call_method(
         self,
         tx: "InstructionTranslator",
@@ -1179,9 +1182,7 @@ class DictKeysVariable(DictViewVariable):
         args: list[VariableTracker],
         kwargs: dict[str, VariableTracker],
     ) -> VariableTracker:
-        if name == "__contains__":
-            return self.dv_dict.call_method(tx, name, args, kwargs)
-        elif name in (
+        if name in (
             "__and__",
             "__iand__",
             "__or__",
@@ -1219,6 +1220,13 @@ class DictValuesVariable(DictViewVariable):
 
     # DictValuesVariable is an iterable but cannot be compared.
     kv = "values"
+
+    # oddly enough, dict_values do not implements sq_contains. Do not attempt to
+    # implement it as it will not be called by Dynamo
+    def sq_contains(
+        self, tx: "InstructionTranslator", item: VariableTracker
+    ) -> VariableTracker:
+        raise RuntimeError("dict_values does not implements sq_contains")
 
     @property
     def view_items_vt(self) -> list[VariableTracker]:
@@ -1278,6 +1286,17 @@ class DictItemsVariable(DictViewVariable):
                 val_str = repr(v.value) if hasattr(v, "value") else v.debug_repr()
                 items.append(f"({key_str}, {val_str})")
             return "dict_items([" + ",".join(items) + "])"
+
+    def sq_contains(
+        self, tx: "InstructionTranslator", item: VariableTracker
+    ) -> VariableTracker:
+        from ..utils import iter_contains
+
+        # TODO(guilhermeleobas): We can optimize this!
+
+        if not is_hashable(item):
+            raise_unhashable(item, tx)
+        return iter_contains(self.view_items_vt, item, tx)
 
     def tp_iter_impl(self, tx: "InstructionTranslator") -> VariableTracker:
         from .iter import DictItemsIterator
