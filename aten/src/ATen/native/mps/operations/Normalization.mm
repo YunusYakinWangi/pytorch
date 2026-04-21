@@ -124,7 +124,12 @@ std::tuple<Tensor&, Tensor&, Tensor&> batch_norm_mps_out(const Tensor& self,
   const bool has_weight = (weight_opt.has_value() && weight_opt->defined());
   const bool has_bias = (bias_opt.has_value() && bias_opt->defined());
 
-  auto memory_format = self.suggest_memory_format();
+  // Use actual channels-last contiguity: a tensor with channels-last-like
+  // strides but non-packed storage would otherwise be read as packed NHWC via
+  // the skipped gather path, yielding wrong results.
+  // See https://github.com/pytorch/pytorch/issues/180984
+  auto memory_format =
+      self.is_contiguous(MemoryFormat::ChannelsLast) ? MemoryFormat::ChannelsLast : MemoryFormat::Contiguous;
 
   if (output.numel() == 0) {
     return std::tuple<Tensor&, Tensor&, Tensor&>(output, save_mean, save_var);
@@ -393,7 +398,11 @@ std::tuple<Tensor, Tensor, Tensor> batch_norm_mps(const Tensor& self,
                                                   bool train,
                                                   double momentum,
                                                   double epsilon) {
-  const auto memory_format = self.suggest_memory_format();
+  // Match the layout we will actually use inside batch_norm_mps_out so that
+  // the allocated output is consistent with the kernel path.
+  // See https://github.com/pytorch/pytorch/issues/180984
+  const auto memory_format =
+      self.is_contiguous(MemoryFormat::ChannelsLast) ? MemoryFormat::ChannelsLast : MemoryFormat::Contiguous;
 
   auto output = at::empty(self.sizes(), self.scalar_type(), std::nullopt, kMPS, std::nullopt, memory_format);
 
@@ -545,7 +554,10 @@ std::tuple<Tensor, Tensor, Tensor> batch_norm_backward_mps(const Tensor& grad_ou
   Tensor grad_weight;
   Tensor grad_bias;
 
-  const auto memory_format = input.suggest_memory_format();
+  // Use actual channels-last contiguity -- see
+  // https://github.com/pytorch/pytorch/issues/180984
+  const auto memory_format =
+      input.is_contiguous(MemoryFormat::ChannelsLast) ? MemoryFormat::ChannelsLast : MemoryFormat::Contiguous;
 
   if (grad_input_mask[0]) {
     grad_input = at::empty(input.sizes(), input.scalar_type(), std::nullopt, kMPS, std::nullopt, memory_format);
