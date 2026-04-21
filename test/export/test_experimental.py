@@ -1597,8 +1597,24 @@ def forward(self, arg0_1):
             document_ids=document_ids,
         )
 
-        self.assertEqual(wrap(partial_a), wrap(partial_b))
-        self.assertEqual(wrap(recursive_partial_a), wrap(recursive_partial_b))
+        wrapped_partial_a = wrap(partial_a)
+        wrapped_partial_b = wrap(partial_b)
+        wrapped_recursive_partial_a = wrap(recursive_partial_a)
+        wrapped_recursive_partial_b = wrap(recursive_partial_b)
+
+        self.assertEqual(wrapped_partial_a, wrapped_partial_b)
+        self.assertEqual(hash(wrapped_partial_a), hash(wrapped_partial_b))
+        self.assertEqual(wrapped_recursive_partial_a, wrapped_recursive_partial_b)
+        self.assertEqual(
+            hash(wrapped_recursive_partial_a), hash(wrapped_recursive_partial_b)
+        )
+        with self.assertRaisesRegex(RuntimeError, "stripped callable is not callable"):
+            wrapped_partial_a(
+                torch.tensor(0),
+                torch.tensor(0),
+                torch.tensor(0),
+                torch.tensor(0),
+            )
 
     @unittest.skipIf(not TEST_CUDA, "CUDA not available")
     def test_blockmask_and_masks_closure_extraction(self):

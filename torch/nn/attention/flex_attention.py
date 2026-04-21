@@ -662,7 +662,7 @@ def _leaf_entries_eq(
         if not isinstance(lhs, _FunctionLeaf):
             continue
         if not isinstance(rhs, _FunctionLeaf):
-            raise AssertionError
+            raise AssertionError("expected matching _FunctionLeaf entries")
         if lhs.closure_spec != rhs.closure_spec or lhs.n_extracted != rhs.n_extracted:
             return False
         if isinstance(lhs.stripped, _StrippedClosure):
@@ -728,9 +728,9 @@ class _MaskModWrapper:
         self.closure_spec = closure_spec
 
     def __call__(self, b: Tensor, h: Tensor, q_idx: Tensor, kv_idx: Tensor) -> Tensor:
-        if isinstance(self.fn, _StrippedClosure):
+        if isinstance(self.fn, (_StrippedClosure, _StrippedPartial)):
             raise RuntimeError(
-                "_MaskModWrapper with _StrippedClosure is not callable — "
+                "_MaskModWrapper with stripped callable is not callable — "
                 "use _reconstruct_closure_fn to rebuild the function first"
             )
         return self.fn(b, h, q_idx, kv_idx)
