@@ -476,16 +476,6 @@ class TestFlexAttention(InductorTestCase):
             "skip UT for CPU due to long compilation time found in CI",
         )
 
-    def _cleanup_cuda_leak_check_state(self):
-        torch._dynamo.reset()
-        gc.collect()
-        torch._C._cuda_clearCublasWorkspaces()
-        torch.cuda.empty_cache()
-        torch._dynamo.reset()
-        gc.collect()
-        torch._C._cuda_clearCublasWorkspaces()
-        torch.cuda.empty_cache()
-
     def _check_equal(
         self,
         golden_out: torch.Tensor,
@@ -1736,14 +1726,11 @@ class TestFlexAttention(InductorTestCase):
     def test_index_weird1(self, device):
         bias = torch.randn(4, B, H, S, device=device)
 
-        def index_weird1(score, b, h, q_idx, kv_idx, bias=bias):
+        def index_weird1(score, b, h, q_idx, kv_idx):
             return score + bias[0][b, h][q_idx]
 
         self.run_test(index_weird1, torch.float16, device=device)
         self.run_test_with_paged_attention(index_weird1, torch.float16, device=device)
-        del index_weird1
-        del bias
-        self._cleanup_cuda_leak_check_state()
 
     @supported_platform
     def test_index_weird2(self, device):
@@ -2123,16 +2110,27 @@ def forward(self, arg0_1, arg1_1, arg2_1, arg3_1, arg4_1):
     @dtypesIfXPU(*device_configs["xpu"].dtypes_fast)
     def test_captured_scalar_grad(self, device, dtype):
         """Test learnable scalar parameter with shape (1,) using literal index."""
-        scale = torch.ones((1,), device=device, dtype=dtype, requires_grad=True)
+        self._run_test_captured_scalar_grad(device, dtype)
 
-        def score_mod_scale(qk, b, h, q, kv, scale=scale):
-            return qk + scale[0]
+    def _run_test_captured_scalar_grad(self, device, dtype):
+        def run():
+            scale = torch.ones((1,), device=device, dtype=dtype, requires_grad=True)
 
-        self.run_test(score_mod_scale, dtype, device=device)
-        self.run_test_with_paged_attention(score_mod_scale, dtype, device=device)
-        del score_mod_scale
-        del scale
-        self._cleanup_cuda_leak_check_state()
+            def score_mod_scale(qk, b, h, q, kv):
+                return qk + scale[0]
+
+            self.run_test(score_mod_scale, dtype, device=device)
+            self.run_test_with_paged_attention(score_mod_scale, dtype, device=device)
+
+        run()
+        torch._dynamo.reset()
+        gc.collect()
+        torch._C._cuda_clearCublasWorkspaces()
+        torch.cuda.empty_cache()
+        torch._dynamo.reset()
+        gc.collect()
+        torch._C._cuda_clearCublasWorkspaces()
+        torch.cuda.empty_cache()
 
     @supported_platform
     @dtypes(*device_configs["cpu"].dtypes_fast)
