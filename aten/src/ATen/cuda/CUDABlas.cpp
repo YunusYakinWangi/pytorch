@@ -1594,11 +1594,13 @@ bool gemm_and_bias(
   }
 
   using opmath_t = at::opmath_type<Dtype>;
+  opmath_t beta_val = 1;
+
   bool use_bias_epilogue = bias != nullptr;
   bool use_bias_descriptor = bias != nullptr && !use_bias_epilogue;
 
   auto alpha = std::variant<opmath_t, at::Half>(alpha_val);
-  auto beta = std::variant<opmath_t, at::Half>(static_cast<opmath_t>(use_bias_epilogue ? 0 : 1));
+  auto beta = std::variant<opmath_t, at::Half>(use_bias_epilogue ? static_cast<opmath_t>(0) : beta_val);
   const auto get_scale_ptr = [](const std::variant<opmath_t, at::Half>& var) -> const void* {
     if (std::holds_alternative<opmath_t>(var)) {
       return &std::get<opmath_t>(var);
@@ -1775,9 +1777,9 @@ bool gemm_and_bias(
         use_bias_epilogue = false;
         use_bias_descriptor = true;
         if (std::holds_alternative<opmath_t>(beta)) {
-          beta = static_cast<opmath_t>(1);
+          beta = beta_val;
         } else {
-          beta = static_cast<at::Half>(1);
+          beta = static_cast<at::Half>(beta_val);
         }
       }
     }
