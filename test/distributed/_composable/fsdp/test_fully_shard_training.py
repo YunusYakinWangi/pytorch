@@ -36,9 +36,15 @@ from torch.distributed.fsdp._fully_shard._fsdp_common import (
     FSDPMeshInfo,
     HSDPMeshInfo,
     ShardPlacementResult,
+    TrainingState,
 )
-from torch.distributed.tensor import DTensor, init_device_mesh, Shard
+from torch.distributed.tensor import DTensor, init_device_mesh, Replicate, Shard
 from torch.distributed.tensor.debug import CommDebugMode
+from torch.distributed.tensor.parallel import (
+    ColwiseParallel,
+    parallelize_module,
+    RowwiseParallel,
+)
 from torch.testing._internal.common_distributed import (
     skip_if_lt_x_gpu,
     skip_if_rocm_arch_multiprocess,
@@ -1188,17 +1194,24 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
     @xfailIf(TEST_XPU)  # https://github.com/intel/torch-xpu-ops/issues/1661
     def test_partial_group_forward_then_standalone_compiled(self):
         """
-        Compiled smoke test for the chunked-loss partial-group-forward
-        path. The eager variant ``test_partial_group_forward_then_standalone``
-        sweeps mp_policy/weight_tying/ac; this only runs the base config
-        to confirm compiled FSDP handles ``_force_complete_incomplete_states``
-        without regression.
+        Compiled test for the chunked-loss partial-group-forward path,
+        covering mp_policy variants that the eager variant
+        ``test_partial_group_forward_then_standalone`` exercises. Dynamo
+        is kept out of the FSDP hook region by ``@_dynamo_disable``; this
+        sweep validates that the mp_policy cast paths (which fire inside
+        ``_force_complete_incomplete_states`` for the inner group) still
+        compile and produce finite grads in the compiled case.
         """
-        self._test_partial_group_forward_then_standalone(
-            reshard_after_forward=True,
-            weight_tying=False,
-            mp_policy_mode="none",
-            ac=False,
+        self.run_subtests(
+            {
+                "mp_policy_mode": ["none", "bf16_everywhere", "bf16_inner_only"],
+            },
+            functools.partial(
+                self._test_partial_group_forward_then_standalone,
+                reshard_after_forward=True,
+                weight_tying=False,
+                ac=False,
+            ),
         )
 
     @skip_if_lt_x_gpu(2, allow_cpu=True)
@@ -1425,6 +1438,257 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
         self.assertEqual(out.dtype, torch.bfloat16)
 
     @skip_if_lt_x_gpu(2, allow_cpu=True)
+    def test_partial_group_reshard_toggle(self):
+        """
+        Tests the reshard-flag toggle pattern used by torchtitan's
+        ``ChunkedCELoss``. Before the chunk loop the user disables
+        ``reshard_after_forward`` and ``reshard_after_backward`` on the
+        head so the weight stays unsharded across chunks (one all-gather
+        instead of N). After the loop both flags are restored and
+        ``head.reshard()`` is called explicitly to shard the group back.
+
+        This exercises paths not covered by
+        ``test_partial_group_forward_then_standalone``:
+
+        1. ``_force_complete_incomplete_states`` runs with
+           ``reshard_after_forward=False`` — its reshard step is a no-op,
+           so the group stays unsharded going into the chunk loop.
+        2. Per-chunk ``post_backward`` runs with
+           ``reshard_after_backward=False`` — reshard after backward is
+           also skipped; grads still reduce-scatter.
+        3. Explicit ``head.reshard()`` after the loop reshards the whole
+           ``[norm, head]`` group (not just head). If it fails to reshard,
+           the next iteration's pre_forward sees stale unsharded params
+           and subsequent all-gather accounting/prefetching breaks.
+        """
+        self.run_subtests(
+            {
+                "weight_tying": [False, True],
+                # Matches torchtitan's two regimes: wrapped with
+                # ``reshard_after_forward=False`` from the start (real
+                # chunked-loss path — group stays unsharded through both
+                # model.forward and chunks) vs. wrapped with ``True`` then
+                # toggled off only for the loop (forces
+                # ``_force_complete_incomplete_states`` to reshard in
+                # model post-forward before the toggle kicks in).
+                "initial_reshard": [False, True],
+            },
+            self._test_partial_group_reshard_toggle,
+        )
+
+    def _test_partial_group_reshard_toggle(
+        self, weight_tying: bool, initial_reshard: bool
+    ):
+        dim, vocab_size, n_chunks = 32, 128, 4
+        torch.manual_seed(42)
+        model = ChunkedHeadModel(dim, vocab_size, weight_tying).to(device_type)
+        with torch.no_grad():
+            for param in model.parameters():
+                dist.broadcast(param, src=0)
+        if weight_tying:
+            fully_shard(model.body)
+            fully_shard(
+                [model.embed, model.norm, model.head],
+                reshard_after_forward=initial_reshard,
+            )
+        else:
+            fully_shard(model.embed)
+            fully_shard(model.body)
+            fully_shard([model.norm, model.head], reshard_after_forward=initial_reshard)
+        fully_shard(model)
+        optim = torch.optim.Adam(model.parameters(), lr=1e-2)
+
+        tokens = torch.randint(0, vocab_size, (2, 16), device=device_type.type)
+        param_group = model.head._get_fsdp_state()._fsdp_param_group
+        assert param_group is not None
+
+        for iter_idx in range(5):
+            # Partial-group forward: model runs norm, skips head.
+            h = model(tokens, skip_head=True)
+            # After ``_force_complete_incomplete_states`` the group's
+            # sharded state depends on its ``reshard_after_forward`` at
+            # wrap time: False → still unsharded (chunks see cached
+            # all-gather); True → resharded (next chunk re-unshards).
+            # Toggle both flags off for the loop so post_backward does
+            # not reshard either.
+            model.head.set_reshard_after_forward(False)
+            model.head.set_reshard_after_backward(False)
+
+            h_detached = h.detach()
+            chunks = torch.chunk(h_detached, n_chunks, dim=1)
+            h_grads: list[torch.Tensor] = []
+            for chunk in chunks:
+                chunk = chunk.contiguous().detach().requires_grad_(True)
+                out = model.head(chunk)
+                out.sum().backward()
+                h_grads.append(chunk.grad.detach())
+                # Group must remain unsharded between chunks (we disabled
+                # reshard_after_backward). If it resharded, the next chunk's
+                # pre_forward would re-trigger an all-gather — the whole
+                # point of disabling these flags is to avoid that.
+                self.assertTrue(
+                    param_group.is_unsharded,
+                    f"head group resharded mid-chunk-loop at iter {iter_idx}",
+                )
+
+            # Restore flags + explicit reshard (matches ChunkedCELoss).
+            model.head.set_reshard_after_forward(True)
+            model.head.set_reshard_after_backward(True)
+            model.head.reshard()
+            self.assertFalse(
+                param_group.is_unsharded,
+                f"head.reshard() did not reshard the group at iter {iter_idx}",
+            )
+
+            h.backward(torch.cat(h_grads, dim=1).to(h.dtype))
+
+            for name, param in model.named_parameters():
+                self.assertIsNotNone(param.grad, f"grad is None for {name}")
+                local = (
+                    param.grad.to_local()
+                    if isinstance(param.grad, DTensor)
+                    else param.grad
+                )
+                self.assertTrue(
+                    torch.isfinite(local).all().item(),
+                    f"non-finite grad for {name} at iter {iter_idx}",
+                )
+
+            optim.step()
+            optim.zero_grad(set_to_none=(iter_idx % 2 == 0))
+
+    @skip_if_lt_x_gpu(2, allow_cpu=True)
+    def test_reset_iter_state_after_exception(self):
+        """
+        Tests ``FSDPModule.reset_iter_state`` after an exception aborts
+        forward or backward mid-flight. Covers three failure modes:
+
+        - ``mid_forward``: full forward path raises after the inner group
+          has been unsharded but before the root post-forward runs.
+        - ``mid_partial_forward``: partial-forward path (``skip_head=True``)
+          raises; exercises the case where the inner group claimed
+          ``iter_forward_root`` and populated ``_modules_to_run_forward``.
+        - ``mid_backward``: forward succeeds, backward raises through a
+          grad hook; comm-ctx holds a pending ``reduce_scatter_state``.
+
+        After each failure ``reset_iter_state`` is called and the test
+        asserts per-iteration trackers are clear, params are sharded,
+        and training states are IDLE. A clean forward-backward is then
+        run to confirm the module is actually usable, not just
+        superficially reset.
+        """
+        self.run_subtests(
+            {
+                "reshard_after_forward": [True, False],
+                "fail_mode": ["mid_forward", "mid_partial_forward", "mid_backward"],
+            },
+            self._test_reset_iter_state_after_exception,
+        )
+
+    def _test_reset_iter_state_after_exception(
+        self,
+        reshard_after_forward: bool,
+        fail_mode: str,
+    ):
+        dim, vocab_size = 32, 128
+
+        class _IntentionalError(Exception):
+            pass
+
+        class _Raiser(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.armed = False
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                if self.armed:
+                    raise _IntentionalError("forward raiser")
+                return x
+
+        class Model(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.embed = nn.Embedding(vocab_size, dim)
+                self.raiser = _Raiser()
+                self.norm = nn.RMSNorm(dim)
+                self.head = nn.Linear(dim, vocab_size, bias=False)
+
+            def forward(
+                self, tokens: torch.Tensor, *, skip_head: bool = False
+            ) -> torch.Tensor:
+                h = self.embed(tokens)
+                h = self.raiser(h)
+                h = self.norm(h)
+                if skip_head:
+                    return h
+                return self.head(h)
+
+        torch.manual_seed(42)
+        model = Model().to(device_type)
+        with torch.no_grad():
+            for param in model.parameters():
+                dist.broadcast(param, src=0)
+        fully_shard(
+            [model.norm, model.head], reshard_after_forward=reshard_after_forward
+        )
+        fully_shard(model, reshard_after_forward=reshard_after_forward)
+        tokens = torch.randint(0, vocab_size, (2, 16), device=device_type.type)
+        root_state = model._get_fsdp_state()
+
+        if fail_mode == "mid_forward":
+            model.raiser.armed = True
+            with self.assertRaises(_IntentionalError):
+                model(tokens)
+            model.raiser.armed = False
+        elif fail_mode == "mid_partial_forward":
+            model.raiser.armed = True
+            with self.assertRaises(_IntentionalError):
+                model(tokens, skip_head=True)
+            model.raiser.armed = False
+        else:  # mid_backward
+            out = model(tokens, skip_head=True)
+
+            def _raise_hook(grad: torch.Tensor) -> torch.Tensor:
+                raise _IntentionalError("backward raiser")
+
+            out.register_hook(_raise_hook)
+            with self.assertRaises(_IntentionalError):
+                out.sum().backward()
+
+        model.reset_iter_state()
+
+        self.assertIsNone(root_state._state_ctx.iter_forward_root)
+        self.assertFalse(root_state._state_ctx.post_backward_final_callback_queued)
+        self.assertIsNone(root_state._comm_ctx.all_gather_state)
+        self.assertEqual(len(root_state._comm_ctx.reduce_scatter_states), 0)
+        self.assertEqual(len(root_state._comm_ctx.post_forward_order), 0)
+        for state in root_state._state_ctx.all_states:
+            self.assertEqual(len(state._modules_to_run_forward), 0)
+            self.assertEqual(state._training_state, TrainingState.IDLE)
+            for pg in state._fsdp_param_groups:
+                self.assertEqual(pg._training_state, TrainingState.IDLE)
+                self.assertIsNone(pg._all_gather_result)
+                self.assertIsNone(pg._post_reduce_event)
+                self.assertIsNone(pg._all_reduce_state)
+                self.assertIsNone(pg._partial_reduce_output)
+                self.assertEqual(len(pg._post_forward_indices), 0)
+                self.assertTrue(pg.is_sharded, "param group not sharded after reset")
+
+        # Proves the reset is real: the next iteration completes with
+        # finite grads on every parameter.
+        out = model(tokens)
+        out.sum().backward()
+        for name, param in model.named_parameters():
+            self.assertIsNotNone(param.grad, f"grad is None for {name}")
+            local = (
+                param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
+            )
+            self.assertTrue(
+                torch.isfinite(local).all().item(),
+                f"non-finite grad for {name} after reset",
+            )
+
+    @skip_if_lt_x_gpu(2, allow_cpu=True)
     def test_double_forward_with_nested_fsdp_and_checkpoint(self):
         """
         Tests that calling model.forward() twice before backward() works correctly
@@ -1483,6 +1747,76 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
         for param in model.parameters():
             if param.requires_grad:
                 self.assertIsNotNone(param.grad)
+
+    @skip_if_lt_x_gpu(2, allow_cpu=True)
+    def test_double_partial_forward_then_backward(self):
+        """
+        Regression test for TODO fragility #2.2 in the partial-group
+        forward review: two ``model(x, skip_head=True)`` calls before
+        backward. The concern was that the second partial forward's
+        inner-group ``_training_state`` would still be FORWARD from the
+        first, causing ``group_first_in_pass`` to be False and skipping
+        the post_backward autograd node registration for the second
+        forward.
+
+        This does not actually occur on HEAD because
+        ``_force_complete_incomplete_states`` at root post-forward calls
+        ``post_forward`` on every inner param group, which resets the
+        group's ``_training_state`` to IDLE. The second partial forward
+        sees IDLE and registers its autograd node normally. If that
+        registration were missed, the combined backward would hang on a
+        reduce-scatter that never arrives.
+        """
+        dim, vocab_size = 32, 128
+
+        class Model(nn.Module):
+            def __init__(self) -> None:
+                super().__init__()
+                self.embed = nn.Embedding(vocab_size, dim)
+                self.norm = nn.RMSNorm(dim)
+                self.head = nn.Linear(dim, vocab_size, bias=False)
+
+            def forward(
+                self, tokens: torch.Tensor, *, skip_head: bool = False
+            ) -> torch.Tensor:
+                h = self.norm(self.embed(tokens))
+                if skip_head:
+                    return h
+                return self.head(h)
+
+        torch.manual_seed(42)
+        model = Model().to(device_type)
+        with torch.no_grad():
+            for param in model.parameters():
+                dist.broadcast(param, src=0)
+        fully_shard([model.norm, model.head])
+        fully_shard(model)
+
+        tokens1 = torch.randint(0, vocab_size, (2, 16), device=device_type.type)
+        tokens2 = torch.randint(0, vocab_size, (2, 16), device=device_type.type)
+
+        h1 = model(tokens1, skip_head=True)
+        h2 = model(tokens2, skip_head=True)
+        (h1.sum() + h2.sum()).backward()
+
+        # Test completing (no hang) already proves the second forward's
+        # post_backward was registered and its reduce-scatter fired.
+        # Also verify the grads we expect are populated; head is unused
+        # in both forwards so its grad stays None.
+        for name in ("embed.weight", "norm.weight"):
+            param = dict(model.named_parameters())[name]
+            self.assertIsNotNone(param.grad, f"grad is None for {name}")
+            local = (
+                param.grad.to_local() if isinstance(param.grad, DTensor) else param.grad
+            )
+            self.assertTrue(
+                torch.isfinite(local).all().item(),
+                f"non-finite grad for {name}",
+            )
+        self.assertIsNone(
+            model.head.weight.grad,
+            "head.weight.grad should be None (head unused in partial forward)",
+        )
 
 
 class TestFullyShardShardPlacementFnMultiProcess(FSDPTest):
@@ -2110,6 +2444,153 @@ class TestFullyShardNDTraining(FSDPTest):
             self.assertEqual(p.device_mesh.ndim, 2)
             self.assertEqual(len(p.placements), 2)
             self.assertEqual(p.device_mesh.mesh_dim_names, ("dp", "tp"))
+
+    @skip_if_lt_x_gpu(4, allow_cpu=True)
+    def test_partial_group_forward_then_standalone_tp(self):
+        """
+        Tests the chunked-loss partial-group-forward pattern combined
+        with Tensor Parallel (FSDP+TP 2D). Head is ColwiseParallel
+        (``weight`` sharded along the vocab/output dim on TP mesh) and
+        then placed in the ``fully_shard([norm, head])`` FSDP group,
+        producing 2D DTensor params (Shard on dp × Shard on tp).
+
+        This mirrors torchtitan's chunked-loss path where the model
+        forward runs norm but skips head, then ``model.head(chunk)`` is
+        called standalone per chunk. The DTensor hidden-state is
+        redistributed to Replicate on the TP mesh before chunking —
+        matching ChunkedCELoss's ``hidden_states.redistribute(...)``.
+
+        Verifies:
+
+        - ``_force_complete_incomplete_states`` correctly completes
+          post-forward for a 2D DTensor group (doesn't crash on TP
+          sharding, correctly registers pre_backward hook on the
+          DTensor output).
+        - Standalone ``model.head(chunk)`` works end-to-end with a
+          Replicate input on TP; backward reduces grads on both FSDP
+          (reduce-scatter) and TP (all-reduce on partial grads).
+        - Per-chunk grads accumulate monotonically.
+        """
+        # 2D mesh: (dp, tp) with 2 in each dim (need 4 ranks total).
+        global_mesh = init_device_mesh(
+            device_type.type,
+            (self.world_size // 2, 2),
+            mesh_dim_names=("dp", "tp"),
+        )
+        dp_mesh = global_mesh["dp"]
+        tp_mesh = global_mesh["tp"]
+
+        dim, vocab_size, n_chunks = 32, 128, 4
+        torch.manual_seed(42)
+        model = ChunkedHeadModel(dim, vocab_size, tie=False).to(device_type)
+        with torch.no_grad():
+            for param in model.parameters():
+                dist.broadcast(param, src=0)
+
+        # Apply TP. Keep head output as Replicate so ``out.sum()`` is a
+        # plain-tensor reduction across TP, matching how ChunkedCELoss
+        # computes loss on the TP-gathered logits.
+        parallelize_module(
+            model,
+            tp_mesh,
+            {
+                "embed": RowwiseParallel(
+                    input_layouts=Replicate(),
+                    output_layouts=Replicate(),
+                ),
+                "body": ColwiseParallel(
+                    input_layouts=Replicate(),
+                    output_layouts=Replicate(),
+                ),
+                "head": ColwiseParallel(
+                    input_layouts=Replicate(),
+                    output_layouts=Replicate(),
+                ),
+            },
+        )
+
+        # Apply FSDP on dp mesh, with [norm, head] as the grouped state.
+        fully_shard(model.embed, mesh=dp_mesh)
+        fully_shard(model.body, mesh=dp_mesh)
+        fully_shard([model.norm, model.head], mesh=dp_mesh)
+        fully_shard(model, mesh=dp_mesh)
+
+        # head.weight should be a 2D DTensor (Shard(dp) × Shard(tp)).
+        self.assertIsInstance(model.head.weight, DTensor)
+        self.assertEqual(model.head.weight.device_mesh.ndim, 2)
+
+        optim = torch.optim.Adam(model.parameters(), lr=1e-2)
+
+        torch.manual_seed(42 + self.rank)
+        tokens = torch.randint(0, vocab_size, (2, 16), device=device_type.type)
+
+        for iter_idx in range(3):
+            h = model(tokens, skip_head=True)
+            # With TP on embed/body/norm, ``h`` comes out on the TP
+            # mesh. Redistribute to Replicate on TP so the chunk loop
+            # can operate on per-rank-identical tensors — this is what
+            # ChunkedCELoss does at loss.py:235-242.
+            if isinstance(h, DTensor):
+                replicate_placements = tuple(
+                    Replicate() if name == "tp" else p
+                    for name, p in zip(h.device_mesh.mesh_dim_names, h.placements)
+                )
+                h = h.redistribute(h.device_mesh, replicate_placements)
+
+            h_detached = h.detach().requires_grad_(True)
+            chunks = torch.chunk(h_detached, n_chunks, dim=1)
+
+            per_chunk_head_grads: list[torch.Tensor] = []
+            h_grads: list[torch.Tensor] = []
+            for chunk in chunks:
+                chunk = chunk.contiguous().detach().requires_grad_(True)
+                out = model.head(chunk)
+                out.sum().backward()
+                h_grads.append(
+                    chunk.grad.to_local().detach()
+                    if isinstance(chunk.grad, DTensor)
+                    else chunk.grad.detach()
+                )
+                # Snapshot head.weight.grad (full tensor gathered across
+                # both dp and tp) so we can verify per-chunk contribution.
+                g = model.head.weight.grad
+                full = g.full_tensor() if isinstance(g, DTensor) else g.clone()
+                per_chunk_head_grads.append(full)
+
+            # Each chunk must contribute non-zero delta.
+            for i in range(1, len(per_chunk_head_grads)):
+                delta = per_chunk_head_grads[i] - per_chunk_head_grads[i - 1]
+                self.assertGreater(
+                    delta.norm().item(),
+                    0.0,
+                    f"chunk {i} did not contribute to head.weight.grad "
+                    f"at iter {iter_idx}",
+                )
+
+            # Propagate accumulated chunk grads through the decoder.
+            h_grad_cat = torch.cat(h_grads, dim=1).to(h_detached.dtype)
+            if isinstance(h, DTensor):
+                h_grad_cat = DTensor.from_local(
+                    h_grad_cat,
+                    device_mesh=h.device_mesh,
+                    placements=h.placements,
+                )
+            h.backward(h_grad_cat)
+
+            for name, param in model.named_parameters():
+                self.assertIsNotNone(param.grad, f"grad is None for {name}")
+                local = (
+                    param.grad.to_local()
+                    if isinstance(param.grad, DTensor)
+                    else param.grad
+                )
+                self.assertTrue(
+                    torch.isfinite(local).all().item(),
+                    f"non-finite grad for {name} at iter {iter_idx}",
+                )
+
+            optim.step()
+            optim.zero_grad()
 
     @skip_if_lt_x_gpu(8)
     def test_shard_placement_fn_tp_ep(self):

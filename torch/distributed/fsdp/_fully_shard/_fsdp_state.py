@@ -359,16 +359,12 @@ class FSDPState(_State):
             if state is self or not state._modules_to_run_forward:
                 continue
             logger.debug("FSDP::force_complete_post_forward")
-            try:
-                for fsdp_param_group in state._fsdp_param_groups:
-                    output = fsdp_param_group.post_forward(None, None, output)
-                output = state._register_pre_backward_hook(output)
-                state._training_state = TrainingState.IDLE
-                output = state._cast_output_dtype(output)
-            finally:
-                # Clear even on exception so the next iteration's
-                # force-complete (which guards on non-empty) can run.
-                state._modules_to_run_forward.clear()
+            for fsdp_param_group in state._fsdp_param_groups:
+                output = fsdp_param_group.post_forward(None, None, output)
+            output = state._register_pre_backward_hook(output)
+            state._training_state = TrainingState.IDLE
+            output = state._cast_output_dtype(output)
+            state._modules_to_run_forward.clear()
         return output
 
     @_dynamo_disable
@@ -439,6 +435,36 @@ class FSDPState(_State):
         Variable._execution_engine.queue_callback(
             self._root_post_backward_final_callback
         )
+
+    @_dynamo_disable
+    def _reset_iter_state(self) -> None:
+        # Iteration-wide recovery after a mid-forward or mid-backward
+        # exception. Waits on in-flight collectives, reshards every param
+        # group, and clears per-iteration trackers so the next forward can
+        # start from a clean state. Any in-flight gradients (reduce-scatter
+        # results, HSDP partial reduce outputs, grad-accum state) are
+        # discarded: the failed iteration is treated as lost.
+        if self._is_root is False:
+            raise RuntimeError(
+                "reset_iter_state must be called on the root FSDP module"
+            )
+        current_stream = self._device_handle.current_stream()
+        if ag_state := self._comm_ctx.all_gather_state:
+            if ag_state.event is not None:
+                current_stream.wait_event(ag_state.event)
+            self._comm_ctx.all_gather_state = None
+        for rs_state in self._comm_ctx.reduce_scatter_states:
+            if rs_state.event is not None:
+                current_stream.wait_event(rs_state.event)
+        self._comm_ctx.reduce_scatter_states.clear()
+        self._comm_ctx.post_forward_order.clear()
+        for state in self._state_ctx.all_states:
+            state._modules_to_run_forward.clear()
+            state._training_state = TrainingState.IDLE
+            for fsdp_param_group in state._fsdp_param_groups:
+                fsdp_param_group._reset_iter_state()
+        self._state_ctx.iter_forward_root = None
+        self._state_ctx.post_backward_final_callback_queued = False
 
 
 def _get_module_fsdp_state(module: nn.Module) -> FSDPState | None:

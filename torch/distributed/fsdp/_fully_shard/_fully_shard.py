@@ -156,6 +156,16 @@ def fully_shard(
       each standalone per-chunk call) casts its inputs to ``param_dtype``
       and its output to ``output_dtype``.
 
+    .. note::
+       If ``forward()`` or ``backward()`` raises, FSDP's per-iteration
+       state (iteration forward-root marker, grouped-module run
+       trackers, in-flight collective state, per-group training states)
+       is left in an undefined condition. To recover and run another
+       iteration, call :meth:`FSDPModule.reset_iter_state` on the root
+       FSDP module. The failed iteration's gradients are discarded,
+       including any ``no_sync`` / HSDP partial-reduce accumulation
+       state.
+
     Args:
         module (Union[nn.Module, List[nn.Module]]): The module or modules to
             shard with FSDP and group together for communication.
@@ -361,6 +371,32 @@ class FSDPModule:
             return handle
         handle.wait()
         return None
+
+    def reset_iter_state(self) -> None:
+        """
+        Resets FSDP's per-iteration state after an exception aborted a
+        forward or backward mid-flight. The supported recovery workflow is:
+
+        1. Catch the exception from ``forward()`` or ``backward()``.
+        2. Call ``reset_iter_state()`` on the *root* FSDP module.
+        3. Run the next iteration normally.
+
+        The reset waits on any in-flight all-gather/reduce-scatter events,
+        reshards every parameter group, and clears iteration trackers
+        (``iter_forward_root``, ``_modules_to_run_forward``, post-forward
+        order, per-group training states). Any in-flight gradient
+        reductions are discarded: the failed iteration's gradients are
+        lost, including HSDP partial-reduce-accumulation state and
+        ``no_sync`` grad-accumulation state. Callers doing gradient
+        accumulation should treat the microbatch sequence as invalidated
+        and restart it.
+
+        Must be called on the root FSDP module (the module passed to the
+        top-level ``fully_shard`` call that drives ``forward``). Calling
+        on a non-root module raises ``RuntimeError``.
+        """
+        state = self._get_fsdp_state()
+        state._reset_iter_state()
 
     def set_is_last_backward(self, is_last_backward: bool) -> None:
         """
