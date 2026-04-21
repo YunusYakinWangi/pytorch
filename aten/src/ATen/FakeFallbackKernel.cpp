@@ -1,4 +1,5 @@
 #include <ATen/core/dispatch/Dispatcher.h>
+#include <c10/core/impl/FakeTensorModeTLS.h>
 #include <c10/core/impl/LocalDispatchKeySet.h>
 #include <c10/util/irange.h>
 #include <torch/library.h>
@@ -97,23 +98,6 @@ static std::optional<c10::Device> get_common_device(
   return common_device;
 }
 
-static std::shared_ptr<c10::FakeTensorMode> get_fake_tensor_mode(
-    torch::jit::Stack* stack,
-    size_t num_arguments) {
-  auto arguments = torch::jit::last(*stack, num_arguments);
-  for (size_t idx = 0; idx < num_arguments; ++idx) {
-    const auto& ivalue = arguments[idx];
-    if (ivalue.isTensor()) {
-      const auto& t = ivalue.toTensor();
-      if (t.defined() && t.is_fake()) {
-        auto mode = t.unsafeGetTensorImpl()->fake_tensor_mode();
-        if (mode) return mode;
-      }
-    }
-  }
-  return nullptr;
-}
-
 static bool is_device_type_arg(const c10::Argument& arg) {
   const auto& type = arg.type();
   if (type->kind() == c10::TypeKind::DeviceObjType)
@@ -158,7 +142,7 @@ static void transmute_to_fake(
     const at::Tensor& t,
     c10::Device fake_device,
     const std::shared_ptr<c10::FakeTensorMode>& mode) {
-  t.unsafeGetTensorImpl()->set_fake_device(fake_device);
+  t.unsafeGetTensorImpl()->set_and_normalize_fake_device(fake_device);
   if (mode) {
     t.unsafeGetTensorImpl()->set_fake_tensor_mode(mode);
   }
@@ -173,7 +157,7 @@ void fakeFallback(
   const auto arguments_begin = stack->size() - num_arguments;
 
   auto fake_device = get_common_device(stack, num_arguments);
-  auto mode = get_fake_tensor_mode(stack, num_arguments);
+  auto mode = c10::impl::FakeTensorModeTLS::get_state();
 
   // Always rewrite device kwargs to meta so composite kernels create meta
   // tensors internally (e.g. rand_like(x, device='cpu') must not create real
@@ -194,9 +178,7 @@ void fakeFallback(
         c10::DispatchKeySet(c10::DispatchKey::Python) |
         c10::DispatchKeySet(c10::DispatchKey::PythonTLSSnapshot));
     c10::impl::IncludeDispatchKeyGuard meta_guard(c10::DispatchKey::Meta);
-    auto ks = dispatchKeySet.remove(c10::DispatchKey::Fake) |
-        c10::DispatchKeySet(c10::DispatchKey::Meta);
-    op.redispatchBoxed(ks, stack);
+    op.callBoxed(stack);
   }
 
   // Stamp meta tensor outputs with the fake device.
