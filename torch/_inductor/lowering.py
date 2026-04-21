@@ -3191,32 +3191,15 @@ def constrain_to_fx_strides(fx_node, *args, **kwargs):
 
 
 def convolution_backward_xpu_constraint(fx_node, *args, **kwargs):
-    """
-    Custom layout constraint for convolution_backward on XPU.
-
-    The inductor layout optimization converts conv weights to channels-last (CL)
-    in the forward graph, but the input tensor saved for backward retains its
-    original contiguous strides.  This creates a mixed-format scenario where
-    convolution_backward receives a CL weight but a contiguous input/grad_output.
-
-    On XPU, this mixed format produces incorrect gradient results, particularly
-    when the activation spatial dimensions are 1x1 (where contiguous strides
-    (N,C,1,1)->(C,1,1,1) differ from CL strides (C,1,C,C) despite covering
-    the same memory).
-
-    This constraint detects the mixed-format case and normalises all 4-D tensor
-    inputs to have explicit channels-last strides so the XPU backend receives a
-    consistent layout.
-    """
-    # Start with the standard fx-strides constraint
+    """Normalise mixed channels-last/contiguous 4-D inputs for XPU correctness."""
     args, kwargs = constrain_to_fx_strides(fx_node, *args, **kwargs)
 
     # Detect whether any 4-D tensor input is genuinely channels-last
-    # (i.e. CL but NOT also contiguous — which distinguishes the weight from
-    # ambiguous 1×1 tensors that are both contiguous and CL).
+    # (CL but NOT also contiguous — distinguishes the weight from ambiguous
+    # 1×1 tensors that are both contiguous and CL).
     has_channels_last = False
     for arg, fx_arg in zip(args, fx_node.args):
-        if not isinstance(arg, ir.IRNode):
+        if not _is_tensor_irnode(arg):
             continue
         meta_val = fx_arg.meta.get("val")
         if meta_val is None or meta_val.dim() != 4:
@@ -3229,13 +3212,12 @@ def convolution_backward_xpu_constraint(fx_node, *args, **kwargs):
             break
 
     if has_channels_last:
-        # Force every 4-D tensor arg to explicit channels-last strides.
-        # We use require_exact_strides rather than require_channels_last because
+        # Use require_exact_strides rather than require_channels_last because
         # the IR's stride-order check treats size-1 dimensions as don't-care,
         # but the XPU backend relies on the actual stride values.
         new_args = []
         for arg, fx_arg in zip(args, fx_node.args):
-            if isinstance(arg, ir.IRNode):
+            if _is_tensor_irnode(arg):
                 meta_val = fx_arg.meta.get("val")
                 if meta_val is not None and meta_val.dim() == 4:
                     cl_strides = make_channels_last_strides_for(meta_val.shape)
@@ -3244,6 +3226,8 @@ def convolution_backward_xpu_constraint(fx_node, *args, **kwargs):
         args = tuple(new_args)
 
     return args, kwargs
+
+
 # native_dropout uses empty_like(input) internally, so bernoulli_ consumes
 # RNG values in the input's stride order. Constrain input strides to match
 # the FX graph (i.e. eager) so the dropout mask is identical.
@@ -3464,13 +3448,9 @@ make_fallback(aten._addmm_activation, warn=False)
 make_fallback(aten._grouped_mm, require_dense)
 
 # Need templated kernel. Probably impossible to write efficiently
-# On XPU, use a custom constraint that normalises mixed memory formats to
-# channels-last to work around incorrect results from the XPU backend when
-# the weight is channels-last but the input/grad_output are contiguous
-# (see convolution_backward_xpu_constraint for details).
 _conv_bwd_constraint = (
     convolution_backward_xpu_constraint
-    if torch.xpu.is_available()
+    if torch.xpu._is_compiled()
     else constrain_to_fx_strides
 )
 make_fallback(aten.convolution_backward, _conv_bwd_constraint)
