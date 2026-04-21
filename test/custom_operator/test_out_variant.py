@@ -258,6 +258,24 @@ class TestOutVariant(TestCase):
                 tags=[torch.Tag.out],
             )
 
+    def test_define_out_tag_optional_mutable_arg(self):
+        with self.assertRaisesRegex(
+            ValueError, "only supports Tensor mutable arguments"
+        ):
+            self.lib.define(
+                "mut_opt(Tensor x, *, Tensor(a!)? out=None) -> Tensor(a!)?",
+                tags=[torch.Tag.out],
+            )
+
+    def test_define_out_tag_tensorlist_mutable_arg(self):
+        with self.assertRaisesRegex(
+            ValueError, "only supports Tensor mutable arguments"
+        ):
+            self.lib.define(
+                "mut_list(Tensor x, *, Tensor(a!)[] out) -> ()",
+                tags=[torch.Tag.out],
+            )
+
     def test_define_out_tag_return_not_mutable_alias(self):
         with self.assertRaisesRegex(ValueError, "mutable alias"):
             self.lib.define(
