@@ -54,7 +54,7 @@ INPUT_SEED = 42
 TARGET_SEED = 123
 
 
-device_type = ACCELERATOR_TYPE.value orlue or "cpu"
+device_type = ACCELERATOR_TYPE.value or "cpu"
 backend = dist.get_default_backend_for_device(device_type)
 
 
