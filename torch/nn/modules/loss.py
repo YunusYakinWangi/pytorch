@@ -5,6 +5,9 @@ from typing_extensions import deprecated
 
 from torch import Tensor
 from torch.nn import _reduction as _Reduction, functional as F
+from torch.nn.functional import (
+    LinearCrossEntropyOptions,  # pyrefly: ignore [missing-module-attribute]
+)
 
 from .distance import PairwiseDistance
 from .linear import Linear
@@ -1445,7 +1448,12 @@ class LinearCrossEntropyLoss(_WeightedLoss):
             Computer Vision
             <https://arxiv.org/abs/1512.00567>`__.
             Default: :math:`0.0`.
-
+        options (LinearCrossEntropyOptions, optional): Specify
+            chunking strategy options, see
+            :class:`~torch.nn.functional.LinearCrossEntropyOptions`
+            for more details. To enable reference implementation of
+            linear_cross_entropy with chunking disabled, use
+            `options=None`.
     Shape:
         - Input: Shape :math:`(in_features)`, :math:`(N, in_features)`.
         - Target: If containing class indices, shape :math:`()`,
@@ -1481,6 +1489,7 @@ class LinearCrossEntropyLoss(_WeightedLoss):
     reduction: str
     ignore_index: int | None
     label_smoothing: float
+    options: LinearCrossEntropyOptions | None
 
     def __init__(
         self,
@@ -1494,6 +1503,7 @@ class LinearCrossEntropyLoss(_WeightedLoss):
         weight: Tensor | None = None,
         ignore_index: int | None = None,
         label_smoothing: float = 0.0,
+        options: LinearCrossEntropyOptions | None = None,
     ) -> None:
         super().__init__(weight, None, None, reduction)
         self.num_classes = num_classes
@@ -1508,6 +1518,7 @@ class LinearCrossEntropyLoss(_WeightedLoss):
         self.linear = Linear(
             in_features, num_classes * math.prod(out_features), False, device, dtype
         )
+        self.options = options
 
     def forward(self, input: Tensor, target: Tensor) -> Tensor:
         linear_weight = self.linear.weight.reshape(
@@ -1521,6 +1532,7 @@ class LinearCrossEntropyLoss(_WeightedLoss):
             reduction=self.reduction,
             ignore_index=self.ignore_index,
             label_smoothing=self.label_smoothing,
+            options=self.options,  # pyrefly: ignore [unexpected-keyword]
         )
 
 
