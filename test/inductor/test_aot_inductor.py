@@ -82,7 +82,6 @@ from torch.testing._internal.common_utils import (
     NAVI_ARCH,
     parametrize,
     runOnRocm,
-    skipIfMPS,
     skipIfRocm,
     skipIfRocmArch,
     skipIfWindows,
@@ -325,7 +324,7 @@ class AOTInductorTestsTemplate:
         IS_FBCODE,
         "toolchain doesn't support ptx to fatbin",
     )
-    @skipIfMPS
+    @skipIfRocm(msg="Fails with Triton 3.7")
     # Skip embed_kernel_binary == True for now as it shows random
     # failure on CI
     @common_utils.parametrize("embed_kernel_binary", [False])
@@ -1351,7 +1350,6 @@ class AOTInductorTestsTemplate:
         self.check_model(Model(), example_inputs, dynamic_shapes=dynamic_shapes)
 
     @unittest.skipIf(not PLATFORM_SUPPORTS_FP8, f8_msg)
-    @skipIfMPS
     def test_fp8(self):
         # cuda only
         if self.device not in ("cuda", "xpu"):
@@ -1460,7 +1458,6 @@ class AOTInductorTestsTemplate:
         )
 
     @unittest.skipIf(not PLATFORM_SUPPORTS_FP8, f8_msg)
-    @skipIfMPS
     def test_fp8_view_of_param(self):
         # cuda only
         if self.device != GPU_TYPE:
@@ -1842,7 +1839,6 @@ class AOTInductorTestsTemplate:
         )
         self.check_model(Repro(), example_inputs)
 
-    @skipIfMPS
     @config.patch({"unbacked_symint_fallback": 12})
     @parametrize("shift_k", [0, 1, 2, 3])
     @parametrize("use_static_size", [True, False])
@@ -1919,7 +1915,6 @@ class AOTInductorTestsTemplate:
             }
             self.check_model(model, example_inputs, dynamic_shapes=spec)
 
-    @skipIfMPS
     @config.patch({"unbacked_symint_fallback": 12})
     @config.patch({"triton.autotune_at_compile_time": None})
     def test_replace_unbacked_symbol_with_backed_expr(self):
@@ -1973,7 +1968,6 @@ class AOTInductorTestsTemplate:
             }
             self.check_model(model, example_inputs, dynamic_shapes=spec)
 
-    @skipIfMPS
     @config.patch({"triton.autotune_at_compile_time": None})
     @torch.fx.experimental._config.patch("backed_size_oblivious", True)
     def test_slice_independent_backed_symints_no_unbacked(self):
@@ -2007,7 +2001,6 @@ class AOTInductorTestsTemplate:
             }
             self.check_model(model, example_inputs, dynamic_shapes=spec)
 
-    @skipIfMPS
     @config.patch({"triton.autotune_at_compile_time": None})
     @torch.fx.experimental._config.patch("backed_size_oblivious", True)
     def test_slice_negative_index_backed_symints_no_unbacked(self):
@@ -2760,7 +2753,6 @@ class AOTInductorTestsTemplate:
         )
 
     # mps doesn't support float64
-    @skipIfMPS
     def test_while_loop_with_parameters(self):
         inputs = (
             torch.randn(
@@ -3118,7 +3110,6 @@ class AOTInductorTestsTemplate:
         ):
             self.check_model(model, example_inputs)
 
-    @skipIfMPS
     def test_fallback_mem_leak_fix(self):
         if self.device != GPU_TYPE:
             raise unittest.SkipTest("requires GPU")
@@ -3163,7 +3154,6 @@ class AOTInductorTestsTemplate:
         torch.testing.assert_close(actual, expected)
 
     @requires_multigpu()
-    @skipIfMPS
     def test_replicate_on_devices(self):
         if self.device != GPU_TYPE:
             raise unittest.SkipTest("requires GPU")
@@ -3203,7 +3193,6 @@ class AOTInductorTestsTemplate:
             self.assertTrue(same(result_cpu, result_gpu.cpu()))
 
     @requires_multigpu()
-    @skipIfMPS
     def test_on_gpu_device1(self):
         if self.device != GPU_TYPE:
             raise unittest.SkipTest("requires GPU")
@@ -3839,7 +3828,6 @@ class AOTInductorTestsTemplate:
         torch._dynamo.mark_dynamic(example_inputs[1], 0)
         self.check_model(Model(), example_inputs)
 
-    @skipIfMPS
     @common_utils.parametrize("grid_type", [1, 2, 3])
     @common_utils.parametrize("num_dims", [1, 2])
     @common_utils.parametrize("dynamic", [False, True])
@@ -4902,7 +4890,6 @@ class AOTInductorTestsTemplate:
         expected = Model()(*example_inputs)
         torch.testing.assert_close(actual, expected)
 
-    @skipIfMPS
     @torch._dynamo.config.patch(capture_scalar_outputs=True)
     @common_utils.parametrize("dynamic", [False, True])
     @common_utils.parametrize("autotuning", [False, True])
@@ -5973,7 +5960,6 @@ class AOTInductorTestsTemplate:
                 ).run(code)
 
     @unittest.skipIf(not PLATFORM_SUPPORTS_FP8, f8_msg)
-    @skipIfMPS
     def test_aoti_debug_printer_fp8_dtype(self):
         if self.device != GPU_TYPE:
             raise unittest.SkipTest("requires GPU")
@@ -7196,7 +7182,6 @@ class AOTInductorTestsTemplate:
         )
         self.check_model(Model(), example_inputs)
 
-    @skipIfMPS
     @parametrize("input_dtype", [torch.float16, torch.bfloat16])
     def test_mm_out_dtype(self, input_dtype):
         if self.device not in ("cuda", "xpu"):
@@ -7212,7 +7197,6 @@ class AOTInductorTestsTemplate:
         )
         self.check_model(Model(), example_inputs)
 
-    @skipIfMPS
     @parametrize("m", [32])
     @parametrize("n", [64])
     @parametrize("q_group", [32, 64])
@@ -8538,6 +8522,7 @@ MPS_TEST_FAILURES = {
     # MPS doesn't support float64
     "test_while_loop_with_conv_dynamic_True": fail_mps(),
     "test_while_loop_with_conv_dynamic_False": fail_mps(),
+    "test_while_loop_with_parameters": fail_mps(),
     # MPS doesn't support float8
     "test_fp8": fail_mps(),
     "test_fp8_view_of_param": fail_mps(),
