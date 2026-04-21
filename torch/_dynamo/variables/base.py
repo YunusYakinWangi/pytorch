@@ -662,9 +662,7 @@ class VariableTracker(metaclass=VariableTrackerMeta):
 
             return generic_len(tx, self)
         elif name == "__iter__" and not args and not kwargs:
-            from .object_protocol import generic_getiter
-
-            return generic_getiter(tx, self)
+            return self.tp_iter_impl(tx)
         elif (
             name == "__getattr__"
             and len(args) == 1
