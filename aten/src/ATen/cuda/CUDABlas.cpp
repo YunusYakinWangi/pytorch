@@ -1599,7 +1599,7 @@ bool gemm_and_bias(
 
   auto alpha = std::variant<opmath_t, at::Half>(alpha_val);
   auto beta = std::variant<opmath_t, at::Half>(static_cast<opmath_t>(use_bias_epilogue ? 0 : 1));
-  const auto scale_to_void_ptr = [](const std::variant<opmath_t, at::Half>& var) -> const void* {
+  const auto get_scale_ptr = [](const std::variant<opmath_t, at::Half>& var) -> const void* {
     if (std::holds_alternative<opmath_t>(var)) {
       return &std::get<opmath_t>(var);
     }
@@ -1786,12 +1786,12 @@ bool gemm_and_bias(
     cublasStatus = cublasLtMatmul(
       ltHandle,
       computeDesc.descriptor(),
-      scale_to_void_ptr(alpha),
+      get_scale_ptr(alpha),
       mat1_ptr,
       Adesc.descriptor(),
       mat2_ptr,
       Bdesc.descriptor(),
-      scale_to_void_ptr(beta),
+      get_scale_ptr(beta),
       c_ptr,
       Cdesc.descriptor(),
       result_ptr,
