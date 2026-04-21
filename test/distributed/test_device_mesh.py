@@ -100,6 +100,49 @@ class DeviceMeshTestGlooBackend(DTensorTestBase):
         else:
             self.assertEqual(mesh_group, default_group)
 
+    def test_init_device_mesh_timeout_auto_init_and_subgroups(self):
+        timeout = timedelta(seconds=42)
+        _set_env_var(world_size=self.world_size, rank=self.rank)
+
+        try:
+            mesh = init_device_mesh("cpu", (2, self.world_size // 2), timeout=timeout)
+
+            def get_timeout(pg: ProcessGroup) -> timedelta:
+                return pg._get_backend(torch.device("cpu")).options._timeout
+
+            self.assertEqual(get_timeout(_get_default_group()), timeout)
+            self.assertEqual(get_timeout(mesh.get_group(0)), timeout)
+            self.assertEqual(get_timeout(mesh.get_group(1)), timeout)
+        finally:
+            if is_initialized():
+                self.destroy_pg()
+
+    def test_init_device_mesh_timeout_respects_backend_override(self):
+        default_timeout = timedelta(seconds=42)
+        tp_timeout = timedelta(seconds=17)
+        opts = dist.ProcessGroupGloo._Options()
+        opts._timeout = tp_timeout
+        _set_env_var(world_size=self.world_size, rank=self.rank)
+
+        try:
+            mesh = init_device_mesh(
+                "cpu",
+                (2, self.world_size // 2),
+                mesh_dim_names=("dp", "tp"),
+                timeout=default_timeout,
+                backend_override={"tp": opts},
+            )
+
+            def get_timeout(pg: ProcessGroup) -> timedelta:
+                return pg._get_backend(torch.device("cpu")).options._timeout
+
+            self.assertEqual(get_timeout(_get_default_group()), default_timeout)
+            self.assertEqual(get_timeout(mesh.get_group("dp")), default_timeout)
+            self.assertEqual(get_timeout(mesh.get_group("tp")), tp_timeout)
+        finally:
+            if is_initialized():
+                self.destroy_pg()
+
 
 class DeviceMeshSetDeviceTest(DTensorTestBase):
     @property

@@ -5,6 +5,7 @@ import os
 import threading
 import warnings
 from collections.abc import Callable, Iterator
+from datetime import timedelta
 from itertools import zip_longest
 from typing import Any, TYPE_CHECKING
 
@@ -45,6 +46,7 @@ else:
     from torch._C._distributed_c10d import Backend as C10dBackend
     from torch.distributed import config as dist_config
     from torch.distributed.distributed_c10d import (
+        _check_valid_timeout,
         _get_default_group,
         _resolve_process_group,
         get_backend,
@@ -209,6 +211,7 @@ else:
         _flatten_mapping: dict[str, "DeviceMesh"]
         # Registry mapping group names to ProcessGroup objects (to avoid C++ lookup)
         _pg_registry: dict[str, ProcessGroup]
+        _timeout: timedelta | None
 
         def __init__(
             self,
@@ -217,6 +220,7 @@ else:
             *,
             mesh_dim_names: tuple[str, ...] | None = None,
             backend_override: tuple[BackendConfig, ...] | None = None,
+            _timeout: timedelta | None = None,
             _init_backend: bool = True,
             _rank: int | None = None,
             _layout: _MeshLayout | None = None,
@@ -266,6 +270,7 @@ else:
             self._rank_map = _rank_map
             self._mesh_dim_names = tuple(mesh_dim_names) if mesh_dim_names else None
             self._root_mesh = _root_mesh
+            self._timeout = _timeout
 
             if backend_override is None:
                 backend_override = ((None, None),) * len(self._layout)
@@ -312,6 +317,7 @@ else:
                         self._rank_map,
                         self._mesh_dim_names,
                         backend_override,
+                        self._timeout,
                     )
                     # Populate the process group registry
                     # If we have a root mesh, add to root's registry for lookups
@@ -435,7 +441,7 @@ else:
         def _setup_world_group_and_device(self):
             default_initialized = is_initialized()
             if not default_initialized:
-                init_process_group()
+                init_process_group(timeout=self._timeout)
 
             world_size = get_world_size()
             if self._layout.numel() > world_size:
@@ -498,6 +504,7 @@ else:
             rank_map: torch.Tensor,
             dim_name: str,
             backend_override: BackendConfig,
+            default_timeout: timedelta | None = None,
         ) -> GroupName | None:
             # Generate a 2D global mesh tensor for the current dim for PG creation.
             pg_ranks_by_dim = sub_layout.nest().remap_to_tensor(rank_map)
@@ -505,7 +512,9 @@ else:
             # We need to explicitly pass in timeout when specified in option, otherwise
             # the default timeout will be used to override the timeout set in option.
             # TODO: remove this once we have fixed inside c10d level.
-            timeout = pg_options._timeout if pg_options else None
+            timeout = default_timeout
+            if pg_options is not None and pg_options._timeout is not None:
+                timeout = pg_options._timeout
 
             # If we have a 2D mesh with mesh_dim_names ("dp", "tp"), the group description
             # of the subgroups would be `mesh_dim_dp` and `mesh_name_tp`.
@@ -600,6 +609,7 @@ else:
             rank_map: torch.Tensor,
             mesh_dim_names: tuple[str, ...] | None,
             backend_override: tuple[BackendConfig, ...],
+            default_timeout: timedelta | None = None,
         ) -> list[GroupName]:
             # group_name associated with each mesh dimension, each
             # mesh dimension should have one sub-group per rank
@@ -613,6 +623,7 @@ else:
                         rank_map,
                         dim_name,
                         backend_override[dim],
+                        default_timeout,
                     )
                 )
             # Filter out None values. If any are None then they should all be None.
@@ -859,6 +870,7 @@ else:
                 _rank_map=root_mesh._rank_map,
                 mesh_dim_names=submesh_dim_names,
                 _root_mesh=root_mesh,
+                _timeout=root_mesh._timeout,
                 _init_backend=False,
             )
             res_submesh._dim_group_names = slice_dim_group_name
@@ -909,6 +921,7 @@ else:
                 mesh_dim_names=(mesh_dim_name,),
                 _root_mesh=root_mesh,
                 backend_override=(backend_override,),
+                _timeout=root_mesh._timeout,
             )
             root_mesh._flatten_mapping[mesh_dim_name] = res_flattened_mesh
 
@@ -1040,6 +1053,7 @@ else:
                     self._device_type,
                     mesh_1d,
                     mesh_dim_names=(mesh_dim_name,),
+                    _timeout=self._get_root_mesh()._timeout,
                     _init_backend=False,
                 )
                 submesh._dim_group_names = (  # type: ignore[has-type]
@@ -1111,6 +1125,7 @@ else:
                     device_type,
                     mesh,
                     mesh_dim_names=mesh_dim_names,
+                    _timeout=None,
                     _init_backend=False,
                 )
                 device_mesh._dim_group_names = [group.group_name]
@@ -1142,7 +1157,11 @@ else:
                     f"mesh {mesh.tolist()} and {len(groups)} ProcessGroups"
                 )
             device_mesh = DeviceMesh(
-                device_type, mesh, mesh_dim_names=mesh_dim_names, _init_backend=False
+                device_type,
+                mesh,
+                mesh_dim_names=mesh_dim_names,
+                _timeout=None,
+                _init_backend=False,
             )
             device_mesh._dim_group_names = [group.group_name for group in groups]
             for group in groups:
@@ -1341,6 +1360,7 @@ else:
                 _rank_map=root_mesh._rank_map,
                 mesh_dim_names=tuple(unflattened_mesh_dim_names),
                 _root_mesh=root_mesh,
+                _timeout=root_mesh._timeout,
                 _init_backend=False,
             )
 
@@ -1355,6 +1375,7 @@ else:
                     root_mesh._rank_map,
                     mesh_dim_names,
                     backend_override,
+                    root_mesh._timeout,
                 )
                 dim_group_names[dim : dim + 1] = new_group_names
                 res_mesh._dim_group_names = dim_group_names
@@ -1458,6 +1479,7 @@ else:
                 _rank_map=device_mesh_list[0]._rank_map,
                 mesh_dim_names=tuple(concat_dim_names),
                 _root_mesh=device_mesh_list[0]._get_root_mesh(),
+                _timeout=device_mesh_list[0]._get_root_mesh()._timeout,
                 _init_backend=False,
             )
             res_mesh._dim_group_names = concat_dim_group_name
@@ -1505,6 +1527,7 @@ else:
         mesh_shape: tuple[int, ...],
         *,
         mesh_dim_names: tuple[str, ...] | None = None,
+        timeout: timedelta | None = None,
         backend_override: dict[
             int | str, str | C10dBackend.Options | tuple[str, C10dBackend.Options]
         ]
@@ -1533,6 +1556,9 @@ else:
             mesh_dim_names (tuple[str, ...], optional): A tuple of mesh dimension names to assign to each dimension
                 of the multi-dimensional array describing the layout of devices. Its length must match the length
                 of `mesh_shape`. Each string in `mesh_dim_names` must be unique.
+            timeout (timedelta, optional): Timeout for process groups created by `DeviceMesh`. This applies to
+                the default/world process group when `DeviceMesh` initializes it internally, and serves as the
+                default timeout for mesh-dimension process groups unless overridden by `backend_override`.
             backend_override (Dict[int | str, tuple[str, Options] | str | Options], optional): Overrides for some or all of
                 the ProcessGroups that will be created for each mesh dimension. Each key can be either the index of a
                 dimension or its name (if mesh_dim_names is provided). Each value can be a tuple containing the name
@@ -1564,6 +1590,9 @@ else:
                     f"Found len(mesh_dim_names): {len(mesh_dim_names)} and len(mesh_shape):{len(mesh_shape)}."
                 )
 
+        if timeout is not None:
+            _check_valid_timeout(timeout)
+
         if backend_override is not None:
             backend_override_tuple = tuple(
                 _normalize_backend_override(
@@ -1591,6 +1620,7 @@ else:
             _rank_map=rank_map,
             mesh_dim_names=mesh_dim_names,
             backend_override=backend_override_tuple,
+            _timeout=timeout,
         )
 
         return device_mesh
