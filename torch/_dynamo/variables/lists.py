@@ -103,6 +103,18 @@ class BaseListVariable(VariableTracker):
     def as_python_constant(self) -> Any:
         return self.python_type()([x.as_python_constant() for x in self.items])
 
+    def str_impl(self, tx: "InstructionTranslator") -> "VariableTracker":
+        try:
+            return VariableTracker.build(tx, str(self.as_python_constant()))
+        except AsPythonConstantNotImplementedError:
+            unimplemented(
+                gb_type="str() on non-constant list-like",
+                context=f"str() on {type(self).__name__} with non-constant elements",
+                explanation="Dynamo could not safely evaluate str() for this "
+                "list-like object because one or more elements are not Python constants.",
+                hints=[*graph_break_hints.SUPPORTABLE],
+            )
+
     def as_proxy(self) -> Any:
         assert self.python_type() is not SizeVariable
         return self.python_type()(self._as_proxy())

@@ -27,7 +27,7 @@ from typing import Any, NoReturn, TYPE_CHECKING
 
 from .. import graph_break_hints, variables
 from ..current_scope_id import current_scope_id
-from ..exc import raise_observed_exception, unimplemented
+from ..exc import raise_observed_exception, raise_type_error, unimplemented
 from ..guards import GuardBuilder, install_guard
 from ..source import AttrSource, Source
 from ..utils import cmp_name_to_op_mapping, istype
@@ -650,6 +650,10 @@ class VariableTracker(metaclass=VariableTrackerMeta):
             from .object_protocol import generic_len
 
             return generic_len(tx, self)
+        elif name == "__str__" and not (args or kwargs):
+            from .object_protocol import generic_str
+
+            return generic_str(tx, self)
         elif (
             name == "__getattr__"
             and len(args) == 1
@@ -1070,6 +1074,23 @@ class VariableTracker(metaclass=VariableTrackerMeta):
             explanation=f"The type {self.python_type_name()} has an nb_float C slot but "
             "the corresponding VariableTracker doesn't implement nb_float_impl.",
             hints=[*graph_break_hints.SUPPORTABLE],
+        )
+
+    def str_impl(
+        self,
+        tx: Any,
+    ) -> VariableTracker:
+        """Mirrors CPython's tp_str slot.
+
+        https://github.com/python/cpython/blob/v3.13.3/Objects/object.c#L781-L829
+
+        Subclasses must override to return a VariableTracker wrapping the str
+        result.  The base implementation raises TypeError, mirroring CPython's
+        behaviour when tp_str is NULL and no fallback is available.
+        """
+        raise_type_error(
+            tx,
+            f"object of type '{self.python_type_name()}' has no __str__",
         )
 
     def __init__(

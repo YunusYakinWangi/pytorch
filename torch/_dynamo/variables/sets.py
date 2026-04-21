@@ -22,13 +22,13 @@ from typing import Any, Literal, TYPE_CHECKING
 
 from torch.utils._ordered_set import OrderedSet
 
-from .. import polyfills, variables
+from .. import graph_break_hints, polyfills, variables
 from ..bytecode_transformation import create_call_function, create_instruction
-from ..exc import raise_observed_exception
+from ..exc import raise_observed_exception, unimplemented
 from ..guards import GuardBuilder, install_guard
 from ..source import AttrSource, is_constant_source, is_from_local_source
 from ..utils import cmp_name_to_op_mapping, istype, raise_args_mismatch
-from .base import ValueMutationNew, VariableTracker
+from .base import AsPythonConstantNotImplementedError, ValueMutationNew, VariableTracker
 from .constant import ConstantVariable
 from .hashable import HashableTracker, is_hashable, raise_unhashable
 
@@ -113,6 +113,18 @@ class SetVariable(VariableTracker):
 
     def as_python_constant(self) -> Any:
         return {k.vt.as_python_constant() for k in self.set_items}
+
+    def str_impl(self, tx: Any) -> "VariableTracker":
+        try:
+            return VariableTracker.build(tx, str(self.as_python_constant()))
+        except AsPythonConstantNotImplementedError:
+            unimplemented(
+                gb_type="str() on non-constant set",
+                context=f"str() on {type(self).__name__} with non-constant elements",
+                explanation="Dynamo could not safely evaluate str() for this "
+                "set because one or more elements are not Python constants.",
+                hints=[*graph_break_hints.SUPPORTABLE],
+            )
 
     def reconstruct(self, codegen: "PyCodegen") -> None:
         codegen.foreach([x.vt for x in self.set_items])

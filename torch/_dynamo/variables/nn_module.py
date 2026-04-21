@@ -235,6 +235,10 @@ class NNModuleVariable(VariableTracker):
         mod = tx.output.get_submodule(self.module_key)
         return ConstantVariable.create(bool(mod))
 
+    def str_impl(self, tx: "InstructionTranslator") -> VariableTracker:
+        mod = tx.output.get_submodule(self.module_key)
+        return VariableTracker.build(tx, str(mod))
+
     def _wrap_submodule(
         self,
         tx: "InstructionTranslator",

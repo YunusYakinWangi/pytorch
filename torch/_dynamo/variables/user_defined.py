@@ -221,6 +221,11 @@ class UserDefinedClassVariable(UserDefinedVariable):
     def __repr__(self) -> str:
         return f"{self.__class__.__name__}({self.value})"
 
+    def str_impl(self, tx: "InstructionTranslator") -> "VariableTracker":
+        return VariableTracker.build(
+            tx, inspect.getattr_static(type(self.value), "__str__")(self.value)
+        )
+
     @staticmethod
     @functools.cache
     def _constant_fold_classes() -> set[type[object]]:
@@ -1690,6 +1695,42 @@ class UserDefinedObjectVariable(UserDefinedVariable):
             return self._base_vt.mp_length(tx)
         return self.len_impl(tx)
 
+    def str_impl(self, tx: "InstructionTranslator") -> VariableTracker:
+        # Mirrors CPython's tp_str slot resolution:
+        # https://github.com/python/cpython/blob/v3.13.3/Objects/object.c#L798-L826
+        #
+        # object.__str__ delegates to tp_repr. Since repr_impl isn't wired yet,
+        # we evaluate at trace time for the default case. For Python overrides,
+        # we resolve via type_attr + call_function (not call_method, which would
+        # re-enter generic_str via base.call_method("__str__")).
+        if type(self.value).__str__ is object.__str__:
+            try:
+                return VariableTracker.build(tx, str(self.value))
+            except AttributeError as e:
+                raise_observed_exception(AttributeError, tx, args=list(e.args))
+
+        method = self._maybe_get_baseclass_method("__str__")
+        if method is not None:
+            type_attr = self.lookup_class_mro_attr("__str__")
+            source = self.source and self.get_source_by_walking_mro(tx, "__str__")
+            method_var = self.resolve_type_attr(tx, "__str__", type_attr, source)
+            if not isinstance(method_var, variables.GetAttrVariable):
+                return method_var.call_function(tx, [], {})
+            try:
+                inspect.getattr_static(type(type_attr), "__get__")(
+                    type_attr, self.value, type(self.value)
+                )
+            except (AttributeError, TypeError) as e:
+                raise_observed_exception(type(e), tx, args=list(e.args))
+
+        unimplemented(
+            gb_type="untraceable user-defined __str__",
+            context=f"Could not trace __str__ override for {type(self.value).__name__}",
+            explanation="Dynamo could not safely trace this user-defined __str__ override.",
+            hints=[*graph_break_hints.SUPPORTABLE],
+            skip_frame=True,
+        )
+
     def method_setattr_standard(
         self,
         tx: "InstructionTranslator",
@@ -2869,6 +2910,11 @@ class UserDefinedExceptionObjectVariable(UserDefinedObjectVariable):
     @property
     def python_stack(self) -> traceback.StackSummary | None:
         return self.exc_vt.python_stack
+
+    def str_impl(self, tx: "InstructionTranslator") -> "VariableTracker":
+        if type(self.value).__str__ is not BaseException.__str__:
+            return super().str_impl(tx)
+        return self.exc_vt.str_impl(tx)
 
     def debug_repr(self) -> str:
         return self.exc_vt.debug_repr()

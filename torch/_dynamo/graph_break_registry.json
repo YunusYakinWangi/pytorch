@@ -1465,6 +1465,46 @@
       ]
     }
   ],
+  "GB5548": [
+    {
+      "Gb_type": "str() on non-constant list-like",
+      "Context": "str() on {type(self).__name__} with non-constant elements",
+      "Explanation": "Dynamo could not safely evaluate str() for this list-like object because one or more elements are not Python constants.",
+      "Hints": [
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
+      ]
+    }
+  ],
+  "GB8591": [
+    {
+      "Gb_type": "untraceable user-defined __str__",
+      "Context": "Could not trace __str__ override for {type(self.value).__name__}",
+      "Explanation": "Dynamo could not safely trace this user-defined __str__ override.",
+      "Hints": [
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
+      ]
+    }
+  ],
+  "GB8787": [
+    {
+      "Gb_type": "str() on non-constant dict",
+      "Context": "str() on {type(self).__name__} with non-constant keys or values",
+      "Explanation": "Dynamo could not safely evaluate str() for this dict-like object because one or more keys or values are not Python constants.",
+      "Hints": [
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
+      ]
+    }
+  ],
+  "GB4153": [
+    {
+      "Gb_type": "str() on non-constant dict view",
+      "Context": "str() on {type(self).__name__} with non-constant backing dict",
+      "Explanation": "Dynamo could not safely evaluate str() for this dict view because its backing dict could not be materialized as a Python constant.",
+      "Hints": [
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
+      ]
+    }
+  ],
   "GB0116": [
     {
       "Gb_type": "Unexpected type in sourceless builder",
@@ -2300,6 +2340,16 @@
       "Context": "call_id {self}",
       "Explanation": "Dynamo could not find an associated real value for the tensor.",
       "Hints": []
+    }
+  ],
+  "GB6473": [
+    {
+      "Gb_type": "Unsupported str() call",
+      "Context": "str({obj})",
+      "Explanation": "Dynamo does not know how to trace str() on {obj.python_type_name()}",
+      "Hints": [
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
+      ]
     }
   ],
   "GB0177": [
@@ -3463,6 +3513,16 @@
       "Context": "args: {args}, kwargs: {kwargs}",
       "Explanation": "executorch_call_delegate expects the first argument to be a nn.Module (got {args[0]})",
       "Hints": []
+    }
+  ],
+  "GB0540": [
+    {
+      "Gb_type": "str() on non-constant set",
+      "Context": "str() on {type(self).__name__} with non-constant elements",
+      "Explanation": "Dynamo could not safely evaluate str() for this set because one or more elements are not Python constants.",
+      "Hints": [
+        "It may be possible to write Dynamo tracing rules for this code. Please report an issue to PyTorch if you encounter this graph break often and it is causing performance issues."
+      ]
     }
   ],
   "GB0269": [

@@ -49,6 +49,7 @@ from ..utils import (
     raise_args_mismatch,
 )
 from .base import (
+    AsPythonConstantNotImplementedError,
     AttributeMutationExisting,
     AttributeMutationNew,
     NO_SUCH_SUBOBJ,
@@ -158,6 +159,19 @@ class ConstDictVariable(VariableTracker):
             k.vt.as_python_constant(): v.as_python_constant()
             for k, v in self.items.items()
         }
+
+    def str_impl(self, tx: "InstructionTranslator") -> "VariableTracker":
+        try:
+            return VariableTracker.build(tx, str(self.as_python_constant()))
+        except AsPythonConstantNotImplementedError:
+            unimplemented(
+                gb_type="str() on non-constant dict",
+                context=f"str() on {type(self).__name__} with non-constant keys or values",
+                explanation="Dynamo could not safely evaluate str() for this "
+                "dict-like object because one or more keys or values are not "
+                "Python constants.",
+                hints=[*graph_break_hints.SUPPORTABLE],
+            )
 
     def keys_as_python_constant(self) -> dict[Any, VariableTracker]:
         self.install_dict_keys_match_guard()
@@ -990,6 +1004,22 @@ class DictViewVariable(VariableTracker):
         if name in self.python_type().__dict__:
             return ConstantVariable.create(True)
         return ConstantVariable.create(False)
+
+    def str_impl(self, tx: "InstructionTranslator") -> "VariableTracker":
+        try:
+            d = self.dv_dict.as_python_constant()
+            assert self.kv is not None
+            view = getattr(d, self.kv)()
+            return VariableTracker.build(tx, str(view))
+        except AsPythonConstantNotImplementedError:
+            unimplemented(
+                gb_type="str() on non-constant dict view",
+                context=f"str() on {type(self).__name__} with non-constant backing dict",
+                explanation="Dynamo could not safely evaluate str() for this "
+                "dict view because its backing dict could not be materialized as "
+                "a Python constant.",
+                hints=[*graph_break_hints.SUPPORTABLE],
+            )
 
     def call_method(
         self,

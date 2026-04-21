@@ -392,6 +392,9 @@ class BaseUserFunctionVariable(VariableTracker):
             self.dict_vt = variables.DunderDictVariable.create(tx, self)
         return self.dict_vt
 
+    def str_impl(self, tx: Any) -> "VariableTracker":
+        return VariableTracker.build(tx, str(self.as_python_constant()))
+
     def call_method(
         self,
         tx: "InstructionTranslator",

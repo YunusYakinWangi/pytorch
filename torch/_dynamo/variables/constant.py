@@ -183,6 +183,9 @@ its type to `common_constant_types`.
         except TypeError as e:
             raise NotImplementedError from e
 
+    def str_impl(self, tx: InstructionTranslator) -> VariableTracker:
+        return ConstantVariable.create(str(self.value))
+
     def len_impl(self, tx: InstructionTranslator) -> VariableTracker:
         """Generic len for any constant value (sequence or mapping)."""
         try:
