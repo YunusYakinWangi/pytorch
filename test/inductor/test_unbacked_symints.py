@@ -4,6 +4,7 @@ import unittest
 
 import torch
 from torch._dynamo import config as dynamo_config
+from torch._dynamo.exc import InternalTorchDynamoError
 from torch._inductor import config as inductor_config
 from torch._inductor.test_case import TestCase as InductorTestCase
 from torch.testing import make_tensor
@@ -953,7 +954,10 @@ class TestUnbackedSymints(InductorTestCase):
 
         t = torch.randn(5, device=device)
         torch._dynamo.mark_dynamic(t, 0)
-        with self.assertRaises(Exception):
+        with self.assertRaisesRegex(
+            InternalTorchDynamoError,
+            "expects an unbacked symbol",
+        ):
             torch.compile(fn, fullgraph=True)(t)
 
     @dynamo_config.patch({"capture_scalar_outputs": True})
