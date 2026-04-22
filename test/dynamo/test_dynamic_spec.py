@@ -2,7 +2,7 @@
 
 import torch
 import torch._dynamo.testing
-from torch._dynamo.dynamic_spec import IntSpec, IntSpecType
+from torch._dynamo.dynamic_spec import IntSpec, IntSpecType, TensorSpec
 from torch._dynamo.testing import EagerAndRecordGraphs
 from torch.fx.experimental.symbolic_shapes import free_unbacked_symbols
 from torch.testing._internal.common_utils import run_tests, skipIfTorchDynamo, TestCase
@@ -157,6 +157,143 @@ class TestIntSpecEq(TestCase):
 
     def test_eq_not_intspec(self):
         self.assertNotEqual(IntSpec.static("x", value=1), 1)
+
+
+class TestTensorSpecConstruction(TestCase):
+    """Construction and list-like interface."""
+
+    def test_basic(self):
+        ts = TensorSpec(3)
+        self.assertEqual(ts.rank, 3)
+        self.assertEqual(len(ts), 3)
+        for spec in ts:
+            self.assertIsNone(spec)
+
+    def test_zero_rank(self):
+        ts = TensorSpec(0)
+        self.assertEqual(ts.rank, 0)
+        self.assertEqual(len(ts), 0)
+
+    def test_negative_rank(self):
+        with self.assertRaisesRegex(ValueError, "non-negative"):
+            TensorSpec(-1)
+
+    def test_from_list(self):
+        specs = [IntSpec.static(value=10), None, IntSpec.backed(min=1)]
+        ts = TensorSpec.from_list(specs)
+        self.assertEqual(ts.rank, 3)
+        self.assertEqual(ts[0], IntSpec.static(value=10))
+        self.assertIsNone(ts[1])
+
+    def test_getitem_setitem(self):
+        ts = TensorSpec(2)
+        spec = IntSpec.backed("batch", min=1)
+        ts[0] = spec
+        self.assertEqual(ts[0], spec)
+        self.assertIsNone(ts[1])
+
+    def test_set_fluent(self):
+        ts = TensorSpec(3)
+        result = ts.set(0, IntSpec.static(value=10))
+        self.assertIs(result, ts)
+        self.assertEqual(ts[0], IntSpec.static(value=10))
+
+    def test_iter(self):
+        ts = TensorSpec(2)
+        ts[0] = IntSpec.static(value=5)
+        items = list(ts)
+        self.assertEqual(len(items), 2)
+        self.assertEqual(items[0], IntSpec.static(value=5))
+        self.assertIsNone(items[1])
+
+    def test_index_out_of_range(self):
+        ts = TensorSpec(2)
+        with self.assertRaises(IndexError):
+            ts[5]
+
+    def test_sparse_set(self):
+        ts = TensorSpec(4)
+        ts.set(1, IntSpec.backed("h"))
+        ts.set(3, IntSpec.backed("w"))
+        self.assertIsNone(ts[0])
+        self.assertIsNotNone(ts[1])
+        self.assertIsNone(ts[2])
+        self.assertIsNotNone(ts[3])
+
+
+class TestTensorSpecEq(TestCase):
+    """__eq__ and __hash__."""
+
+    def test_eq(self):
+        a = TensorSpec(2).set(0, IntSpec.static(value=10))
+        b = TensorSpec(2).set(0, IntSpec.static(value=10))
+        self.assertEqual(a, b)
+
+    def test_neq_different_rank(self):
+        self.assertNotEqual(TensorSpec(2), TensorSpec(3))
+
+    def test_neq_different_specs(self):
+        a = TensorSpec(2).set(0, IntSpec.static(value=10))
+        b = TensorSpec(2).set(0, IntSpec.static(value=20))
+        self.assertNotEqual(a, b)
+
+
+class TestTensorSpecCompile(TestCase):
+    """torch.compile(dynamic_shapes=...) with TensorSpec."""
+
+    def test_tensorspec_backed_dim(self):
+        torch._dynamo.reset()
+        ts = TensorSpec(2).set(0, IntSpec.backed("batch"))
+        fn = torch.compile(
+            lambda x: x.sum(0),
+            backend="eager",
+            dynamic_shapes={"x": ts},
+        )
+        for n in [4, 8, 16]:
+            x = torch.randn(n, 3)
+            self.assertEqual(fn(x), x.sum(0))
+
+    def test_tensorspec_mixed_dims(self):
+        torch._dynamo.reset()
+        ts = TensorSpec(2).set(0, IntSpec.backed("batch")).set(1, IntSpec.static())
+        fn = torch.compile(
+            lambda x: x + 1,
+            backend="eager",
+            dynamic_shapes={"x": ts},
+        )
+        for n in [4, 8, 16]:
+            x = torch.randn(n, 3)
+            self.assertEqual(fn(x), x + 1)
+
+    def test_tensorspec_partial_spec(self):
+        torch._dynamo.reset()
+        ts = TensorSpec(2).set(0, IntSpec.backed("batch"))
+        fn = torch.compile(
+            lambda x: x.sum(0),
+            backend="eager",
+            dynamic_shapes={"x": ts},
+        )
+        for n in [4, 8]:
+            x = torch.randn(n, 3)
+            self.assertEqual(fn(x), x.sum(0))
+
+    @skipIfTorchDynamo("graph capture unreliable when dynamo traces the test")
+    def test_tensorspec_backed_graph_has_backed_symbol(self):
+        """BACKED TensorSpec dim appears as a backed SymInt in the final graph."""
+        torch._dynamo.reset()
+        backend = EagerAndRecordGraphs()
+        ts = TensorSpec(2).set(0, IntSpec.backed("batch"))
+        fn = torch.compile(
+            lambda x: x.sum(0),
+            backend=backend,
+            dynamic_shapes={"x": ts},
+        )
+        for n in [4, 8, 16, 32]:
+            fn(torch.randn(n, 3))
+        self.assertLessEqual(len(backend.graphs), 2)
+        shape = _tensor_placeholder_shape(backend.graphs[-1])
+        self.assertIsInstance(shape[0], torch.SymInt)
+        self.assertEqual(len(free_unbacked_symbols(shape[0])), 0)
 
 
 class TestIntSpecCompile(TestCase):
