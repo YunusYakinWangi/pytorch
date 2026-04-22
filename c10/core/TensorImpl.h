@@ -238,6 +238,11 @@ struct C10_API BackendMeta : intrusive_ptr_target {
   }
 };
 
+namespace impl {
+enum class TorchDispatchModeKey : int8_t;
+using PyObject_TorchDispatchMode = SafePyObjectT<TorchDispatchModeKey>;
+} // namespace impl
+
 // same as Python's FakeTensorMode
 // storing shape env and converter from Python, we'll use these later
 // to implement sym ints, real tensor conversion, etc
@@ -246,12 +251,15 @@ struct C10_API BackendMeta : intrusive_ptr_target {
 struct C10_API FakeTensorMode {
   std::shared_ptr<c10::SafePyObject> shape_env_;
   std::shared_ptr<c10::SafePyObject> fake_tensor_converter_;
+  std::shared_ptr<c10::impl::PyObject_TorchDispatchMode> python_fallback_mode_;
 
   FakeTensorMode(
       std::shared_ptr<c10::SafePyObject> shape_env,
-      std::shared_ptr<c10::SafePyObject> converter)
+      std::shared_ptr<c10::SafePyObject> converter,
+      std::shared_ptr<c10::impl::PyObject_TorchDispatchMode> fallback = nullptr)
       : shape_env_(std::move(shape_env)),
-        fake_tensor_converter_(std::move(converter)) {}
+        fake_tensor_converter_(std::move(converter)),
+        python_fallback_mode_(std::move(fallback)) {}
 };
 
 struct C10_API ExtraMeta {
