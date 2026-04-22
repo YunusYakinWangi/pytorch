@@ -471,7 +471,7 @@ class _FunctionLeaf(typing.NamedTuple):
     function.  Stores enough information to reconstruct the function from
     the extracted leaves during unflattening."""
 
-    stripped: _StrippedClosure | Callable[..., Any]
+    stripped: _StrippedClosure | _StrippedPartial | _PlainFunction
     closure_spec: TreeSpec
     n_extracted: int  # number of extracted leaves this function contributes
 
@@ -479,7 +479,7 @@ class _FunctionLeaf(typing.NamedTuple):
 class _StrippedClosure(typing.NamedTuple):
     """Data container holding the parts of a function needed for reconstruction.
 
-    Created by _extract_closure_pytree when closure tensors are lifted into
+    Created by _extract_callable_pytree when closure tensors are lifted into
     pytree leaves.  Unlike a FunctionType with None-filled cells, this is not
     callable — it is pure data stored in the pytree context.
     """
@@ -496,61 +496,49 @@ class _StrippedClosure(typing.NamedTuple):
     # _FunctionLeaf   → recursively processed function (not a valid pytree leaf).
     leaf_entries: tuple[_ExtractedLeaf | _FunctionLeaf, ...]
 
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _StrippedClosure):
+            return False
+        return self.code == other.code
 
-def _extract_closure_pytree(
-    fn, _seen: set[int] | None = None
-) -> tuple[
-    tuple[BaseArgumentTypes, ...], TreeSpec, _StrippedClosure | Callable[..., Any]
-]:
-    """Extract closure contents as a flattened sub-pytree.
+    def __hash__(self) -> int:
+        return hash(self.code)
 
-    Returns (extracted_leaves, closure_spec, fn_or_stripped) where:
-    - extracted_leaves: flattened non-function contents from the closure,
-      plus any tensors/scalars recursively extracted from nested function
-      closures
-    - closure_spec: TreeSpec describing how to reconstruct the closure contents
-    - fn_or_stripped: either the original fn (no extraction) or a
-      _StrippedClosure carrying the function parts needed for reconstruction
 
-    Functions found among the closure leaves are recursively processed: their
-    own closure tensors are extracted into the leaves list, and their skeleton
-    is stored in _StrippedClosure.leaf_entries as a _FunctionLeaf.  All other
-    values (tensors, scalars, None, etc.) remain as extracted leaves.
+class _StrippedPartial(typing.NamedTuple):
+    """Data container holding the parts of a functools.partial needed for reconstruction."""
 
-    If fn is not a plain function, has no closure, or has empty cells, returns
-    the original function unchanged with no closure leaves.
+    leaf_entries: tuple[_ExtractedLeaf | _FunctionLeaf, ...]
 
-    Skipped under Dynamo tracing (torch.compiler.is_compiling) because Dynamo
-    can't trace through closure cell introspection and handles freevars via its
-    own lifting mechanism.
-    """
-    if not inspect.isfunction(fn) or torch.compiler.is_compiling():
-        return (), _EMPTY_CLOSURE_SPEC, fn
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _StrippedPartial):
+            return False
+        return _leaf_entries_eq(self.leaf_entries, other.leaf_entries)
 
-    # Cycle detection for self-referencing closures.
-    if _seen is None:
-        _seen = set()
-    if id(fn) in _seen:
-        return (), _EMPTY_CLOSURE_SPEC, fn
-    _seen.add(id(fn))
+    def __hash__(self) -> int:
+        return _leaf_entries_hash(self.leaf_entries)
 
-    closure = fn.__closure__
-    if not closure:
-        return (), _EMPTY_CLOSURE_SPEC, fn
 
-    try:
-        contents = tuple(cell.cell_contents for cell in closure)
-    except ValueError:
-        # Empty cell (created but not yet assigned) — can't extract
-        return (), _EMPTY_CLOSURE_SPEC, fn
+class _PlainFunction(typing.NamedTuple):
+    fn: Callable[..., Any]
 
-    closure_leaves, closure_spec = tree_flatten(contents)
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _PlainFunction):
+            return False
+        return self.fn.__code__ == other.fn.__code__
 
+    def __hash__(self) -> int:
+        return hash(self.fn.__code__)
+
+
+def _extract_callable_leaves(
+    leaves: list[Any], _seen: set[int]
+) -> tuple[tuple[BaseArgumentTypes, ...], tuple[_ExtractedLeaf | _FunctionLeaf, ...]]:
     extracted: list[BaseArgumentTypes] = []
     leaf_entries: list[_ExtractedLeaf | _FunctionLeaf] = []
-    for leaf in closure_leaves:
-        if inspect.isfunction(leaf):
-            child_extracted, child_spec, child_stripped = _extract_closure_pytree(
+    for leaf in leaves:
+        if inspect.isfunction(leaf) or isinstance(leaf, functools.partial):
+            child_extracted, child_spec, child_stripped = _extract_callable_pytree(
                 leaf, _seen
             )
             extracted.extend(child_extracted)
@@ -560,6 +548,70 @@ def _extract_closure_pytree(
         else:
             extracted.append(leaf)
             leaf_entries.append(_EXTRACTED_LEAF)
+    return tuple(extracted), tuple(leaf_entries)
+
+
+def _extract_callable_pytree(
+    fn, _seen: set[int] | None = None
+) -> tuple[
+    tuple[BaseArgumentTypes, ...],
+    TreeSpec,
+    _StrippedClosure | _StrippedPartial | _PlainFunction | Callable[..., Any],
+]:
+    """Extract closure contents as a flattened sub-pytree.
+
+    Returns (extracted_leaves, closure_spec, fn_or_stripped) where:
+    - extracted_leaves: flattened non-function contents from the closure,
+      functools.partial payload, plus any tensors/scalars recursively extracted
+      from nested function closures
+    - closure_spec: TreeSpec describing how to reconstruct the closure contents
+    - fn_or_stripped: either the original fn (skipped extraction) or a
+      stripped callable carrying the parts needed for reconstruction
+
+    Functions found among the closure or partial leaves are recursively
+    processed: their own closure tensors are extracted into the leaves list,
+    and their skeleton is stored in the stripped metadata. All other values
+    (tensors, scalars, None, etc.) remain as extracted leaves.
+
+    If fn is not a plain function or functools.partial, returns the original
+    function unchanged with no closure leaves. Plain functions without a
+    closure are wrapped as _PlainFunction so structural equality/hash can use
+    their __code__.
+
+    Skipped under Dynamo tracing (torch.compiler.is_compiling) because Dynamo
+    can't trace through closure cell introspection and handles freevars via its
+    own lifting mechanism.
+    """
+    if torch.compiler.is_compiling() or not (
+        inspect.isfunction(fn) or isinstance(fn, functools.partial)
+    ):
+        return (), _EMPTY_CLOSURE_SPEC, fn
+
+    # Cycle detection for self-referencing closures.
+    if _seen is None:
+        _seen = set()
+    if id(fn) in _seen:
+        return (), _EMPTY_CLOSURE_SPEC, _PlainFunction(fn)
+    _seen.add(id(fn))
+
+    if isinstance(fn, functools.partial):
+        partial_leaves, partial_spec = tree_flatten((fn.func, fn.args, fn.keywords))
+        extracted, leaf_entries = _extract_callable_leaves(partial_leaves, _seen)
+        return tuple(extracted), partial_spec, _StrippedPartial(tuple(leaf_entries))
+
+    closure = fn.__closure__
+    if not closure:
+        return (), _EMPTY_CLOSURE_SPEC, _PlainFunction(fn)
+
+    try:
+        contents = tuple(cell.cell_contents for cell in closure)
+    except ValueError:
+        # Empty cell (created but not yet assigned) — can't extract
+        return (), _EMPTY_CLOSURE_SPEC, _PlainFunction(fn)
+
+    closure_leaves, closure_spec = tree_flatten(contents)
+
+    extracted, leaf_entries = _extract_callable_leaves(closure_leaves, _seen)
 
     stripped = _StrippedClosure(
         code=fn.__code__,
@@ -576,8 +628,10 @@ def _extract_closure_pytree(
 
 
 def _reconstruct_closure_fn(stripped, extracted_leaves, closure_spec):
-    """Rebuild a function from a _StrippedClosure and flattened extracted leaves."""
-    if not isinstance(stripped, _StrippedClosure):
+    """Rebuild a stripped callable from flattened extracted leaves."""
+    if isinstance(stripped, _PlainFunction):
+        return stripped.fn
+    if not isinstance(stripped, (_StrippedClosure, _StrippedPartial)):
         return stripped
 
     all_leaves: list[BaseArgumentTypes | Callable[..., Any]] = []
@@ -595,6 +649,10 @@ def _reconstruct_closure_fn(stripped, extracted_leaves, closure_spec):
             # _EXTRACTED_LEAF — take from extracted leaves
             all_leaves.append(extracted_leaves[idx])
             idx += 1
+
+    if isinstance(stripped, _StrippedPartial):
+        fn, args, keywords = tree_unflatten(all_leaves, closure_spec)
+        return functools.partial(fn, *args, **keywords)
 
     contents = tree_unflatten(all_leaves, closure_spec)
     new_cells = tuple(types.CellType(v) for v in contents)
@@ -615,20 +673,62 @@ def _reconstruct_closure_fn(stripped, extracted_leaves, closure_spec):
     return restored
 
 
+def _leaf_entries_eq(
+    a: tuple[_ExtractedLeaf | _FunctionLeaf, ...],
+    b: tuple[_ExtractedLeaf | _FunctionLeaf, ...],
+) -> bool:
+    if len(a) != len(b):
+        return False
+    for lhs, rhs in zip(a, b):
+        if type(lhs) is not type(rhs):
+            return False
+        if not isinstance(lhs, _FunctionLeaf):
+            continue
+        if not isinstance(rhs, _FunctionLeaf):
+            raise AssertionError("expected matching _FunctionLeaf entries")
+        if lhs.closure_spec != rhs.closure_spec or lhs.n_extracted != rhs.n_extracted:
+            return False
+        if lhs.stripped != rhs.stripped:
+            return False
+    return True
+
+
+def _stripped_callable_hash(
+    stripped: _StrippedClosure | _StrippedPartial | _PlainFunction,
+) -> int:
+    return hash(stripped)
+
+
+def _leaf_entries_hash(entries: tuple[_ExtractedLeaf | _FunctionLeaf, ...]) -> int:
+    return hash(
+        tuple(
+            (
+                type(entry),
+                entry.closure_spec,
+                entry.n_extracted,
+                _stripped_callable_hash(entry.stripped),
+            )
+            if isinstance(entry, _FunctionLeaf)
+            else type(entry)
+            for entry in entries
+        )
+    )
+
+
 class _MaskModWrapper:
-    """Wraps a mask_mod or _StrippedClosure with value-based equality.
+    """Wraps a mask_mod or stripped callable metadata with value-based equality.
 
     BlockMask stores an arbitrary callable (mask_mod) in its pytree context.
     The default __eq__ for functions uses identity comparison, which is too
     strict when the same closure is recreated (e.g., defined inside forward()).
 
-    When closure tensors have been extracted (by _extract_closure_pytree), fn
-    is a _StrippedClosure (pure data, not callable).  Equality compares the
-    code objects + closure_spec — no tensor dispatch is triggered.
+    When callable state has been extracted (by _extract_callable_pytree), fn is
+    stripped metadata (pure data, not callable). Equality compares the stripped
+    callable structure + closure_spec without triggering tensor dispatch.
 
     When extraction is skipped (e.g., under Dynamo), fn is the original
-    callable and equality compares code objects + closure contents (for plain
-    functions) or delegates to __eq__ (for callable objects).
+    callable and equality compares code objects for plain functions or
+    delegates to __eq__ for callable objects.
     """
 
     __slots__ = ("fn", "closure_spec")
@@ -638,9 +738,9 @@ class _MaskModWrapper:
         self.closure_spec = closure_spec
 
     def __call__(self, b: Tensor, h: Tensor, q_idx: Tensor, kv_idx: Tensor) -> Tensor:
-        if isinstance(self.fn, _StrippedClosure):
+        if isinstance(self.fn, (_StrippedClosure, _StrippedPartial, _PlainFunction)):
             raise RuntimeError(
-                "_MaskModWrapper with _StrippedClosure is not callable — "
+                "_MaskModWrapper with stripped callable is not callable — "
                 "use _reconstruct_closure_fn to rebuild the function first"
             )
         return self.fn(b, h, q_idx, kv_idx)
@@ -650,27 +750,23 @@ class _MaskModWrapper:
             return False
         if self.fn is other.fn and self.closure_spec is other.closure_spec:
             return True
-        # Extracted case: _StrippedClosure — compare code + closure_spec
-        if isinstance(self.fn, _StrippedClosure) and isinstance(
-            other.fn, _StrippedClosure
-        ):
-            return (
-                self.fn.code == other.fn.code
-                and self.closure_spec == other.closure_spec
-            )
-        # Non-extracted plain functions: compare code + closure contents
+        if isinstance(
+            self.fn, (_StrippedClosure, _StrippedPartial, _PlainFunction)
+        ) and isinstance(other.fn, (_StrippedClosure, _StrippedPartial, _PlainFunction)):
+            return self.fn == other.fn and self.closure_spec == other.closure_spec
+        # Non-extracted plain functions: compare code objects
         if inspect.isfunction(self.fn) and inspect.isfunction(other.fn):
             return self.fn.__code__ == other.fn.__code__
         # Callable objects: delegate to their __eq__
-        if not isinstance(self.fn, _StrippedClosure) and not isinstance(
-            other.fn, _StrippedClosure
-        ):
+        if not isinstance(
+            self.fn, (_StrippedClosure, _StrippedPartial, _PlainFunction)
+        ) and not isinstance(other.fn, (_StrippedClosure, _StrippedPartial, _PlainFunction)):
             return self.fn == other.fn
         return False
 
     def __hash__(self) -> int:
-        if isinstance(self.fn, _StrippedClosure):
-            return hash(self.fn.code)
+        if isinstance(self.fn, (_StrippedClosure, _StrippedPartial, _PlainFunction)):
+            return hash((self.fn, self.closure_spec))
         if inspect.isfunction(self.fn):
             return hash(self.fn.__code__)
         return hash(self.fn)
@@ -1233,11 +1329,11 @@ class BlockMask:
         """Flatten BlockMask into a list of tensors and context.
 
         Closure tensors from mask_mod are extracted into the leaves via
-        _extract_closure_pytree so they are visible to the tracing
+        _extract_callable_pytree so they are visible to the tracing
         infrastructure (instead of being hidden in the pytree context).
         """
         tensors = tuple(getattr(self, attr) for attr in self._TENSOR_ATTRS)
-        closure_leaves, closure_spec, stripped = _extract_closure_pytree(self.mask_mod)
+        closure_leaves, closure_spec, stripped = _extract_callable_pytree(self.mask_mod)
         all_leaves = tensors + closure_leaves
         context = tuple(
             self._wrap_context_value(attr, getattr(self, attr))
@@ -1274,13 +1370,13 @@ class BlockMask:
         """Flatten BlockMask with keys for better tracing.
 
         Closure tensors from mask_mod are extracted into the leaves via
-        _extract_closure_pytree so they are visible to the tracing
+        _extract_callable_pytree so they are visible to the tracing
         infrastructure (instead of being hidden in the pytree context).
         """
         tensors = tuple(
             (GetAttrKey(attr), getattr(self, attr)) for attr in self._TENSOR_ATTRS
         )
-        closure_leaves, closure_spec, stripped = _extract_closure_pytree(self.mask_mod)
+        closure_leaves, closure_spec, stripped = _extract_callable_pytree(self.mask_mod)
         closure_with_keys = tuple(
             (GetAttrKey(f"_closure_{i}"), leaf) for i, leaf in enumerate(closure_leaves)
         )
