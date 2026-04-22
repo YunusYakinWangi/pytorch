@@ -36,10 +36,11 @@ https://dev-discuss.pytorch.org/t/backed-to-unbacked-from-guardable-to-guardless
 
 import enum
 from collections.abc import Iterator
+from contextvars import ContextVar
 from typing import Any
 
 
-__all__ = ["IntSpecType", "IntSpec", "TensorSpec"]
+__all__ = ["IntSpecType", "IntSpec", "TensorSpec", "ModelSpec"]
 
 
 class IntSpecType(enum.Enum):
@@ -343,75 +344,167 @@ class TensorSpec:
         return hash((self._rank, tuple(self._specs)))
 
 
-# TODO: temporary scaffolding. laithsakka flagged (PR review) that translating
-# specs into tensor properties via mark_*:
-#   - does not work for scalar int inputs (a primary IntSpec use case),
-#   - silently installs guards that haven't been decided on.
-# Replace with proper plumbing through the compile context in the follow-up
-# integration PR, then delete _apply_intspec_to_tensor and
-# _apply_dynamic_shapes.
-def _apply_intspec_to_tensor(tensor: Any, shape_spec: Any) -> None:
-    """Apply per-dimension IntSpec entries to a tensor via ``mark_*``."""
-    from torch._dynamo.decorators import mark_static, mark_unbacked, maybe_mark_dynamic
+class ModelSpec:
+    """Top-level dynamic-shape specification for a whole compiled model.
 
-    if isinstance(shape_spec, TensorSpec):
-        items: Any = enumerate(shape_spec)
-    elif isinstance(shape_spec, dict):
-        items = shape_spec.items()
-    elif isinstance(shape_spec, (list, tuple)):
-        items = enumerate(shape_spec)
-    else:
-        return
+    A dict-like container mapping argument names (as they appear in the
+    compiled function's signature) to per-argument specs. Per-argument spec
+    can be:
 
-    for idx, spec in items:
-        if spec is None:
-            continue
-        if not isinstance(spec, IntSpec):
-            raise TypeError(
-                f"Expected IntSpec or None in dynamic_shapes, got {type(spec).__name__}"
-            )
-        if spec.type is IntSpecType.STATIC:
-            mark_static(tensor, idx)
-        elif spec.type is IntSpecType.BACKED:
-            maybe_mark_dynamic(tensor, idx)
-        elif spec.type is IntSpecType.UNBACKED:
-            mark_unbacked(tensor, idx)
+    - :class:`TensorSpec` — per-dimension spec for a tensor argument.
+    - :class:`IntSpec` — spec for a scalar integer argument.
+    - ``dict[int, IntSpec | None]`` — sparse per-dim spec.
+    - ``list[IntSpec | None]`` / ``tuple[IntSpec | None, ...]`` — positional
+      per-dim spec.
+    - ``None`` — inherit the compile-context default for that argument.
+
+    Example::
+
+        ModelSpec({
+            "x": TensorSpec(2).set(0, IntSpec.backed("batch")),
+            "batch_size": IntSpec.backed("batch"),
+        })
+    """
+
+    def __init__(self, specs: dict[str, Any] | None = None) -> None:
+        self._specs: dict[str, Any] = dict(specs) if specs else {}
+
+    def set(self, name: str, spec: Any) -> "ModelSpec":
+        """Assign *spec* to the argument *name*. Returns ``self`` for chaining."""
+        self._specs[name] = spec
+        return self
+
+    def __getitem__(self, name: str) -> Any:
+        return self._specs[name]
+
+    def __setitem__(self, name: str, spec: Any) -> None:
+        self._specs[name] = spec
+
+    def __contains__(self, name: object) -> bool:
+        return name in self._specs
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._specs)
+
+    def __len__(self) -> int:
+        return len(self._specs)
+
+    def items(self) -> Any:
+        return self._specs.items()
+
+    def get(self, name: str, default: Any = None) -> Any:
+        return self._specs.get(name, default)
+
+    def __repr__(self) -> str:
+        return f"ModelSpec({self._specs!r})"
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, ModelSpec):
+            return NotImplemented
+        return self._specs == other._specs
+
+
+# ContextVar carrying the dynamic_shapes spec for the currently-running
+# ``torch.compile``'d function. Set by :func:`_apply_dynamic_shapes` on each
+# call; read by :func:`get_active_spec_for_dim` from inside the Dynamo
+# variable builder during input wrapping. No tensor monkey-patching; no
+# pre-installed guards — the spec directly selects ``DimDynamic`` in
+# ``_automatic_dynamic``.
+_active_dynamic_shapes: ContextVar[dict[str, Any] | None] = ContextVar(
+    "_dynamo_active_dynamic_shapes", default=None
+)
+
+
+def _resolve_dim_spec(arg_spec: Any, dim: int) -> "IntSpec | None":
+    """Extract the :class:`IntSpec` for *dim* from a per-argument spec.
+
+    Supports the four forms accepted in ``dynamic_shapes``: ``TensorSpec``,
+    ``dict[int, IntSpec]``, ``list``/``tuple`` of IntSpec-or-None, or an
+    :class:`IntSpec` directly (for scalar-int arguments; ``dim`` ignored).
+    """
+    if isinstance(arg_spec, IntSpec):
+        return arg_spec
+    if isinstance(arg_spec, TensorSpec):
+        return arg_spec[dim] if 0 <= dim < len(arg_spec) else None
+    if isinstance(arg_spec, dict):
+        return arg_spec.get(dim)
+    if isinstance(arg_spec, (list, tuple)):
+        return arg_spec[dim] if 0 <= dim < len(arg_spec) else None
+    return None
+
+
+def get_active_spec_for_arg(arg_name: str) -> Any:
+    """Return the spec associated with *arg_name* in the active
+    ``dynamic_shapes``, or ``None`` if no spec is active or the arg is not
+    listed."""
+    spec_dict = _active_dynamic_shapes.get()
+    if spec_dict is None:
+        return None
+    if isinstance(spec_dict, ModelSpec):
+        return spec_dict.get(arg_name)
+    return spec_dict.get(arg_name)
+
+
+def get_active_spec_for_dim(arg_name: str, dim: int) -> "IntSpec | None":
+    """Return the :class:`IntSpec` for *dim* of argument *arg_name* in the
+    active ``dynamic_shapes``, or ``None``."""
+    arg_spec = get_active_spec_for_arg(arg_name)
+    if arg_spec is None:
+        return None
+    return _resolve_dim_spec(arg_spec, dim)
 
 
 def _apply_dynamic_shapes(
-    compiled: Any, original: Any, dynamic_shapes: dict[str, Any]
+    compiled: Any, original: Any, dynamic_shapes: Any
 ) -> Any:
-    """Wrap a compiled callable to apply ``dynamic_shapes`` IntSpec on each call.
+    """Wrap a compiled callable so that ``dynamic_shapes`` is active for the
+    duration of each call.
 
-    The wrapper is decorated with :func:`torch._dynamo.disable` so that dynamo
-    does not attempt to trace the tensor-marking logic. The inner
-    ``compiled()`` call re-enters dynamo normally.
+    The wrapper sets a :class:`contextvars.ContextVar` around the inner
+    ``compiled()`` invocation; the Dynamo variable builder reads it and
+    applies per-dim dynamism directly via ``DimDynamic``. No tensor
+    attributes are mutated and no ``mark_*`` calls are issued.
     """
     import functools
-    import inspect
 
     import torch
-    import torch._dynamo
 
-    sig = inspect.signature(
-        original.forward if isinstance(original, torch.nn.Module) else original
-    )
-
-    @torch._dynamo.disable
-    @functools.wraps(
-        compiled if not isinstance(compiled, torch.nn.Module) else compiled.forward
-    )
-    def wrapper(*args: Any, **kwargs: Any) -> Any:
-        bound = sig.bind(*args, **kwargs)
-        bound.apply_defaults()
-        for name, shape_spec in dynamic_shapes.items():
-            if name in bound.arguments:
-                arg = bound.arguments[name]
-                if isinstance(arg, torch.Tensor):
-                    _apply_intspec_to_tensor(arg, shape_spec)
-        return compiled(*bound.args, **bound.kwargs)
+    normalized: dict[str, Any]
+    if isinstance(dynamic_shapes, ModelSpec):
+        normalized = dict(dynamic_shapes.items())
+    elif isinstance(dynamic_shapes, dict):
+        normalized = dict(dynamic_shapes)
+    else:
+        raise TypeError(
+            f"dynamic_shapes must be a dict or ModelSpec, got "
+            f"{type(dynamic_shapes).__name__}"
+        )
 
     if isinstance(compiled, torch.nn.Module):
-        compiled.forward = wrapper  # type: ignore[method-assign]
+        # Capture the dynamo-wrapped forward *before* overwriting, so the
+        # wrapper calls through to tracing rather than recursing into its
+        # own slot (`compiled(*args, **kwargs)` dispatches via
+        # `nn.Module.__call__` → `self.forward`, which is what we're
+        # about to replace).
+        original_forward = compiled.forward
+
+        @functools.wraps(original_forward)
+        def module_wrapper(*args: Any, **kwargs: Any) -> Any:
+            token = _active_dynamic_shapes.set(normalized)
+            try:
+                return original_forward(*args, **kwargs)
+            finally:
+                _active_dynamic_shapes.reset(token)
+
+        compiled.forward = module_wrapper  # type: ignore[method-assign]
         return compiled
+
+    @functools.wraps(compiled)
+    def wrapper(*args: Any, **kwargs: Any) -> Any:
+        token = _active_dynamic_shapes.set(normalized)
+        try:
+            return compiled(*args, **kwargs)
+        finally:
+            _active_dynamic_shapes.reset(token)
+
     return wrapper
