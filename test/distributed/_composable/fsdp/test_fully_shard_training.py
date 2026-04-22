@@ -766,12 +766,42 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
         return min(min_world_size, torch.get_device_module(device_type).device_count())
 
     @staticmethod
-    def _materialize_grad(grad: torch.Tensor) -> torch.Tensor:
+    def _snapshot_grad(grad: torch.Tensor) -> torch.Tensor:
         # Used for per-chunk snapshots where ``param.grad`` accumulates across
         # chunks: each snapshot needs an independent copy.
         if isinstance(grad, DTensor):
             return grad.full_tensor()  # full_tensor() already returns a new tensor
         return grad.clone()
+
+    @staticmethod
+    def _full(t: torch.Tensor | None) -> torch.Tensor | None:
+        if t is None:
+            return None
+        return t.full_tensor() if isinstance(t, DTensor) else t
+
+    def _assert_grad_parity(
+        self, model_a: nn.Module, model_b: nn.Module, msg_ctx: str
+    ) -> None:
+        for (a_name, a_p), (_, b_p) in zip(
+            model_a.named_parameters(), model_b.named_parameters()
+        ):
+            self.assertEqual(
+                self._full(a_p.grad),
+                self._full(b_p.grad),
+                msg=f"Grad mismatch for {a_name} ({msg_ctx})",
+            )
+
+    def _assert_param_parity(
+        self, model_a: nn.Module, model_b: nn.Module, msg_ctx: str
+    ) -> None:
+        for (a_name, a_p), (_, b_p) in zip(
+            model_a.named_parameters(), model_b.named_parameters()
+        ):
+            self.assertEqual(
+                self._full(a_p),
+                self._full(b_p),
+                msg=f"Param mismatch for {a_name} ({msg_ctx})",
+            )
 
     @skip_if_lt_x_gpu(2)
     @compiled_fsdp_test(compile_compute_on_module=Transformer)
@@ -888,41 +918,35 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
 
     @skip_if_lt_x_gpu(2, allow_cpu=True)
     def test_partial_group_forward_then_standalone(self):
-        """
-        Tests the chunked-loss pattern with grouped FSDP modules: the model
-        forward skips one module in the group, then that module is called
-        standalone in a chunk loop with per-chunk backward. The group
-        post-hook never fires, so ``_force_complete_incomplete_states`` is
-        responsible for completing post-forward from the root.
-
-        Subtest axes cover:
-
-        - ``reshard_after_forward``: bool/int variants
-        - ``weight_tying``: shared embed/head weight forces the same FSDP
-          group (mirrors torchtitan's ``fully_shard([tok_embeddings, output])``)
-        - ``mp_policy_mode``: no mp_policy (strict parity against plain
-          reference), inner+root ``output_dtype`` bf16, or ``output_dtype``
-          on the inner group only (root has none — exercises that
-          force-complete applies the inner cast)
-        - ``ac``: activation checkpointing on the body module
-          (exercises AC recomputation in PRE_BACKWARD entering
-          FSDP's pre-forward again)
-
-        When ``weight_tying`` is off, the test also compares grouped
-        ``fully_shard([norm, head])`` against ungrouped
-        ``fully_shard(norm) + fully_shard(head)`` for bit-exact parity
-        across every mp_policy mode — the two configurations exercise
-        the same compute path and only differ in hook timing (partial
-        per-module cast vs. per-module post_forward).
+        """Chunked-loss pattern: model forward skips one module in a grouped
+        ``fully_shard([norm, head])``, then that module is called standalone
+        per-chunk. Validates ``_force_complete_incomplete_states`` +
+        ``mp_policy`` casts across resharding / weight-tying / AC axes.
         """
         self.run_subtests(
             {
-                "reshard_after_forward": [True, False, 1],
+                "reshard_after_forward": [True, False],
                 "weight_tying": [False, True],
                 "mp_policy_mode": ["none", "bf16_everywhere", "bf16_inner_only"],
-                "ac": [False, True],
+                "ac": [False],
             },
             self._test_partial_group_forward_then_standalone,
+        )
+        # Targeted coverage for axes dropped above; combined with the main
+        # sweep these preserve AC + partial-forward and reshard-to-smaller-
+        # mesh + partial-forward interactions without paying the full
+        # cartesian product.
+        self._test_partial_group_forward_then_standalone(
+            reshard_after_forward=True,
+            weight_tying=False,
+            mp_policy_mode="none",
+            ac=True,
+        )
+        self._test_partial_group_forward_then_standalone(
+            reshard_after_forward=1,
+            weight_tying=False,
+            mp_policy_mode="none",
+            ac=False,
         )
 
     def _test_partial_group_forward_then_standalone(
@@ -982,13 +1006,12 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
             for chunk in chunks:
                 chunk = chunk.contiguous().detach().requires_grad_(True)
                 out = model.head(chunk)
+                self.assertEqual(out.dtype, h_dtype)
                 loss = out.sum()
                 total_loss += loss.detach()
                 loss.backward()
                 h_grads.append(chunk.grad.detach())
-                per_chunk_head_grads.append(
-                    self._materialize_grad(model.head.weight.grad)
-                )
+                per_chunk_head_grads.append(self._snapshot_grad(model.head.weight.grad))
             # Each chunk must contribute a non-zero delta — catches the bug
             # where chunks 2+ are silently dropped due to unregistered
             # post_backward hooks.
@@ -1075,40 +1098,14 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
                 ungrouped_loss, ungrouped_head_grad_chunks = _run_chunked(
                     ungrouped_model, expected_h_dtype
                 )
-                self.assertEqual(
-                    ungrouped_loss,
-                    fsdp_loss,
-                    msg=f"Loss mismatch grouped-vs-ungrouped at iter {iter_idx}",
-                )
+                ctx = f"grouped-vs-ungrouped iter {iter_idx}"
+                self.assertEqual(ungrouped_loss, fsdp_loss, msg=f"Loss {ctx}")
                 self.assertEqual(
                     ungrouped_head_grad_chunks,
                     fsdp_head_grad_chunks,
-                    msg=(
-                        "head.weight.grad mismatch grouped-vs-ungrouped at iter "
-                        f"{iter_idx}"
-                    ),
+                    msg=f"head.weight.grad {ctx}",
                 )
-                for (ug_name, ug_param), (_, fsdp_param) in zip(
-                    ungrouped_model.named_parameters(), model.named_parameters()
-                ):
-                    ug_grad = (
-                        ug_param.grad.full_tensor()
-                        if isinstance(ug_param.grad, DTensor)
-                        else ug_param.grad
-                    )
-                    fsdp_grad = (
-                        fsdp_param.grad.full_tensor()
-                        if isinstance(fsdp_param.grad, DTensor)
-                        else fsdp_param.grad
-                    )
-                    self.assertEqual(
-                        fsdp_grad,
-                        ug_grad,
-                        msg=(
-                            "Grad mismatch grouped-vs-ungrouped for "
-                            f"{ug_name} at iter {iter_idx}"
-                        ),
-                    )
+                self._assert_grad_parity(model, ungrouped_model, ctx)
 
             if do_parity:
                 ref_loss, ref_head_grad_chunks = _run_chunked(ref_model, torch.float32)
@@ -1119,29 +1116,16 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
                 dist.all_reduce(ref_head_grad_chunks)
                 ref_head_grad_chunks.div_(self.world_size)
 
-                # Compare head.weight.grad after chunks, before h.backward, so
-                # a failure here isolates chunk accumulation from h.backward.
+                ctx = f"iter {iter_idx}"
+                # head.weight.grad compared before h.backward to isolate
+                # chunk-accumulation failures from h.backward propagation.
                 self.assertEqual(
                     fsdp_head_grad_chunks,
                     ref_head_grad_chunks,
-                    msg=f"head.weight.grad mismatch at iter {iter_idx}",
+                    msg=f"head.weight.grad {ctx}",
                 )
-                self.assertEqual(
-                    ref_loss, fsdp_loss, msg=f"Loss mismatch at iter {iter_idx}"
-                )
-                for (ref_name, ref_param), (_, fsdp_param) in zip(
-                    ref_model.named_parameters(), model.named_parameters()
-                ):
-                    fsdp_grad = (
-                        fsdp_param.grad.full_tensor()
-                        if isinstance(fsdp_param.grad, DTensor)
-                        else fsdp_param.grad
-                    )
-                    self.assertEqual(
-                        fsdp_grad,
-                        ref_param.grad,
-                        msg=f"Gradient mismatch for {ref_name} at iter {iter_idx}",
-                    )
+                self.assertEqual(ref_loss, fsdp_loss, msg=f"Loss {ctx}")
+                self._assert_grad_parity(model, ref_model, ctx)
                 ref_optim.step()
                 ref_optim.zero_grad(set_to_none=(iter_idx % 2 == 0))
 
@@ -1152,56 +1136,18 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
                 ungrouped_optim.zero_grad(set_to_none=(iter_idx % 2 == 0))
 
             if do_parity:
-                for (ref_name, ref_param), (_, fsdp_param) in zip(
-                    ref_model.named_parameters(), model.named_parameters()
-                ):
-                    fsdp_full = (
-                        fsdp_param.full_tensor()
-                        if isinstance(fsdp_param, DTensor)
-                        else fsdp_param
-                    )
-                    self.assertEqual(
-                        fsdp_full,
-                        ref_param,
-                        msg=f"Param mismatch for {ref_name} at iter {iter_idx}",
-                    )
+                self._assert_param_parity(model, ref_model, f"iter {iter_idx}")
 
             if do_grouping_parity:
-                for (ug_name, ug_param), (_, fsdp_param) in zip(
-                    ungrouped_model.named_parameters(), model.named_parameters()
-                ):
-                    ug_full = (
-                        ug_param.full_tensor()
-                        if isinstance(ug_param, DTensor)
-                        else ug_param
-                    )
-                    fsdp_full = (
-                        fsdp_param.full_tensor()
-                        if isinstance(fsdp_param, DTensor)
-                        else fsdp_param
-                    )
-                    self.assertEqual(
-                        fsdp_full,
-                        ug_full,
-                        msg=(
-                            "Param mismatch grouped-vs-ungrouped for "
-                            f"{ug_name} at iter {iter_idx}"
-                        ),
-                    )
+                self._assert_param_parity(
+                    model, ungrouped_model, f"grouped-vs-ungrouped iter {iter_idx}"
+                )
 
     @skip_if_lt_x_gpu(2)
     @compiled_fsdp_test(compile_compute_on_module=ChunkedHeadModel)
     @xfailIf(TEST_XPU)  # https://github.com/intel/torch-xpu-ops/issues/1661
     def test_partial_group_forward_then_standalone_compiled(self):
-        """
-        Compiled test for the chunked-loss partial-group-forward path,
-        covering mp_policy variants that the eager variant
-        ``test_partial_group_forward_then_standalone`` exercises. Dynamo
-        is kept out of the FSDP hook region by ``@_dynamo_disable``; this
-        sweep validates that the mp_policy cast paths (which fire inside
-        ``_force_complete_incomplete_states`` for the inner group) still
-        compile and produce finite grads in the compiled case.
-        """
+        """Compile coverage for the chunked-loss partial-group-forward path."""
         self.run_subtests(
             {
                 "mp_policy_mode": ["none", "bf16_everywhere", "bf16_inner_only"],
@@ -1216,17 +1162,9 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
 
     @skip_if_lt_x_gpu(2, allow_cpu=True)
     def test_grouped_module_cast_forward_inputs(self):
-        """
-        Tests ``cast_forward_inputs`` applies to every module in a
-        ``fully_shard([a, b, ...])`` group, not just the first module to
-        run. Exercises the fix that makes the group pre-hook fire per
-        module so state-level ``_pre_forward`` (which performs the cast)
-        runs for non-first modules too.
-
-        Trigger: an explicit fp32 intermediate between ``a`` and ``b``
-        forces a dtype mismatch if ``b``'s inputs are not cast to
-        ``param_dtype``. Without the fix, ``b``'s linear would error with
-        an input/weight dtype mismatch.
+        """``cast_forward_inputs`` applies to every module in a grouped
+        ``fully_shard([a, b])``. Trigger: fp32 intermediate between ``a``
+        and ``b`` would raise a dtype mismatch without the cast on ``b``.
         """
         self.run_subtests(
             {
@@ -1285,12 +1223,8 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
 
     @skip_if_lt_x_gpu(2, allow_cpu=True)
     def test_partial_group_forward_grad_accum_chunked(self):
-        """
-        Tests the chunked-loss pattern combined with gradient accumulation
-        via ``set_is_last_backward(False)`` / ``set_requires_gradient_sync``
-        across micro-batches. Validates that grads accumulate correctly
-        across micro-batches without over-reducing.
-        """
+        """Chunked-loss + grad accumulation across micro-batches: grads
+        accumulate correctly without over-reducing."""
         self.run_subtests(
             {
                 "reshard_after_forward": [True, False],
@@ -1376,8 +1310,8 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
         ):
             self.assertIsNotNone(ref_param.grad, f"ref grad None for {ref_name}")
             self.assertIsNotNone(fsdp_param.grad, f"fsdp grad None for {ref_name}")
-            ref_full = self._materialize_grad(ref_param.grad)
-            fsdp_full = self._materialize_grad(fsdp_param.grad)
+            ref_full = self._snapshot_grad(ref_param.grad)
+            fsdp_full = self._snapshot_grad(fsdp_param.grad)
             self.assertTrue(
                 torch.isfinite(fsdp_full).all().item(),
                 f"non-finite grad for {ref_name}",
@@ -1389,77 +1323,12 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
             )
 
     @skip_if_lt_x_gpu(2, allow_cpu=True)
-    def test_partial_group_standalone_output_dtype(self):
-        """
-        Tests that ``mp_policy.output_dtype`` applies to standalone
-        per-chunk calls on a grouped FSDP module. In chunked loss with
-        ``fully_shard([norm, head])`` and inner ``output_dtype=bf16``,
-        the user calls ``model.head(chunk)`` per chunk and expects each
-        output in bf16 — matching the cast applied to the model forward
-        output via ``_force_complete_incomplete_states``.
-        """
-        dim, vocab_size = 32, 128
-
-        class Model(nn.Module):
-            def __init__(self) -> None:
-                super().__init__()
-                self.embed = nn.Embedding(vocab_size, dim)
-                self.norm = nn.RMSNorm(dim)
-                self.head = nn.Linear(dim, vocab_size, bias=False)
-
-            def forward(
-                self, tokens: torch.Tensor, *, skip_head: bool = False
-            ) -> torch.Tensor:
-                h = self.norm(self.embed(tokens))
-                if skip_head:
-                    return h
-                return self.head(h)
-
-        torch.manual_seed(42)
-        model = Model().to(device_type)
-        with torch.no_grad():
-            for param in model.parameters():
-                dist.broadcast(param, src=0)
-
-        inner_mp = MixedPrecisionPolicy(
-            param_dtype=torch.float32, output_dtype=torch.bfloat16
-        )
-        fully_shard(model.embed, mp_policy=inner_mp)
-        fully_shard([model.norm, model.head], mp_policy=inner_mp)
-        fully_shard(model, mp_policy=inner_mp)
-
-        tokens = torch.randint(0, vocab_size, (2, 16), device=device_type.type)
-
-        h = model(tokens, skip_head=True)
-        self.assertEqual(h.dtype, torch.bfloat16)
-
-        chunk = h.detach().to(torch.float32).contiguous().requires_grad_(True)
-        out = model.head(chunk)
-        self.assertEqual(out.dtype, torch.bfloat16)
-
-    @skip_if_lt_x_gpu(2, allow_cpu=True)
     def test_partial_group_reshard_toggle(self):
-        """
-        Tests the reshard-flag toggle pattern used by torchtitan's
-        ``ChunkedCELoss``. Before the chunk loop the user disables
-        ``reshard_after_forward`` and ``reshard_after_backward`` on the
-        head so the weight stays unsharded across chunks (one all-gather
-        instead of N). After the loop both flags are restored and
-        ``head.reshard()`` is called explicitly to shard the group back.
-
-        This exercises paths not covered by
-        ``test_partial_group_forward_then_standalone``:
-
-        1. ``_force_complete_incomplete_states`` runs with
-           ``reshard_after_forward=False`` — its reshard step is a no-op,
-           so the group stays unsharded going into the chunk loop.
-        2. Per-chunk ``post_backward`` runs with
-           ``reshard_after_backward=False`` — reshard after backward is
-           also skipped; grads still reduce-scatter.
-        3. Explicit ``head.reshard()`` after the loop reshards the whole
-           ``[norm, head]`` group (not just head). If it fails to reshard,
-           the next iteration's pre_forward sees stale unsharded params
-           and subsequent all-gather accounting/prefetching breaks.
+        """Reshard-flag toggle pattern used by torchtitan's ``ChunkedCELoss``:
+        disable ``reshard_after_forward/backward`` for the chunk loop, then
+        restore + call ``head.reshard()`` explicitly. Exercises force-complete
+        with reshard-off, per-chunk post_backward with reshard-off, and
+        explicit group reshard after the loop.
         """
         self.run_subtests(
             {
@@ -1500,7 +1369,7 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
 
         tokens = torch.randint(0, vocab_size, (2, 16), device=device_type.type)
         param_group = model.head._get_fsdp_state()._fsdp_param_group
-        assert param_group is not None
+        self.assertIsNotNone(param_group)
 
         for iter_idx in range(5):
             # Partial-group forward: model runs norm, skips head.
@@ -1559,23 +1428,10 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
 
     @skip_if_lt_x_gpu(2, allow_cpu=True)
     def test_reset_iter_state_after_exception(self):
-        """
-        Tests ``FSDPModule.reset_iter_state`` after an exception aborts
-        forward or backward mid-flight. Covers three failure modes:
-
-        - ``mid_forward``: full forward path raises after the inner group
-          has been unsharded but before the root post-forward runs.
-        - ``mid_partial_forward``: partial-forward path (``skip_head=True``)
-          raises; exercises the case where the inner group claimed
-          ``iter_forward_root`` and populated ``_modules_to_run_forward``.
-        - ``mid_backward``: forward succeeds, backward raises through a
-          grad hook; comm-ctx holds a pending ``reduce_scatter_state``.
-
-        After each failure ``reset_iter_state`` is called and the test
-        asserts per-iteration trackers are clear, params are sharded,
-        and training states are IDLE. A clean forward-backward is then
-        run to confirm the module is actually usable, not just
-        superficially reset.
+        """``FSDPModule.reset_iter_state`` after a mid-forward, mid-partial-
+        forward, or mid-backward exception: per-iteration trackers cleared,
+        params resharded, states IDLE, and a subsequent forward-backward
+        succeeds.
         """
         self.run_subtests(
             {
@@ -1750,22 +1606,12 @@ class TestFullyShard1DTrainingCompose(FSDPTest):
 
     @skip_if_lt_x_gpu(2, allow_cpu=True)
     def test_double_partial_forward_then_backward(self):
-        """
-        Regression test for TODO fragility #2.2 in the partial-group
-        forward review: two ``model(x, skip_head=True)`` calls before
-        backward. The concern was that the second partial forward's
-        inner-group ``_training_state`` would still be FORWARD from the
-        first, causing ``group_first_in_pass`` to be False and skipping
-        the post_backward autograd node registration for the second
-        forward.
-
-        This does not actually occur on HEAD because
-        ``_force_complete_incomplete_states`` at root post-forward calls
-        ``post_forward`` on every inner param group, which resets the
-        group's ``_training_state`` to IDLE. The second partial forward
-        sees IDLE and registers its autograd node normally. If that
-        registration were missed, the combined backward would hang on a
-        reduce-scatter that never arrives.
+        """Two back-to-back ``model(x, skip_head=True)`` calls before
+        backward: both partial forwards must re-register their post_backward
+        autograd node. ``_force_complete_incomplete_states`` resets the
+        inner group's ``_training_state`` to IDLE so the second forward
+        sees ``group_first_in_pass=True`` and registers normally; without
+        that reset, backward would hang on a missing reduce-scatter.
         """
         dim, vocab_size = 32, 128
 
@@ -2447,29 +2293,13 @@ class TestFullyShardNDTraining(FSDPTest):
 
     @skip_if_lt_x_gpu(4, allow_cpu=True)
     def test_partial_group_forward_then_standalone_tp(self):
-        """
-        Tests the chunked-loss partial-group-forward pattern combined
-        with Tensor Parallel (FSDP+TP 2D). Head is ColwiseParallel
-        (``weight`` sharded along the vocab/output dim on TP mesh) and
-        then placed in the ``fully_shard([norm, head])`` FSDP group,
-        producing 2D DTensor params (Shard on dp × Shard on tp).
-
-        This mirrors torchtitan's chunked-loss path where the model
-        forward runs norm but skips head, then ``model.head(chunk)`` is
-        called standalone per chunk. The DTensor hidden-state is
-        redistributed to Replicate on the TP mesh before chunking —
-        matching ChunkedCELoss's ``hidden_states.redistribute(...)``.
-
-        Verifies:
-
-        - ``_force_complete_incomplete_states`` correctly completes
-          post-forward for a 2D DTensor group (doesn't crash on TP
-          sharding, correctly registers pre_backward hook on the
-          DTensor output).
-        - Standalone ``model.head(chunk)`` works end-to-end with a
-          Replicate input on TP; backward reduces grads on both FSDP
-          (reduce-scatter) and TP (all-reduce on partial grads).
-        - Per-chunk grads accumulate monotonically.
+        """Chunked-loss partial-group-forward + Tensor Parallel (FSDP+TP 2D).
+        Head is ColwiseParallel inside ``fully_shard([norm, head])`` (2D
+        DTensor params). Mirrors torchtitan's ChunkedCELoss:
+        ``hidden_states.redistribute(...)`` to Replicate, then per-chunk
+        ``model.head(chunk)``. Verifies force-complete handles 2D DTensor
+        groups, standalone chunk calls reduce on both meshes, and per-chunk
+        grads accumulate monotonically.
         """
         # 2D mesh: (dp, tp) with 2 in each dim (need 4 ranks total).
         global_mesh = init_device_mesh(

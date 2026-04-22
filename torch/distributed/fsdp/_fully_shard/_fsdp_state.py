@@ -321,11 +321,6 @@ class FSDPState(_State):
             return output
         for fsdp_param_group in self._fsdp_param_groups:
             output = fsdp_param_group.post_forward(module, input, output)
-        # Register pre_backward before force_complete so the hook attaches
-        # to the pre-cast tensor; force_complete registers inner states'
-        # hooks on the output as it threads through inner casts. Hook
-        # fire order does not matter: each state's pre_backward is
-        # idempotent (guarded by training_state).
         output = self._register_pre_backward_hook(output)
         self._training_state = TrainingState.IDLE
         if self._state_ctx.iter_forward_root is self:
