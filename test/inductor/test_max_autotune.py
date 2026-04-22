@@ -2763,6 +2763,79 @@ class TestMaxAutotune(TestCase):
         finally:
             clear_preprocessing_fns()
 
+    @unittest.skipIf(not torch.version.hip, "ROCM only")
+    @config.patch(
+        {
+            "max_autotune": True,
+            "max_autotune_gemm_backends": "ATEN",
+            "triton.autotune_cublasLt": True,
+            "triton.native_matmul": False,
+        }
+    )
+    def test_rocm_addmm_bias_addmm_candidate_for_1d_bias(self):
+        """
+        ROCm regression test for addmm autotune candidate generation.
+        A 1D bias addmm should still generate both addmm and bias_addmm candidates.
+        """
+
+        bias_meta: dict[str, tuple[tuple[int, ...], tuple[int, ...]]] = {}
+
+        def capture_bias_input_metadata(choices):
+            for choice in choices:
+                if isinstance(choice, ExternKernelCaller) and choice.name in (
+                    "addmm",
+                    "bias_addmm",
+                ):
+                    bias_node = choice.input_nodes[0]
+                    bias_meta[choice.name] = (
+                        tuple(bias_node.get_size()),
+                        tuple(bias_node.get_stride()),
+                    )
+            return choices
+
+        add_preprocessing_fn(capture_bias_input_metadata)
+        try:
+            bias = torch.randn(64, device=GPU_TYPE)
+            mat1 = torch.randn(32, 128, device=GPU_TYPE)
+            mat2 = torch.randn(128, 64, device=GPU_TYPE)
+
+            compiled_fn = torch.compile(
+                lambda b, x, w: torch.addmm(b, x, w),
+                dynamic=False,
+            )
+            out = compiled_fn(bias, mat1, mat2)
+            ref = torch.addmm(bias, mat1, mat2)
+            torch.testing.assert_close(out, ref, atol=1e-2, rtol=1e-2)
+
+            self.assertIn(
+                "addmm", bias_meta, "Expected ATen addmm choice to be generated"
+            )
+            self.assertIn(
+                "bias_addmm",
+                bias_meta,
+                "Expected ATen bias_addmm choice to be generated",
+            )
+
+            addmm_size, _ = bias_meta["addmm"]
+            self.assertEqual(
+                len(addmm_size), 1, f"Expected addmm bias input rank 1, got {addmm_size}"
+            )
+
+            bias_addmm_size, bias_addmm_stride = bias_meta["bias_addmm"]
+            self.assertIn(
+                len(bias_addmm_size),
+                (1, 2),
+                f"Expected bias_addmm rank 1 or 2, got {bias_addmm_size}",
+            )
+            if len(bias_addmm_size) == 2:
+                self.assertEqual(
+                    bias_addmm_stride[0],
+                    0,
+                    f"Expected expanded bias_addmm to have stride[0] == 0, got {bias_addmm_stride}",
+                )
+        finally:
+            clear_preprocessing_fns()
+
     @config.patch(
         {"test_configs.max_mm_configs": 4, "max_autotune_gemm_backends": "ATEN,TRITON"}
     )
